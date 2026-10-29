@@ -32,7 +32,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     const errors = []; page.on('pageerror', e => errors.push(e.message));
     page.on('dialog', dialog => dialog.accept());
     const login = async (page, username, password) => {
-      await page.goto(url); await page.getByLabel('用户名', { exact: true }).fill(username);
+      await page.goto(url + '/admin/'); await page.getByLabel('用户名', { exact: true }).fill(username);
       await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
     };
     const changePassword = async (page, currentPassword, password) => {
@@ -41,6 +41,16 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
       await page.getByLabel('确认新密码', { exact: true }).fill(password);
       await page.getByRole('button', { name: '保存密码' }).click();
     };
+    // The root page links the web entrances; the console is under /admin/.
+    await page.goto(url);
+    await expect(page.getByText('规划中')).toHaveCount(2);
+    await page.getByRole('link', { name: /管理控制台/ }).click();
+    await expect(page.getByRole('heading', { name: '登录服务器' })).toBeVisible();
+    assert.equal(new URL(page.url()).pathname, '/admin/');
+    const bare = await fetch(`${url}/admin`, { redirect: 'manual' });
+    assert.equal(bare.status, 301); assert.equal(bare.headers.get('location'), '/admin/');
+    assert.equal((await fetch(`${url}/admin.js`)).status, 404);
+    report.scenarios.push('root-page-links-to-admin-console');
     await login(page, 'admin', password);
     await expect(page.getByRole('heading', { name: '修改初始密码' })).toBeVisible();
     await changePassword(page, password, 'admin-browser-password');

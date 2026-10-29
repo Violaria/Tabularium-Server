@@ -4,11 +4,14 @@ import type { ServerResponse } from 'node:http';
 export async function loadConsole() {
   const assets = new Map<string, { data: Buffer; type: string }>();
   for (const [path, file, type] of [
-    ['/', 'index.html', 'text/html; charset=utf-8'],
-    ['/admin.js', 'admin.js', 'text/javascript; charset=utf-8'],
-    ['/admin.css', 'admin.css', 'text/css; charset=utf-8'],
+    // The root page lists the web entrances; the console lives under /admin/, with /notes/ and /ai/ reserved.
+    ['/', 'home.html', 'text/html; charset=utf-8'],
+    ['/admin/', 'index.html', 'text/html; charset=utf-8'],
+    ['/admin/admin.js', 'admin.js', 'text/javascript; charset=utf-8'],
+    ['/admin/admin.css', 'admin.css', 'text/css; charset=utf-8'],
   ]) assets.set(path, { data: await readFile(new URL(`./public/${file}`, import.meta.url)), type });
   return (path: string, method: string, res: ServerResponse) => {
+    if (path === '/admin' && ['GET', 'HEAD'].includes(method)) { res.writeHead(301, { location: '/admin/' }); res.end(); return true; }
     const asset = assets.get(path);
     if (!asset || !['GET', 'HEAD'].includes(method)) return false;
     res.writeHead(200, {
