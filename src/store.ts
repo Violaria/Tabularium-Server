@@ -93,6 +93,44 @@ export function openStore(path: string) {
   `);
     version = 4;
   }
-  if (version !== 4) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 4) {
+    // Tabularius: vaults with the AI curator enabled, their search index and conversations.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE tabularius_vaults (
+      vault_id TEXT PRIMARY KEY REFERENCES vaults(id), device_id TEXT NOT NULL REFERENCES devices(id),
+      device_secret BLOB NOT NULL, passphrase BLOB NOT NULL, tweaks TEXT NOT NULL, enabled_at INTEGER NOT NULL,
+      excluded TEXT NOT NULL DEFAULT '', masks TEXT NOT NULL DEFAULT ''
+    ) STRICT;
+    CREATE TABLE tabularius_files (
+      vault_id TEXT NOT NULL, path TEXT NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL, PRIMARY KEY(vault_id, path)
+    ) STRICT;
+    CREATE TABLE tabularius_chunks (
+      id INTEGER PRIMARY KEY, vault_id TEXT NOT NULL, path TEXT NOT NULL, heading TEXT NOT NULL, text TEXT NOT NULL, embedding BLOB
+    ) STRICT;
+    CREATE INDEX tabularius_chunks_path ON tabularius_chunks(vault_id, path);
+    CREATE VIRTUAL TABLE tabularius_fts USING fts5(text, content='tabularius_chunks', content_rowid='id', tokenize='trigram');
+    CREATE TRIGGER tabularius_chunks_ai AFTER INSERT ON tabularius_chunks BEGIN
+      INSERT INTO tabularius_fts(rowid, text) VALUES (new.id, new.heading || char(10) || new.text);
+    END;
+    CREATE TRIGGER tabularius_chunks_ad AFTER DELETE ON tabularius_chunks BEGIN
+      INSERT INTO tabularius_fts(tabularius_fts, rowid, text) VALUES ('delete', old.id, old.heading || char(10) || old.text);
+    END;
+    CREATE TABLE tabularius_conversations (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL REFERENCES vaults(id),
+      title TEXT NOT NULL, system TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX tabularius_conversations_user ON tabularius_conversations(user_id, vault_id, updated_at);
+    CREATE TABLE tabularius_messages (
+      id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES tabularius_conversations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('user','assistant')), parts TEXT NOT NULL, native TEXT, created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX tabularius_messages_conversation ON tabularius_messages(conversation_id, id);
+    PRAGMA user_version=5;
+    COMMIT;
+  `);
+    version = 5;
+  }
+  if (version !== 5) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

@@ -12,7 +12,7 @@ function typeOf(file: string) {
 export async function loadConsole() {
   const assets = new Map<string, { data: Buffer; type: string }>();
   for (const [path, file, type] of [
-    // The root page lists the web entrances; the console lives under /admin/, with /notes/ and /tabularius/ reserved.
+    // The root page lists the web entrances: the console under /admin/, web notes under /notes/, the AI curator under /tabularius/.
     ['/', 'home.html', 'text/html; charset=utf-8'],
     ['/admin/', 'index.html', 'text/html; charset=utf-8'],
     ['/admin/admin.js', 'admin.js', 'text/javascript; charset=utf-8'],
@@ -21,6 +21,10 @@ export async function loadConsole() {
     ['/admin/messages.js', 'messages.js', 'text/javascript; charset=utf-8'],
     ['/admin/admin.css', 'admin.css', 'text/css; charset=utf-8'],
     ['/notes/', 'notes/index.html', 'text/html; charset=utf-8'],
+    ['/tabularius/', 'tabularius.html', 'text/html; charset=utf-8'],
+    ['/tabularius/tabularius.js', 'tabularius.js', 'text/javascript; charset=utf-8'],
+    ['/tabularius/i18n.js', 'i18n.js', 'text/javascript; charset=utf-8'],
+    ['/tabularius/messages.js', 'messages.js', 'text/javascript; charset=utf-8'],
     ['/notes/sw.js', 'notes/sw.js', 'text/javascript; charset=utf-8'],
   ]) assets.set(path, { data: await readFile(new URL(`./public/${file}`, import.meta.url)), type });
   // Hashed bundle files of the web notes page, cached for long.
@@ -28,7 +32,7 @@ export async function loadConsole() {
     assets.set(`/notes/assets/${file}`, { data: await readFile(new URL(`./public/notes/assets/${file}`, import.meta.url)), type: typeOf(file) });
   }
   return (path: string, method: string, res: ServerResponse) => {
-    for (const entrance of ['/admin', '/notes']) {
+    for (const entrance of ['/admin', '/notes', '/tabularius']) {
       if (path === entrance && ['GET', 'HEAD'].includes(method)) { res.writeHead(301, { location: `${entrance}/` }); res.end(); return true; }
     }
     const asset = assets.get(path);

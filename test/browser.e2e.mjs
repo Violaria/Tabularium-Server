@@ -43,7 +43,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     };
     // The root page links the web entrances; the console is under /admin/.
     await page.goto(url);
-    await expect(page.getByText('规划中')).toHaveCount(1);
+    await expect(page.getByRole('link', { name: /Tabularius/ })).toHaveAttribute('href', '/tabularius/');
     await page.getByRole('link', { name: /管理控制台/ }).click();
     await expect(page.getByRole('heading', { name: '登录服务器' })).toBeVisible();
     assert.equal(new URL(page.url()).pathname, '/admin/');

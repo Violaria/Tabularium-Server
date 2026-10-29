@@ -7,12 +7,14 @@ import { loadConsole } from './console-assets.js';
 import { rejection } from './policy.js';
 import { sendMail, type SmtpConfig } from './smtp.js';
 import { Couch, basic, type CouchConfig } from './couch.js';
+import { createTabularius, type TabulariusConfig } from './tabularius/index.js';
 
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
   origins: string[]; sessionMs?: number; deviceMs?: number; streamMs?: number;
   loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number; writeLimit?: number; auditDays?: number;
   smtp?: SmtpConfig; kindleDomains?: string[]; kindleDaily?: number; kindleMaxBytes?: number;
+  tabularius?: TabulariusConfig;
 }
 class HttpError extends Error {
   readonly status: number;
@@ -23,12 +25,12 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
   res.end(JSON.stringify(body));
 }
-async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function body(req: IncomingMessage, limit = 16_384): Promise<Record<string, unknown>> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 16_384) fail(413, 'Request body too large');
+    if (size > limit) fail(413, 'Request body too large');
     chunks.push(chunk);
   }
   let parsed;
@@ -101,6 +103,8 @@ export async function createGateway(config: Config) {
     db.prepare('DELETE FROM kindle_deliveries WHERE occurred_at <= ?').run(Date.now() - (config.auditDays ?? 365) * 86_400_000);
   };
   prune();
+  const tabularius = config.tabularius
+    ? createTabularius(db, couch, config.tabularius, config.deviceMs ?? 2_592_000_000, fail, device => cancel(v => v.device === device)) : undefined;
   const cleanup = setInterval(() => {
     for (const [key, value] of limits) if (value.until <= Date.now()) limits.delete(key);
     prune();
@@ -491,6 +495,46 @@ export async function createGateway(config: Config) {
         return;
       }
     }
+    if (route[0] === 'tabularius') {
+      if (!tabularius) fail(503, 'Tabularius is not configured');
+      const t = tabularius!;
+      if (route.length === 1 && method === 'GET') {
+        const vaults = db.prepare('SELECT * FROM vaults WHERE owner_id=?').all(user.id) as unknown as Vault[];
+        json(res, 200, { provider: t.provider.name, model: t.provider.model, embeddings: t.embeddings, vaults: vaults.map(t.status) }); return;
+      }
+      if (route[1] === 'vaults' && route.length >= 3) {
+        const vault = ownedVault(route[2], user);
+        if (route.length === 3 && method === 'POST') {
+          const data = await body(req, 65_536);
+          if (data.confirm !== true) fail(400, 'Confirmation required');
+          await t.enable(vault, user, field(data, 'passphrase', 1024), field({ excluded: '', ...data }, 'excluded', 20_000, 0), field({ masks: '', ...data }, 'masks', 20_000, 0));
+          audit(user.id, 'tabularius.enable', vault.id);
+          json(res, 201, t.status(vault)); return;
+        }
+        if (route.length === 3 && method === 'DELETE') {
+          await t.disable(vault.id);
+          audit(user.id, 'tabularius.disable', vault.id);
+          json(res, 200, t.status(vault)); return;
+        }
+        if (route.length === 4 && route[3] === 'rules' && method === 'PUT') {
+          const data = await body(req, 65_536);
+          t.rules(vault.id, field(data, 'excluded', 20_000, 0), field(data, 'masks', 20_000, 0));
+          json(res, 200, t.status(vault)); return;
+        }
+        if (route.length === 4 && route[3] === 'conversations' && method === 'GET') { json(res, 200, t.conversations(vault.id, user)); return; }
+        if (route.length === 4 && route[3] === 'conversations' && method === 'POST') {
+          await t.start_conversation(res, vault.id, user, field(await body(req, 65_536), 'message', 8000)); return;
+        }
+      }
+      if (route[1] === 'conversations' && route.length >= 3) {
+        if (route.length === 3 && method === 'GET') { json(res, 200, t.conversation(route[2], user)); return; }
+        if (route.length === 3 && method === 'DELETE') { t.remove_conversation(route[2], user); json(res, 200, { ok: true }); return; }
+        if (route.length === 4 && route[3] === 'messages' && method === 'POST') {
+          await t.continue_conversation(res, route[2], user, field(await body(req, 65_536), 'message', 8000)); return;
+        }
+      }
+      fail(404, 'Route not found');
+    }
     if (route[0] === 'admin') {
       if (user.role !== 'admin') fail(403, 'Administrator required');
       if (path === '/api/v1/admin/audit' && method === 'GET') {
@@ -615,9 +659,13 @@ export async function createGateway(config: Config) {
     server,
     async listen(port = 0, host = '127.0.0.1') {
       server.listen(port, host); await once(server, 'listening');
-      return `http://${host}:${(server.address() as import('node:net').AddressInfo).port}`;
+      const bound = (server.address() as import('node:net').AddressInfo).port;
+      // The hosted clients sync through this gateway like any other device.
+      await tabularius?.start(`http://127.0.0.1:${bound}/sync`);
+      return `http://${host}:${bound}`;
     },
     async close() {
+      await tabularius?.close();
       clearInterval(cleanup); cancel(() => true);
       server.closeAllConnections();
       if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

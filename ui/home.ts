@@ -7,7 +7,7 @@ function render() {
   home.innerHTML = `<div class="brand"><span class="brand-mark">T</span><div><strong>Tabularium</strong><small>${t('home.subtitle')}</small></div></div>
     <a class="card entry" href="/admin/"><h2>${t('home.console')}</h2><p>${t('home.consoleDesc')}</p></a>
     <a class="card entry" href="/notes/"><h2>${t('home.notes')}</h2><p>${t('home.notesDesc')}</p></a>
-    <div class="card entry off"><h2>${t('home.tabularius')} <span class="badge off">${t('home.planned')}</span></h2><p>${t('home.tabulariusDesc')}</p></div>
+    <a class="card entry" href="/tabularius/"><h2>${t('home.tabularius')}</h2><p>${t('home.tabulariusDesc')}</p></a>
     <small>${t('home.syncHint')}</small><div id="language"></div>`;
   document.getElementById('language')!.replaceChildren(languageSelect(render));
 }
