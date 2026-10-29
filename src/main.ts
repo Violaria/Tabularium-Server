@@ -14,6 +14,7 @@ const gateway = await createGateway({
   publicUrl: process.env.TABULARIUM_PUBLIC_URL,
   bootstrapUser: process.env.TABULARIUM_ADMIN_USER,
   bootstrapPassword: process.env.TABULARIUM_ADMIN_PASSWORD,
+  auditDays: process.env.TABULARIUM_AUDIT_DAYS ? Number(process.env.TABULARIUM_AUDIT_DAYS) : undefined,
   origins: (process.env.TABULARIUM_ORIGINS ?? 'app://obsidian.md,capacitor://localhost,http://localhost').split(','),
   couch: {
     url: required('COUCHDB_URL').replace(/\/$/, ''),

@@ -226,8 +226,13 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert(events.some(e => e.action === 'device.revoke' && e.targetId === revoked.id));
       assert(events.some(e => e.action === 'vault.create' && e.targetId === created.id));
       for (const secret of [password, revoked.password, admin, web.csrf]) assert(!JSON.stringify(events).includes(secret));
+      // Records older than the retention period are removed when the gateway starts and on each cleanup run.
+      const store = new DatabaseSync(config.database);
+      store.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now() - 400 * 86_400_000, 'old', 'user.create', 'expired-record');
+      store.close();
       await gateway.close(); gateway = await createGateway(config); url = await gateway.listen();
-      assert((await api('/admin/audit', 'GET', undefined, admin)).some(e => e.targetId === created.id));
+      const retained = await api('/admin/audit', 'GET', undefined, admin);
+      assert(retained.some(e => e.targetId === created.id)); assert(!retained.some(e => e.targetId === 'expired-record'));
       const ended = await fetch(url + '/api/v1/web-session', { method: 'DELETE', headers: { cookie, origin: url, 'x-csrf-token': web.csrf } });
       assert.equal(ended.status, 200); assert.match(ended.headers.get('set-cookie'), /Max-Age=0/); await ended.arrayBuffer();
       const denied = await fetch(url + '/api/v1/web-session', { headers: { cookie } }); assert.equal(denied.status, 401); await denied.arrayBuffer();

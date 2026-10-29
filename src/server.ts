@@ -10,7 +10,7 @@ import { Couch, basic, type CouchConfig } from './couch.js';
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
   origins: string[]; sessionMs?: number; deviceMs?: number; streamMs?: number;
-  loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number; writeLimit?: number;
+  loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number; writeLimit?: number; auditDays?: number;
 }
 class HttpError extends Error {
   readonly status: number;
@@ -87,9 +87,14 @@ export async function createGateway(config: Config) {
   const active = new Map<ClientRequest, { device: string; user: string; vault: string; res: ServerResponse }>();
   const limits = new Map<string, { count: number; until: number }>();
   const stats = { requests: 0, proxyRequests: 0, statuses: {} as Record<string, number> };
+  const prune = () => {
+    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
+    db.prepare('DELETE FROM audit_events WHERE occurred_at <= ?').run(Date.now() - (config.auditDays ?? 365) * 86_400_000);
+  };
+  prune();
   const cleanup = setInterval(() => {
     for (const [key, value] of limits) if (value.until <= Date.now()) limits.delete(key);
-    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
+    prune();
   }, 60_000);
   cleanup.unref();
   try {
