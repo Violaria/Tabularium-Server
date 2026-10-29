@@ -121,10 +121,15 @@ export async function createGateway(config: Config) {
     db.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)')
       .run(Date.now(), actorId, action, targetId);
   }
-  const browserOrigin = (req: IncomingMessage) => config.publicUrl ? new URL(config.publicUrl).origin : `http://${req.headers.host}`;
+  // TABULARIUM_PUBLIC_URL may list several entrances (LAN and public); without it the console is served over plain HTTP.
+  const publicUrls = () => (config.publicUrl ?? '').split(',').map(value => value.trim()).filter(Boolean).map(value => new URL(value));
+  const isBrowserOrigin = (req: IncomingMessage, origin = req.headers.origin) => {
+    const urls = publicUrls();
+    return urls.length ? urls.some(url => url.origin === origin) : origin === `http://${req.headers.host}`;
+  };
   const csrfFor = (hash: string) => digest(`csrf:${hash}`);
   function setSessionCookie(res: ServerResponse, value: string, maxAge: number) {
-    res.setHeader('set-cookie', `tabularium_session=${value}; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${config.publicUrl?.startsWith('https:') ? '; Secure' : ''}`);
+    res.setHeader('set-cookie', `tabularium_session=${value}; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${publicUrls().length && publicUrls().every(url => url.protocol === 'https:') ? '; Secure' : ''}`);
   }
   function session(req: IncomingMessage) {
     const auth = req.headers.authorization;
@@ -137,7 +142,7 @@ export async function createGateway(config: Config) {
       WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0`).get(hash, Date.now()) as unknown as User | undefined;
     if (!user) return fail(401, 'Session expired or invalid');
     if (!bearer && !['GET', 'HEAD'].includes(req.method!)) {
-      if (req.headers.origin !== browserOrigin(req) || req.headers['x-csrf-token'] !== csrfFor(hash)) fail(403, 'Invalid CSRF token or origin');
+      if (!isBrowserOrigin(req) || req.headers['x-csrf-token'] !== csrfFor(hash)) fail(403, 'Invalid CSRF token or origin');
     }
     return { user, hash };
   }
@@ -337,7 +342,7 @@ export async function createGateway(config: Config) {
   async function handle(req: IncomingMessage, res: ServerResponse) {
     const origin = req.headers.origin;
     if (origin) {
-      if (origin !== browserOrigin(req) && !config.origins.includes(origin)) fail(403, 'Origin not allowed');
+      if (!isBrowserOrigin(req, origin) && !config.origins.includes(origin)) fail(403, 'Origin not allowed');
       res.setHeader('access-control-allow-origin', origin);
       res.setHeader('access-control-allow-credentials', 'true');
       res.setHeader('access-control-expose-headers', 'etag, retry-after');
@@ -363,7 +368,7 @@ export async function createGateway(config: Config) {
     const method = req.method;
     if (['/api/v1/sessions', '/api/v1/web-session'].includes(path) && method === 'POST') {
       const web = path === '/api/v1/web-session';
-      if (web && req.headers.origin !== browserOrigin(req)) fail(403, 'Browser login requires same origin');
+      if (web && !isBrowserOrigin(req)) fail(403, 'Browser login requires same origin');
       limit(`login:${req.socket.remoteAddress}`, config.loginLimit ?? 20, res);
       const data = await body(req);
       const username = field(data, 'username'); const password = field(data, 'password', 1024);

@@ -238,7 +238,22 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       const denied = await fetch(url + '/api/v1/web-session', { headers: { cookie } }); assert.equal(denied.status, 401); await denied.arrayBuffer();
       config.publicUrl = 'https://notes.example.test';
       const secure = await fetch(url + '/api/v1/web-session', { method: 'POST', headers: { origin: config.publicUrl, 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'admin-updated-password' }) });
-      assert.equal(secure.status, 201); assert.match(secure.headers.get('set-cookie'), /; Secure/); await secure.arrayBuffer(); delete config.publicUrl;
+      assert.equal(secure.status, 201); assert.match(secure.headers.get('set-cookie'), /; Secure/); await secure.arrayBuffer();
+      // Several entrances: each one can log in and write with its CSRF token, an unlisted one cannot.
+      config.publicUrl = 'https://notes.example.test, https://notes.example.test:10000,https://notes.public.test';
+      for (const origin of ['https://notes.example.test:10000', 'https://notes.public.test']) {
+        const login = await fetch(url + '/api/v1/web-session', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'admin-updated-password' }) });
+        assert.equal(login.status, 201); assert.match(login.headers.get('set-cookie'), /; Secure/);
+        const { csrf } = await login.json(); const cookie = login.headers.get('set-cookie').split(';')[0];
+        const created = await fetch(url + '/api/v1/vaults', { method: 'POST', headers: { origin, cookie, 'x-csrf-token': csrf, 'content-type': 'application/json' }, body: JSON.stringify({ name: `entrance-${new URL(origin).host}` }) });
+        assert.equal(created.status, 201); await created.arrayBuffer();
+      }
+      const unlisted = await fetch(url + '/api/v1/web-session', { method: 'POST', headers: { origin: 'https://other.example.test', 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'admin-updated-password' }) });
+      assert.equal(unlisted.status, 403); await unlisted.arrayBuffer();
+      config.publicUrl = 'https://notes.example.test,http://plain.example.test';
+      const mixed = await fetch(url + '/api/v1/web-session', { method: 'POST', headers: { origin: 'http://plain.example.test', 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'admin-updated-password' }) });
+      assert.equal(mixed.status, 201); assert.doesNotMatch(mixed.headers.get('set-cookie'), /; Secure/); await mixed.arrayBuffer();
+      delete config.publicUrl;
     });
     await t.test('vault rebuild window, database switch, isolation, revert and retired databases', async () => {
       const rv = await api('/vaults', 'POST', { name: 'rebuild-me' }, alice, 201);
