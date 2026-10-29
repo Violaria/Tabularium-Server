@@ -10,6 +10,7 @@ import { request } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { createGateway } from '../dist/server.js';
+import { startSmtpSink, parseMessage } from './smtp-sink.mjs';
 
 const exec = promisify(execFile);
 // Documents written through the gateway must have the encrypted LiveSync chunk shape.
@@ -326,6 +327,68 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       await arm(r2.id, 'rebuild-me', alice, 404);
       const actions = (await api('/admin/audit', 'GET', undefined, admin)).filter(e => e.targetId === rv.id).map(e => e.action);
       for (const action of ['vault.rebuild-arm', 'vault.rebuild-switch', 'vault.rebuild-complete', 'vault.rebuild-revert', 'vault.database-delete', 'vault.rebuild-end']) assert(actions.includes(action), action);
+    });
+    await t.test('send to Kindle through SMTP', async () => {
+      // A minimal EPUB prefix: an uncompressed `mimetype` entry first, as OCF requires.
+      const epub = (tail = 64) => {
+        const header = Buffer.alloc(30); header.writeUInt32LE(0x04034b50, 0); header.writeUInt16LE(10, 4);
+        header.writeUInt32LE(20, 18); header.writeUInt32LE(20, 22); header.writeUInt16LE(8, 26);
+        return Buffer.concat([header, Buffer.from('mimetypeapplication/epub+zip'), randomBytes(tail)]);
+      };
+      const send = (data, name = encodeURIComponent('读书笔记.epub'), credentials = device) => fetch(url + '/api/v1/kindle/send', { method: 'POST',
+        headers: { authorization: basic(credentials), 'content-type': 'application/epub+zip', 'x-tabularium-filename': name }, body: data });
+      const status = async () => (await fetch(url + '/api/v1/kindle/status', { headers: { authorization: basic(device) } })).json();
+      assert.equal((await status()).configured, false);
+      assert.equal((await send(epub())).status, 503);
+
+      const sink = await startSmtpSink();
+      try {
+        config.smtp = { host: '127.0.0.1', port: sink.port, security: 'none', user: sink.user, password: sink.password, from: 'tabularium@example.test' };
+        assert.equal((await send(epub())).status, 409);
+        await api('/me/kindle', 'PUT', { address: 'someone@gmail.com' }, alice, 400);
+        assert.equal((await api('/me/kindle', 'PUT', { address: ' Alice@Kindle.com ' }, alice)).address, 'alice@kindle.com');
+        const settings = await api('/me/kindle', 'GET', undefined, alice);
+        assert.deepEqual([settings.configured, settings.from, settings.domains, settings.sentToday], [true, 'tabularium@example.test', ['kindle.com', 'free.kindle.com'], 0]);
+
+        let response = await send(Buffer.from('plain text, not an EPUB'));
+        assert.equal(response.status, 400); await response.arrayBuffer();
+        const book = epub(4096);
+        response = await send(book);
+        assert.equal(response.status, 200, await response.text());
+        const mail = parseMessage(sink.messages.at(-1).raw);
+        assert.deepEqual([sink.messages.at(-1).to, mail.to, mail.from, mail.subject, mail.fileName, mail.type],
+          ['alice@kindle.com', 'alice@kindle.com', 'tabularium@example.test', '读书笔记', '读书笔记.epub', 'application/epub+zip']);
+        assert(mail.data.equals(book));
+
+        await api('/me/kindle/test', 'POST', {}, alice);
+        const test = parseMessage(sink.messages.at(-1).raw);
+        assert.equal(test.fileName, 'Tabularium test.txt'); assert.match(test.data.toString(), /Tabularium/);
+
+        config.kindleMaxBytes = 2048;
+        response = await send(epub(4096)); assert.equal(response.status, 413); await response.arrayBuffer();
+        delete config.kindleMaxBytes;
+        config.kindleDaily = 2;
+        response = await send(epub()); assert.equal(response.status, 429); await response.arrayBuffer();
+        delete config.kindleDaily;
+
+        sink.rejectRecipients = true;
+        response = await send(epub());
+        assert.equal(response.status, 502); assert.match((await response.json()).error, /550/);
+        sink.rejectRecipients = false;
+        config.smtp = { ...config.smtp, port: 1 };
+        response = await send(epub()); assert.equal(response.status, 502); await response.arrayBuffer();
+
+        const deliveries = await api('/me/kindle/deliveries', 'GET', undefined, alice);
+        assert.deepEqual(deliveries.map(d => d.status), ['failed', 'failed', 'sent', 'sent']);
+        assert.deepEqual([deliveries[3].fileName, deliveries[3].size], ['读书笔记.epub', book.length]);
+        assert(!JSON.stringify(deliveries).includes(book.subarray(60, 80).toString('base64')));
+        assert.deepEqual(await status(), { configured: true, address: 'alice@kindle.com', dailyLimit: 30, remaining: 28 });
+        await api('/me/kindle', 'PUT', { address: '' }, alice);
+        assert.equal((await status()).address, null);
+      } finally {
+        delete config.smtp;
+        await sink.close();
+      }
     });
     await t.test('limits and account disable cancel active replication', async () => {
       const limited = await enroll(vault); config.syncLimit = 1; await sync('', 'GET', undefined, limited); await sync('', 'GET', undefined, limited, 429); config.syncLimit = 2400;

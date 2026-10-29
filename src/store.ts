@@ -14,7 +14,7 @@ export async function verifyPassword(password: string, stored: string) {
   const [salt, hash] = stored.split(':');
   return timingSafeEqual(await derive(password, salt, 64) as Buffer, Buffer.from(hash, 'hex'));
 }
-export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number }
+export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number; kindle_address: string | null }
 export interface Vault {
   id: string; owner_id: string; name: string; database_name: string; state: string;
   rebuild_device: string | null; rebuild_until: number | null; rebuild_started: number | null;
@@ -78,6 +78,21 @@ export function openStore(path: string) {
   `);
     version = 3;
   }
-  if (version !== 3) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 3) {
+    db.exec(`
+    BEGIN;
+    ALTER TABLE users ADD COLUMN kindle_address TEXT;
+    CREATE TABLE kindle_deliveries (
+      id INTEGER PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), device_id TEXT,
+      occurred_at INTEGER NOT NULL, file_name TEXT NOT NULL, size INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('sent','failed')), error TEXT
+    ) STRICT;
+    CREATE INDEX kindle_deliveries_user ON kindle_deliveries(user_id, occurred_at);
+    PRAGMA user_version=4;
+    COMMIT;
+  `);
+    version = 4;
+  }
+  if (version !== 4) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

@@ -5,12 +5,14 @@ import { once } from 'node:events';
 import { openStore, passwordHash, verifyPassword, token, digest, type User, type Vault, type Device } from './store.js';
 import { loadConsole } from './console-assets.js';
 import { rejection } from './policy.js';
+import { sendMail, type SmtpConfig } from './smtp.js';
 import { Couch, basic, type CouchConfig } from './couch.js';
 
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
   origins: string[]; sessionMs?: number; deviceMs?: number; streamMs?: number;
   loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number; writeLimit?: number; auditDays?: number;
+  smtp?: SmtpConfig; kindleDomains?: string[]; kindleDaily?: number; kindleMaxBytes?: number;
 }
 class HttpError extends Error {
   readonly status: number;
@@ -34,7 +36,7 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') fail(400, 'Expected JSON object');
   return parsed;
 }
-async function payload(req: IncomingMessage, limit: number) {
+async function raw(req: IncomingMessage, limit: number) {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -42,9 +44,15 @@ async function payload(req: IncomingMessage, limit: number) {
     if (size > limit) fail(413, 'Request body too large');
     chunks.push(chunk);
   }
-  const data = Buffer.concat(chunks);
+  return Buffer.concat(chunks);
+}
+async function payload(req: IncomingMessage, limit: number) {
+  const data = await raw(req, limit);
   try { return { data, parsed: JSON.parse(data.toString()) }; } catch { return fail(400, 'Invalid JSON'); }
 }
+// An EPUB starts with an uncompressed `mimetype` entry holding application/epub+zip (OCF 3.3 §4.3).
+const isEpub = (data: Buffer) => data.length > 58 && data.readUInt32LE(0) === 0x04034b50 && data.readUInt16LE(28) === 0 &&
+  data.subarray(30, 38).toString() === 'mimetype' && data.subarray(38, 58).toString() === 'application/epub+zip';
 const forbidden = (id: unknown, reason: string) => ({ id, error: 'forbidden', reason });
 function field(data: Record<string, unknown>, key: string, max = 128, min = 1): string {
   const value = data[key];
@@ -90,6 +98,7 @@ export async function createGateway(config: Config) {
   const prune = () => {
     db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
     db.prepare('DELETE FROM audit_events WHERE occurred_at <= ?').run(Date.now() - (config.auditDays ?? 365) * 86_400_000);
+    db.prepare('DELETE FROM kindle_deliveries WHERE occurred_at <= ?').run(Date.now() - (config.auditDays ?? 365) * 86_400_000);
   };
   prune();
   const cleanup = setInterval(() => {
@@ -329,6 +338,38 @@ export async function createGateway(config: Config) {
     }
     return fail(404, 'Route not found');
   }
+  const kindleDomains = () => config.kindleDomains ?? ['kindle.com', 'free.kindle.com'];
+  const kindleDaily = () => config.kindleDaily ?? 30;
+  const sentToday = (userId: string) => (db.prepare("SELECT count(*) AS n FROM kindle_deliveries WHERE user_id=? AND status='sent' AND occurred_at>?")
+    .get(userId, Date.now() - 86_400_000) as { n: number }).n;
+  const ownerOf = (device: Device) => db.prepare('SELECT * FROM users WHERE id=?').get(device.user_id) as unknown as User;
+  function kindleReady(user: User) {
+    if (!config.smtp) fail(503, 'Mail delivery is not configured');
+    if (!user.kindle_address) fail(409, 'Kindle address not set');
+    if (sentToday(user.id) >= kindleDaily()) fail(429, 'Daily Kindle delivery limit reached');
+  }
+  // The attachment is relayed from memory and never stored; the log keeps only name, size and outcome.
+  async function deliver(user: User, deviceId: string | null, attachment: { name: string; type: string; data: Buffer }) {
+    const record = (status: string, error: string | null = null) => db.prepare(
+      'INSERT INTO kindle_deliveries(user_id,device_id,occurred_at,file_name,size,status,error) VALUES(?,?,?,?,?,?,?)',
+    ).run(user.id, deviceId, Date.now(), attachment.name, attachment.data.length, status, error);
+    try {
+      await sendMail(config.smtp!, { to: user.kindle_address!, subject: attachment.name.replace(/\.[^.]+$/, '').slice(0, 60), text: 'Sent by Tabularium.\n', attachment });
+    } catch (error) {
+      const reason = (error as Error).message.slice(0, 300);
+      record('failed', reason);
+      fail(502, `Mail delivery failed: ${reason}`);
+    }
+    record('sent');
+  }
+  function epubName(header: string | string[] | undefined) {
+    let name = 'Tabularium';
+    if (typeof header === 'string') {
+      try { name = decodeURIComponent(header); } catch { fail(400, 'Invalid file name'); }
+    }
+    name = name.replace(/[\x00-\x1f\x7f/\\]/g, ' ').trim().slice(0, 120).replace(/\.epub$/i, '') || 'Tabularium';
+    return `${name}.epub`;
+  }
   const server = createServer((req, res) => {
     stats.requests++;
     res.once('finish', () => { stats.statuses[res.statusCode] = (stats.statuses[res.statusCode] ?? 0) + 1; });
@@ -382,6 +423,23 @@ export async function createGateway(config: Config) {
       } else json(res, 201, { token: accessToken, expiresAt, user: publicUser(user!) });
       return;
     }
+    // Kindle delivery from the plug-in authenticates with the device's sync credentials.
+    if (path === '/api/v1/kindle/status' && method === 'GET') {
+      const owner = ownerOf(deviceAuth(req));
+      json(res, 200, { configured: Boolean(config.smtp), address: owner.kindle_address, dailyLimit: kindleDaily(), remaining: Math.max(0, kindleDaily() - sentToday(owner.id)) });
+      return;
+    }
+    if (path === '/api/v1/kindle/send' && method === 'POST') {
+      const device = deviceAuth(req);
+      limit(`kindle:${device.id}`, 30, res);
+      const owner = ownerOf(device);
+      kindleReady(owner);
+      const name = epubName(req.headers['x-tabularium-filename']);
+      const data = await raw(req, config.kindleMaxBytes ?? 52_428_800);
+      if (!isEpub(data)) fail(400, 'Body is not an EPUB');
+      await deliver(owner, device.id, { name, type: 'application/epub+zip', data });
+      json(res, 200, { ok: true }); return;
+    }
     const { user, hash } = session(req);
     if (path === '/api/v1/web-session' && method === 'GET') { json(res, 200, { user: publicUser(user), csrf: csrfFor(hash) }); return; }
     if (path === '/api/v1/me' && method === 'GET') { json(res, 200, publicUser(user)); return; }
@@ -399,6 +457,30 @@ export async function createGateway(config: Config) {
       db.exec('COMMIT'); json(res, 200, { ok: true }); return;
     }
     if (user.must_change_password) fail(403, 'Change initial password first');
+    if (route[0] === 'me' && route[1] === 'kindle') {
+      if (route.length === 2 && method === 'GET') {
+        json(res, 200, { address: user.kindle_address, configured: Boolean(config.smtp), from: config.smtp?.from ?? null,
+          domains: kindleDomains(), dailyLimit: kindleDaily(), sentToday: sentToday(user.id) });
+        return;
+      }
+      if (route.length === 2 && method === 'PUT') {
+        const address = field(await body(req), 'address', 254, 0).trim().toLowerCase();
+        if (address && !(/^[^\s@]+@[^\s@]+$/.test(address) && kindleDomains().includes(address.split('@')[1]))) fail(400, 'Address must be on an allowed Kindle domain');
+        db.prepare('UPDATE users SET kindle_address=? WHERE id=?').run(address || null, user.id);
+        audit(user.id, 'user.kindle-address', user.id);
+        json(res, 200, { address: address || null }); return;
+      }
+      if (route.length === 3 && route[2] === 'test' && method === 'POST') {
+        kindleReady(user);
+        await deliver(user, null, { name: 'Tabularium test.txt', type: 'text/plain; charset=UTF-8',
+          data: Buffer.from('这是一封来自 Tabularium 的测试邮件。\nThis is a test message from Tabularium.\n') });
+        json(res, 200, { ok: true }); return;
+      }
+      if (route.length === 3 && route[2] === 'deliveries' && method === 'GET') {
+        json(res, 200, db.prepare('SELECT occurred_at AS occurredAt, file_name AS fileName, size, status, error FROM kindle_deliveries WHERE user_id=? ORDER BY id DESC LIMIT 50').all(user.id));
+        return;
+      }
+    }
     if (route[0] === 'admin') {
       if (user.role !== 'admin') fail(403, 'Administrator required');
       if (path === '/api/v1/admin/audit' && method === 'GET') {

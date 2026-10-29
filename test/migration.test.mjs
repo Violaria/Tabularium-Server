@@ -21,12 +21,12 @@ const schema2 = `
   INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(1,'u','device.issue','d');
 `;
 const queries = {
-  users: 'SELECT * FROM users', sessions: 'SELECT * FROM sessions', devices: 'SELECT * FROM devices',
+  users: 'SELECT id,username,password_hash,role,disabled,must_change_password FROM users', sessions: 'SELECT * FROM sessions', devices: 'SELECT * FROM devices',
   vaults: 'SELECT id,owner_id,name,database_name,state FROM vaults',
 };
 
 for (const version of [1, 2]) {
-  test(`schema ${version} migrates to 3 without changing existing records`, async () => {
+  test(`schema ${version} migrates to the current schema without changing existing records`, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'tabularium-upgrade-'));
     const path = join(dir, `schema${version}.sqlite`);
     const legacy = new DatabaseSync(path);
@@ -37,7 +37,9 @@ for (const version of [1, 2]) {
     legacy.close();
     try {
       const upgraded = openStore(path);
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 3);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 4);
+      assert.equal(upgraded.prepare('SELECT kindle_address FROM users').get().kindle_address, null);
+      assert.equal(upgraded.prepare('SELECT count(*) AS n FROM kindle_deliveries').get().n, 0);
       assert.deepEqual(read(upgraded), before);
       assert.deepEqual(upgraded.prepare('SELECT * FROM audit_events').all(), audit);
       assert.deepEqual({ ...upgraded.prepare('SELECT rebuild_device,rebuild_until,rebuild_started FROM vaults').get() },

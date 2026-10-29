@@ -122,6 +122,18 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await expect(alice.getByRole('button', { name: '授权 15 分钟' })).toBeVisible();
     report.scenarios.push('owner-opens-and-ends-rebuild-window');
 
+    await alice.getByRole('button', { name: 'Kindle', exact: true }).click();
+    await expect(alice.getByText('服务器尚未配置发信，请联系管理员。')).toBeVisible();
+    await alice.getByLabel('Kindle 地址', { exact: true }).fill('alice@gmail.com');
+    await alice.getByRole('button', { name: '保存' }).click();
+    await expect(alice.getByText('请填写 Kindle 的推送邮箱地址。')).toBeVisible();
+    await alice.getByLabel('Kindle 地址', { exact: true }).fill('alice@kindle.com');
+    await alice.getByRole('button', { name: '保存' }).click();
+    await expect(alice.getByText('Kindle 地址已保存。')).toBeVisible();
+    assert.equal(await alice.getByLabel('Kindle 地址', { exact: true }).inputValue(), 'alice@kindle.com');
+    assert.equal(await alice.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    report.scenarios.push('owner-sets-kindle-address');
+
     await page.getByRole('button', { name: '笔记库', exact: true }).click();
     await page.getByRole('button', { name: '团队笔记', exact: true }).click();
     await expect(page.getByRole('cell', { name: 'Alice 的电脑', exact: true })).toBeVisible();

@@ -7,6 +7,8 @@ interface Device { id: string; name: string; revoked: number; expiresAt: number 
 interface Session { user: User; csrf: string }
 interface Overview { users: number; activeUsers: number; vaults: number; devices: number; requests: number; proxyRequests: number; activeProxyConnections: number; uptimeSeconds: number }
 interface Usage { diskBytes: number; activeBytes: number; documents: number; deletedDocuments: number }
+interface KindleSettings { address: string | null; configured: boolean; from: string | null; domains: string[]; dailyLimit: number; sentToday: number }
+interface Delivery { occurredAt: number; fileName: string; size: number; status: 'sent' | 'failed'; error: string | null }
 interface Audit { id: number; occurredAt: number; actor: string; action: string; targetId: string }
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let session: Session | undefined;
@@ -22,6 +24,8 @@ const errorMessages: Record<string, string> = {
   'Administrator required': '此操作需要管理员权限。', 'Enabled owner not found': '请选择有效且已启用的账户。',
   'Confirmation does not match the vault name': '输入的名称与笔记库名称不一致。', 'Active device not found': '请选择未撤销且未过期的设备。',
   'A rebuild is already in progress': '已有正在进行的重建，请先结束或撤销。', 'No retired database to revert to': '没有可以切回的旧数据库。',
+  'Address must be on an allowed Kindle domain': '请填写 Kindle 的推送邮箱地址。', 'Mail delivery is not configured': '服务器尚未配置发信。',
+  'Kindle address not set': '请先填写 Kindle 地址。', 'Daily Kindle delivery limit reached': '今天的发送次数已用完。',
 };
 class ApiError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 async function api<T>(path: string, method = 'GET', data?: unknown): Promise<T> {
@@ -70,7 +74,7 @@ function login() {
 function shell(title: string, subtitle: string) {
   const user = session!.user;
   const items = user.mustChangePassword ? [['password', '修改初始密码']] : [
-    ...(user.role === 'admin' ? [['overview', '运行概览']] : []), ['vaults', '笔记库'],
+    ...(user.role === 'admin' ? [['overview', '运行概览']] : []), ['vaults', '笔记库'], ['kindle', 'Kindle'],
     ...(user.role === 'admin' ? [['users', '账户'], ['audit', '操作记录']] : []), ['password', '修改密码'],
   ];
   app.innerHTML = `<aside class="sidebar">${brand}<nav aria-label="管理导航">${items.map(([key, label]) => `<button data-section="${key}" ${key === section ? 'aria-current="page"' : ''}>${label}</button>`).join('')}</nav><div class="account"><div><strong>${escape(user.username)}</strong><br><small>${user.role === 'admin' ? '管理员' : '普通用户'}</small></div><button id="logout">退出登录</button></div></aside><main class="main"><header class="page-head"><div><p class="eyebrow">TABULARIUM / MANAGEMENT</p><h1>${title}</h1><p>${subtitle}</p></div><button id="refresh">刷新</button></header><div id="message" role="status" hidden></div><div id="content"></div></main>`;
@@ -90,6 +94,18 @@ async function render() {
   if (section === 'users') await usersPage();
   if (section === 'vaults') await vaultsPage();
   if (section === 'audit') await auditPage();
+  if (section === 'kindle') await kindlePage();
+}
+async function kindlePage() {
+  shell('Kindle', '在 Obsidian 中把笔记发送到 Kindle 阅读。');
+  const settings = await api<KindleSettings>('/me/kindle');
+  const deliveries = await api<Delivery[]>('/me/kindle/deliveries');
+  const setup = settings.configured
+    ? `<p>在亚马逊「管理内容和设备 → 偏好设置 → 个人文档设置」中，把发件地址 <strong class="mono">${escape(settings.from!)}</strong> 加入「已认可的发件人电子邮箱列表」，再在下面填写你的 Send to Kindle 地址。</p>`
+    : '<div class="notice error">服务器尚未配置发信，请联系管理员。</div>';
+  content(`<section class="card"><h2>Send to Kindle 地址</h2>${setup}<form id="kindle-address" class="inline-form">${input('Kindle 地址', 'address', 'email', `placeholder="name@kindle.com" value="${escape(settings.address ?? '')}"`).replace(' required', '')}<button class="primary" type="submit">保存</button>${settings.address && settings.configured ? '<button type="button" id="kindle-test">发送测试邮件</button>' : ''}</form><small>允许的域名：${settings.domains.map(escape).join('、')}；今天已发送 ${settings.sentToday} / ${settings.dailyLimit}。</small></section><section class="card table-wrap"><h2>发送记录</h2>${deliveries.length ? `<table><thead><tr><th>时间</th><th>文件</th><th>大小</th><th>结果</th></tr></thead><tbody>${deliveries.map(d => `<tr><td>${date(d.occurredAt)}</td><td>${escape(d.fileName)}</td><td>${bytes(d.size)}</td><td>${d.status === 'sent' ? '<span class="badge">已发送</span>' : `<span class="badge warn">失败</span> <small>${escape(d.error ?? '')}</small>`}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">还没有发送记录。</div>'}</section>`);
+  form('kindle-address', async data => { await api('/me/kindle', 'PUT', Object.fromEntries(data)); await kindlePage(); message('Kindle 地址已保存。'); });
+  if (settings.address && settings.configured) button('kindle-test', async () => { await api('/me/kindle/test', 'POST', {}); await kindlePage(); message('测试邮件已发送，几分钟内会出现在 Kindle 的文档中。'); });
 }
 function passwordPage() {
   shell(session!.user.mustChangePassword ? '修改初始密码' : '修改密码', '登录密码用于服务器账户，与笔记解密口令相互独立。');
@@ -190,7 +206,7 @@ function bindRebuild(vault: Vault, devices: Device[]) {
   }));
 }
 const actions: Record<string, string> = { 'user.create': '创建账户', 'user.disable': '禁用账户', 'user.enable': '启用账户', 'user.password-change': '修改密码', 'vault.create': '创建笔记库', 'vault.provision': '完成建库', 'device.issue': '签发设备', 'device.revoke': '撤销设备',
-  'vault.rebuild-arm': '授权重建', 'vault.rebuild-end': '结束重建', 'vault.rebuild-switch': '重建切换数据库', 'vault.rebuild-complete': '重建完成', 'vault.rebuild-revert': '撤销重建', 'vault.database-delete': '删除旧数据库' };
+  'vault.rebuild-arm': '授权重建', 'vault.rebuild-end': '结束重建', 'vault.rebuild-switch': '重建切换数据库', 'vault.rebuild-complete': '重建完成', 'vault.rebuild-revert': '撤销重建', 'vault.database-delete': '删除旧数据库', 'user.kindle-address': '设置 Kindle 地址' };
 async function auditPage() {
   shell('操作记录', '最近 100 条管理动作，记录不包含密码或笔记内容。');
   const events = await api<Audit[]>('/admin/audit');
