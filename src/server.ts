@@ -4,12 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { openStore, passwordHash, verifyPassword, token, digest, type User, type Vault, type Device } from './store.js';
 import { loadConsole } from './console-assets.js';
+import { rejection } from './policy.js';
 import { Couch, basic, type CouchConfig } from './couch.js';
 
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
   origins: string[]; sessionMs?: number; deviceMs?: number; streamMs?: number;
-  loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number;
+  loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number; writeLimit?: number;
 }
 class HttpError extends Error {
   readonly status: number;
@@ -33,6 +34,18 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') fail(400, 'Expected JSON object');
   return parsed;
 }
+async function payload(req: IncomingMessage, limit: number) {
+  let size = 0;
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) fail(413, 'Request body too large');
+    chunks.push(chunk);
+  }
+  const data = Buffer.concat(chunks);
+  try { return { data, parsed: JSON.parse(data.toString()) }; } catch { return fail(400, 'Invalid JSON'); }
+}
+const forbidden = (id: unknown, reason: string) => ({ id, error: 'forbidden', reason });
 function field(data: Record<string, unknown>, key: string, max = 128, min = 1): string {
   const value = data[key];
   if (typeof value !== 'string' || value.length < min || value.length > max) fail(400, `Invalid ${key}`);
@@ -170,6 +183,7 @@ export async function createGateway(config: Config) {
     limit(`device:${device.id}`, config.syncLimit ?? 2400, res);
     let targetPath = '/';
     let completesRebuild = false;
+    let write: { data: Buffer; rejected: { index: number; entry: ReturnType<typeof forbidden> }[]; newEdits: boolean } | undefined;
     if (parts.length > 1 && parts[1]) {
       if (parts[1] !== device.vault_id) fail(403, 'Device belongs to another vault');
       const vault = db.prepare('SELECT * FROM vaults WHERE id=?').get(device.vault_id) as unknown as Vault;
@@ -188,17 +202,49 @@ export async function createGateway(config: Config) {
       }
       if (!replicationAllowed(req.method!, rest)) fail(403, 'Replication route not allowed');
       completesRebuild = rebuilder && Boolean(vault.rebuild_started) && req.method === 'PUT' && rest[0] === '_local' && rest[1] === MILESTONE;
+      // Document writes are read in full and checked against the encrypted document policy before CouchDB sees them.
+      const limit = config.writeLimit ?? 67_108_864;
+      if (req.method === 'PUT' && rest.length === 1) {
+        const { data, parsed } = await payload(req, limit);
+        const reason = rejection({ ...parsed, _id: rest[0] });
+        if (reason) { json(res, 403, forbidden(rest[0], reason)); return; }
+        write = { data, rejected: [], newEdits: true };
+      } else if (req.method === 'POST' && rest.length === 1 && rest[0] === '_bulk_docs') {
+        const { data, parsed } = await payload(req, limit);
+        if (!Array.isArray(parsed?.docs)) fail(400, 'Expected docs array');
+        const rejected = [], accepted = [];
+        for (const [index, doc] of (parsed.docs as Record<string, unknown>[]).entries()) {
+          const reason = typeof doc === 'object' && doc ? rejection(doc) : 'documents must be objects';
+          if (reason) rejected.push({ index, entry: forbidden(doc?._id, reason) }); else accepted.push(doc);
+        }
+        if (rejected.length && !accepted.length) { json(res, 201, rejected.map(r => r.entry)); return; }
+        write = { data: rejected.length ? Buffer.from(JSON.stringify({ ...parsed, docs: accepted })) : data, rejected, newEdits: parsed.new_edits !== false };
+      }
       targetPath = `/${vault.database_name}` + (parts.length > 2 ? `/${rest.map(encodeURIComponent).join('/')}` : '');
     } else if (!['GET', 'HEAD'].includes(req.method!)) fail(403, 'Replication route not allowed');
     const url = new URL(config.couch.url + targetPath + query);
     const outgoing = (url.protocol === 'https:' ? httpsRequest : request)(url, {
-      method: req.method, headers: { ...headers(req.headers), authorization: basic(config.couch.syncUser, config.couch.syncPassword) },
+      method: req.method, headers: { ...headers(req.headers), authorization: basic(config.couch.syncUser, config.couch.syncPassword),
+        ...(write ? { 'content-length': String(write.data.length) } : {}) },
     }, response => {
       // The rebuilding device has written the new milestone, so upstream locking now protects the other devices.
       if (completesRebuild && response.statusCode! < 300) { clearRebuild(device.vault_id); audit(device.user_id, 'vault.rebuild-complete', device.vault_id); }
-      res.writeHead(response.statusCode!, headers(response.headers));
-      response.pipe(res);
       response.on('error', () => res.destroy());
+      if (!write?.rejected.length) { res.writeHead(response.statusCode!, headers(response.headers)); response.pipe(res); return; }
+      // Put the rejected entries back where they were: CouchDB lists every document normally, but only failures with new_edits=false.
+      const chunks: Buffer[] = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => {
+        const results = JSON.parse(Buffer.concat(chunks).toString());
+        if (!Array.isArray(results)) { json(res, response.statusCode!, results); return; }
+        if (!write!.newEdits) { json(res, response.statusCode!, [...results, ...write!.rejected.map(r => r.entry)]); return; }
+        const merged = [];
+        const total = results.length + write!.rejected.length;
+        for (let index = 0, next = 0; index < total; index++) {
+          merged.push(write!.rejected[next]?.index === index ? write!.rejected[next++].entry : results.shift());
+        }
+        json(res, response.statusCode!, merged);
+      });
     });
     stats.proxyRequests++;
     active.set(outgoing, { device: device.id, user: device.user_id, vault: device.vault_id, res });
@@ -210,7 +256,7 @@ export async function createGateway(config: Config) {
       if (res.headersSent) res.destroy(); else json(res, 502, { error: 'CouchDB unavailable' });
     });
     req.on('error', () => outgoing.destroy());
-    req.pipe(outgoing);
+    if (write) outgoing.end(write.data); else req.pipe(outgoing);
   }
   async function rebuild(req: IncomingMessage, vault: Vault, user: User, rest: string[], method: string) {
     if (rest.length === 0 && method === 'POST') {

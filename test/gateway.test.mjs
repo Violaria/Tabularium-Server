@@ -12,6 +12,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { createGateway } from '../dist/server.js';
 
 const exec = promisify(execFile);
+// Documents written through the gateway must have the encrypted LiveSync chunk shape.
+const chunk = data => ({ type: 'leaf', e_: true, data: `%=${data}` });
 const basic = d => `Basic ${Buffer.from(`${d.username}:${d.password}`).toString('base64')}`;
 async function until(check) {
   for (let i = 0; i < 100; i++) { if (await check()) return; await sleep(30); }
@@ -90,13 +92,13 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       db.close();
     });
     await t.test('CouchDB revisions, partial failures, local docs, restricted service user', async () => {
-      const doc = await sync('/document', 'PUT', { value: 'one' }, device, 201);
-      const bulk = await sync('/_bulk_docs', 'POST', { docs: [{ _id: 'document', value: 'conflict' }, { _id: 'created', value: 'ok' }] }, device, 201);
+      const doc = await sync('/h:document', 'PUT', chunk('one'), device, 201);
+      const bulk = await sync('/_bulk_docs', 'POST', { docs: [{ _id: 'h:document', ...chunk('conflict') }, { _id: 'h:created', ...chunk('ok') }] }, device, 201);
       assert.equal(bulk[0].error, 'conflict'); assert.equal(bulk[1].ok, true);
       const revision = '2-01234567890123456789012345678901';
-      await sync('/_bulk_docs', 'POST', { new_edits: false, docs: [{ _id: 'document', _rev: revision,
-        _revisions: { start: 2, ids: [revision.slice(2), doc.rev.slice(2)] }, value: 'replicated' }] }, device, 201);
-      assert.equal((await sync('/document?rev=' + revision)).value, 'replicated');
+      await sync('/_bulk_docs', 'POST', { new_edits: false, docs: [{ _id: 'h:document', _rev: revision,
+        _revisions: { start: 2, ids: [revision.slice(2), doc.rev.slice(2)] }, ...chunk('replicated') }] }, device, 201);
+      assert.equal((await sync('/h:document?rev=' + revision)).data, '%=replicated');
       await sync('/_local/checkpoint', 'PUT', { sequence: 'opaque-sequence' }, device, 201);
       assert.equal((await sync('/_local/checkpoint')).sequence, 'opaque-sequence');
       const response = await fetch(config.couch.url + '/_users/_all_docs', { headers: {
@@ -105,6 +107,47 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert.equal(response.status, 401); await response.arrayBuffer();
       const invalid = await sync('/_bulk_docs', 'POST', { docs: [{ _id: '_design/escape', views: {} }] }, device, 201);
       assert.equal(invalid[0].error, 'forbidden');
+    });
+    await t.test('encrypted document policy', async () => {
+      const meta = { type: 'plain', path: '/\\:encrypted', mtime: 0, ctime: 0, size: 0, children: [], eden: {} };
+      const write = (docs, extra = {}) => sync('/_bulk_docs', 'POST', { docs, ...extra }, device, 201);
+      const accepted = await write([
+        { _id: 'h:policy-chunk', ...chunk('x') },
+        { _id: 'f:policy-meta', ...meta },
+        { _id: 'f:policy-eden', ...meta, eden: { 'h:++encrypted-hkdf': { data: '%=eden', epoch: 999999 } } },
+        { _id: 'f:policy-deleted', ...meta, deleted: true },
+        { _id: 'obsydian_livesync_version', type: 'versioninfo', version: 12, used_features: [] },
+      ]);
+      assert.deepEqual(accepted.map(r => r.ok), [true, true, true, true, true]);
+      const rejected = await write([
+        { _id: 'h:plain', type: 'leaf', data: 'plain text' },
+        { _id: 'h:mixed-ok-1', ...chunk('a') },
+        { _id: 'h:unmarked', type: 'leaf', data: '%=x' },
+        { _id: 'notes/明文.md', type: 'plain', path: 'notes/明文.md', mtime: 1, ctime: 1, size: 3, children: ['h:a'] },
+        { _id: 'f:clear-path', ...meta, path: 'notes/明文.md' },
+        { _id: 'f:times', ...meta, mtime: 1700000000000 },
+        { _id: 'f:size', ...meta, size: 12 },
+        { _id: 'f:children', ...meta, children: ['h:a'] },
+        { _id: 'f:eden', ...meta, eden: { note: { data: 'plain' } } },
+        { _id: 'i:f:hidden', ...meta },
+        { _id: 'notes/秘密.md', _deleted: true },
+        { _id: 'h:attached', ...chunk('a'), _attachments: { 'a.txt': { content_type: 'text/plain', data: 'cGxhaW4=' } } },
+        { _id: 'h:mixed-ok-2', ...chunk('b') },
+      ]);
+      assert.deepEqual(rejected.map(r => r.error ?? r.id), ['forbidden', 'h:mixed-ok-1', ...Array(10).fill('forbidden'), 'h:mixed-ok-2']);
+      assert.equal(rejected[3].id, 'notes/明文.md'); assert.match(rejected[3].reason, /only encrypted/);
+      const replicated = await write([{ _id: 'h:replicated', _rev: '1-abc', ...chunk('r') }, { _id: 'h:replicated-plain', _rev: '1-abc', type: 'leaf', data: 'x' }], { new_edits: false });
+      assert.deepEqual(replicated.map(r => `${r.id}:${r.error}`), ['h:replicated-plain:forbidden']);
+      assert.deepEqual(await write([{ _id: 'h:only-plain', type: 'leaf', data: 'x' }]).then(r => r.map(e => e.error)), ['forbidden']);
+      assert.equal((await sync('/h:put-plain', 'PUT', { type: 'leaf', data: 'x' }, device, 403)).error, 'forbidden');
+      await sync('/h:put-ok', 'PUT', chunk('p'), device, 201);
+      const removed = await sync('/h:policy-chunk', 'GET');
+      await write([{ _id: 'h:policy-chunk', _rev: removed._rev, _deleted: true }]);
+      await sync('/h:policy-chunk', 'GET', undefined, device, 404);
+      const ids = (await sync('/_all_docs')).rows.map(row => row.id);
+      assert.deepEqual(ids.filter(id => !/^(h:|f:|obsydian_livesync_version$)/.test(id) && !['created', 'document'].includes(id)), []);
+      assert(!ids.some(id => ['h:plain', 'h:unmarked', 'h:replicated-plain', 'h:only-plain', 'h:put-plain', 'h:attached'].includes(id)));
+      config.writeLimit = 64; await sync('/h:large', 'PUT', chunk('x'.repeat(100)), device, 413); delete config.writeLimit;
     });
     await t.test('route boundary, raw encoded paths, CORS', async () => {
       for (const path of ['/_security', '/_users', '/_design/escape', '/_config', '/_local/a/b']) await sync(path, 'GET', undefined, device, 403);
@@ -204,7 +247,7 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       const arm = (deviceId, confirm = 'rebuild-me', session = alice, expected = 200) => api(`/vaults/${rv.id}/rebuild`, 'POST', { deviceId, confirm }, session, expected);
       const original = `tab_${rv.id.replaceAll('-', '')}`;
       const milestone = '/_local/obsydian_livesync_milestone';
-      await vs('/doc', 'PUT', { v: 1 }, r1, 201);
+      await vs('/h:doc', 'PUT', chunk('1'), r1, 201);
 
       await vs('/', 'DELETE', undefined, r1, 403); await vs('/', 'PUT', undefined, r1, 403);
       await arm(r1.id, 'wrong', alice, 400);
@@ -225,26 +268,26 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       await ended;
       assert((await api(`/vaults/${rv.id}`, 'GET', undefined, alice)).rebuild.started > 0);
       await vs('/', 'PUT', undefined, r1, 412);
-      await vs('/doc', 'GET', undefined, r2, 409);
-      await vs('/doc', 'GET', undefined, r1, 404);
+      await vs('/h:doc', 'GET', undefined, r2, 409);
+      await vs('/h:doc', 'GET', undefined, r1, 404);
       await vs('/_local/obsidian_livesync_sync_parameters', 'PUT', { salt: 'first-attempt' }, r1, 201);
       await vs('/', 'DELETE', undefined, r1, 200);
       await vs('/_local/obsidian_livesync_sync_parameters', 'PUT', { salt: 'new' }, r1, 201);
       await vs(milestone, 'PUT', { locked: true, accepted_nodes: ['r1'] }, r1, 201);
       assert.equal((await api(`/vaults/${rv.id}`, 'GET', undefined, alice)).rebuild, null);
-      await vs('/doc2', 'PUT', { v: 2 }, r1, 201);
+      await vs('/h:doc2', 'PUT', chunk('2'), r1, 201);
       assert.equal((await vs(milestone, 'GET', undefined, r2)).locked, true);
-      await vs('/doc2', 'GET', undefined, r2);
+      await vs('/h:doc2', 'GET', undefined, r2);
 
       let retired = await api(`/vaults/${rv.id}/databases`, 'GET', undefined, alice);
       assert.equal(retired.length, 2); assert.equal(retired[1].name, original); assert.deepEqual(retired.map(r => r.partial), [true, false]);
       assert.equal(typeof retired[0].diskBytes, 'number');
-      assert.equal((await (await couchAdmin(`/${original}/doc`)).json()).v, 1);
+      assert.equal((await (await couchAdmin(`/${original}/h:doc`)).json()).data, '%=1');
       await api(`/vaults/${rv.id}/databases`, 'GET', undefined, bob, 404);
 
       await api(`/vaults/${rv.id}/rebuild/revert`, 'POST', { confirm: 'wrong' }, alice, 400);
       await api(`/vaults/${rv.id}/rebuild/revert`, 'POST', { confirm: 'rebuild-me' }, alice);
-      assert.equal((await vs('/doc', 'GET', undefined, r2)).v, 1);
+      assert.equal((await vs('/h:doc', 'GET', undefined, r2)).data, '%=1');
       assert.equal((await vs(milestone, 'GET', undefined, r2)).locked, false);
       retired = await api(`/vaults/${rv.id}/databases`, 'GET', undefined, alice);
       assert.equal(retired.length, 2); assert(!retired.some(r => r.name === original));
