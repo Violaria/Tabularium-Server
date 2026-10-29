@@ -1,21 +1,14 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Tabularium</title>
   <link rel="stylesheet" href="/admin/admin.css">
+  <script type="module" src="/admin/home.js"></script>
 </head>
 <body>
-  <div class="login-page">
-    <div class="login-box">
-      <div class="brand"><span class="brand-mark">T</span><div><strong>Tabularium</strong><small>加密笔记同步服务器</small></div></div>
-      <a class="card entry" href="/admin/"><h2>管理控制台</h2><p>账户、笔记库、同步设备与服务器状态。</p></a>
-      <a class="card entry" href="/notes/"><h2>云笔记</h2><p>在浏览器中解密并查看笔记，推送至 Kindle。</p></a>
-      <div class="card entry off"><h2>Tabularius <span class="badge off">规划中</span></h2><p>AI 笔记管理员：检索、问答与整理笔记。</p></div>
-      <small>同步地址为 <span class="mono">/sync</span>，在 Obsidian 的 Tabularium 插件中登录本服务器即可。</small>
-    </div>
-  </div>
+  <div class="login-page"><div class="login-box" id="home"><p class="loading">Tabularium…</p></div></div>
 </body>
 </html>

@@ -27,7 +27,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
       couch: { url: `http://${port}`, adminUser: 'baseline', adminPassword: password, syncUser: 'tabularium', syncPassword: randomBytes(24).toString('hex') } });
     const url = await gateway.listen();
     browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+    const context = await browser.newContext({ viewport: { width: 1366, height: 900 }, locale: 'zh-CN' });
     const page = await context.newPage();
     const errors = []; page.on('pageerror', e => errors.push(e.message));
     page.on('dialog', dialog => dialog.accept());
@@ -51,6 +51,26 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     assert.equal(bare.status, 301); assert.equal(bare.headers.get('location'), '/admin/');
     assert.equal((await fetch(`${url}/admin.js`)).status, 404);
     report.scenarios.push('root-page-links-to-admin-console');
+
+    // Three interface languages: an English browser gets English; a choice of Latin holds for every page.
+    {
+      const la = (await import('../dist/public/messages.js')).catalogues.la;
+      const english = await browser.newContext({ locale: 'en-GB' });
+      const visitor = await english.newPage();
+      await visitor.goto(url);
+      await expect(visitor.getByRole('link', { name: /Server console/ })).toBeVisible();
+      await visitor.getByLabel('Language').selectOption('la');
+      await expect(visitor.getByRole('link', { name: new RegExp(la['home.console']) })).toBeVisible();
+      assert.equal(await visitor.evaluate(() => document.documentElement.lang), 'la');
+      await visitor.goto(url + '/admin/');
+      await expect(visitor.getByRole('heading', { name: la['console.signInTitle'] })).toBeVisible();
+      await visitor.goto(url + '/notes/');
+      await expect(visitor.getByRole('heading', { name: la['notes.heading'] })).toBeVisible();
+      const texts = await visitor.evaluate(() => document.body.innerText);
+      assert(!/\p{Extended_Pictographic}/u.test(texts), 'no emoji on the page');
+      await english.close();
+      report.scenarios.push('three-languages-follow-browser-and-choice');
+    }
     await login(page, 'admin', password);
     await expect(page.getByRole('heading', { name: '修改初始密码' })).toBeVisible();
     await changePassword(page, password, 'admin-browser-password');
@@ -79,7 +99,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await expect(page.locator('#usage-result')).toContainText('数据库磁盘占用');
     report.scenarios.push('admin-creates-account-and-owned-vault-and-reads-usage');
 
-    const aliceContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const aliceContext = await browser.newContext({ viewport: { width: 390, height: 844 }, locale: 'zh-CN' });
     const alice = await aliceContext.newPage(); alice.on('pageerror', e => errors.push(e.message));
     await login(alice, 'alice', 'alice-initial-password');
     await changePassword(alice, 'alice-initial-password', 'alice-browser-password');

@@ -16,6 +16,9 @@ export async function loadConsole() {
     ['/', 'home.html', 'text/html; charset=utf-8'],
     ['/admin/', 'index.html', 'text/html; charset=utf-8'],
     ['/admin/admin.js', 'admin.js', 'text/javascript; charset=utf-8'],
+    ['/admin/home.js', 'home.js', 'text/javascript; charset=utf-8'],
+    ['/admin/i18n.js', 'i18n.js', 'text/javascript; charset=utf-8'],
+    ['/admin/messages.js', 'messages.js', 'text/javascript; charset=utf-8'],
     ['/admin/admin.css', 'admin.css', 'text/css; charset=utf-8'],
     ['/notes/', 'notes/index.html', 'text/html; charset=utf-8'],
   ]) assets.set(path, { data: await readFile(new URL(`./public/${file}`, import.meta.url)), type });

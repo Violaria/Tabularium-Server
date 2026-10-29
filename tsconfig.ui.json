@@ -3,5 +3,5 @@
     "target": "ES2022", "module": "ES2022", "strict": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": [], "outDir": "dist/public"
   },
-  "include": ["ui/admin.ts"]
+  "include": ["ui/admin.ts", "ui/home.ts", "ui/i18n.ts", "ui/messages.ts"]
 }
