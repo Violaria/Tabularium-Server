@@ -7,7 +7,9 @@ COPY apps/server/tsconfig.json ./apps/server/tsconfig.json
 COPY apps/server/src ./apps/server/src
 COPY apps/server/tsconfig.ui.json apps/server/build-ui.mjs ./apps/server/
 COPY apps/server/ui ./apps/server/ui
-RUN npm run build:server
+# The web notes page is built on the host (npm run build:notes), it needs the plug-in's dependencies.
+COPY apps/server/notes-dist ./apps/server/notes-dist
+RUN npm run build --workspace @tabularium/server
 
 FROM node:24.10.0-bookworm-slim@sha256:b8d2197aff9129d16c801a3e3e1b2a873c4946480f5a310f38056df2268c38d9
 WORKDIR /app
