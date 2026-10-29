@@ -4,7 +4,7 @@ import type { ServerResponse } from 'node:http';
 export async function loadConsole() {
   const assets = new Map<string, { data: Buffer; type: string }>();
   for (const [path, file, type] of [
-    // The root page lists the web entrances; the console lives under /admin/, with /notes/ and /ai/ reserved.
+    // The root page lists the web entrances; the console lives under /admin/, with /notes/ and /tabularius/ reserved.
     ['/', 'home.html', 'text/html; charset=utf-8'],
     ['/admin/', 'index.html', 'text/html; charset=utf-8'],
     ['/admin/admin.js', 'admin.js', 'text/javascript; charset=utf-8'],
