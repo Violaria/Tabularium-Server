@@ -9,7 +9,7 @@ import { Couch, basic, type CouchConfig } from './couch.js';
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
   origins: string[]; sessionMs?: number; deviceMs?: number; streamMs?: number;
-  loginLimit?: number; syncLimit?: number; publicUrl?: string;
+  loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number;
 }
 class HttpError extends Error {
   readonly status: number;
@@ -39,7 +39,9 @@ function field(data: Record<string, unknown>, key: string, max = 128, min = 1): 
   return value as string;
 }
 const publicUser = (u: User) => ({ id: u.id, username: u.username, role: u.role, disabled: Boolean(u.disabled), mustChangePassword: Boolean(u.must_change_password) });
-const publicVault = (v: Vault) => ({ id: v.id, name: v.name, state: v.state, syncPath: `/sync/${v.id}` });
+const publicVault = (v: Vault) => ({ id: v.id, name: v.name, state: v.state, syncPath: `/sync/${v.id}`,
+  rebuild: v.rebuild_device ? { deviceId: v.rebuild_device, until: v.rebuild_until, started: v.rebuild_started } : null });
+const MILESTONE = 'obsydian_livesync_milestone';
 const hopHeaders = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
 function headers(source: IncomingMessage['headers']) {
   const blocked = new Set([...hopHeaders, ...(source.connection ?? '').toLowerCase().split(',').map(s => s.trim()),
@@ -69,7 +71,7 @@ export async function createGateway(config: Config) {
   const startedAt = Date.now();
   const db = openStore(config.database);
   const couch = new Couch(config.couch);
-  const active = new Map<ClientRequest, { device: string; user: string; res: ServerResponse }>();
+  const active = new Map<ClientRequest, { device: string; user: string; vault: string; res: ServerResponse }>();
   const limits = new Map<string, { count: number; until: number }>();
   const stats = { requests: 0, proxyRequests: 0, statuses: {} as Record<string, number> };
   const cleanup = setInterval(() => {
@@ -94,7 +96,7 @@ export async function createGateway(config: Config) {
     if (!bucket || bucket.until <= now) { bucket = { count: 0, until: now + 60_000 }; limits.set(key, bucket); }
     if (++bucket.count > max) { res.setHeader('retry-after', Math.ceil((bucket.until - now) / 1000)); fail(429, 'Too many requests'); }
   }
-  function cancel(match: (v: { device: string; user: string }) => boolean) {
+  function cancel(match: (v: { device: string; user: string; vault: string }) => boolean) {
     for (const [request, value] of active) if (match(value)) { request.destroy(); value.res.destroy(); }
   }
   function audit(actorId: string, action: string, targetId: string) {
@@ -150,27 +152,56 @@ export async function createGateway(config: Config) {
     if (!device) return fail(401, 'Device credentials expired or invalid');
     return device;
   }
-  function proxy(req: IncomingMessage, res: ServerResponse, parts: string[], query: string) {
+  const clearRebuild = (vaultId: string) => db.prepare('UPDATE vaults SET rebuild_device=NULL, rebuild_until=NULL, rebuild_started=NULL WHERE id=?').run(vaultId);
+  // Replaces the vault's database during a client-driven LiveSync rebuild; the previous database is kept as retired.
+  async function switchDatabase(vault: Vault, device: Device) {
+    const name = `tab_${vault.id.replaceAll('-', '')}_r${Date.now().toString(36)}`;
+    try { await couch.provision(name); } catch { fail(502, 'Rebuild database could not be created'); }
+    db.exec('BEGIN');
+    // A database replaced while a rebuild was already under way never became complete, so it is not a revert target.
+    db.prepare('INSERT INTO retired_databases VALUES(?,?,?,?)').run(vault.database_name, vault.id, Date.now(), vault.rebuild_started ? 1 : 0);
+    db.prepare('UPDATE vaults SET database_name=?, rebuild_started=? WHERE id=?').run(name, Date.now(), vault.id);
+    audit(device.user_id, 'vault.rebuild-switch', vault.id);
+    db.exec('COMMIT');
+    cancel(v => v.vault === vault.id);
+  }
+  async function proxy(req: IncomingMessage, res: ServerResponse, parts: string[], query: string) {
     const device = deviceAuth(req);
     limit(`device:${device.id}`, config.syncLimit ?? 2400, res);
     let targetPath = '/';
+    let completesRebuild = false;
     if (parts.length > 1 && parts[1]) {
       if (parts[1] !== device.vault_id) fail(403, 'Device belongs to another vault');
       const vault = db.prepare('SELECT * FROM vaults WHERE id=?').get(device.vault_id) as unknown as Vault;
       if (vault.state !== 'ready') fail(409, 'Vault is not ready');
-      if (!replicationAllowed(req.method!, parts.slice(2))) fail(403, 'Replication route not allowed');
-      targetPath = `/${vault.database_name}` + (parts.length > 2 ? `/${parts.slice(2).map(encodeURIComponent).join('/')}` : '');
+      const rest = parts.slice(2);
+      const rebuilder = vault.rebuild_device === device.id;
+      if (vault.rebuild_started && !rebuilder) fail(409, 'Vault is being rebuilt');
+      if ((rest.length === 0 || (rest.length === 1 && !rest[0])) && ['DELETE', 'PUT'].includes(req.method!)) {
+        req.resume();
+        if (req.method === 'PUT' && rebuilder && vault.rebuild_started) {
+          json(res, 412, { error: 'file_exists', reason: 'The database could not be created, the file already exists.' }); return;
+        }
+        if (req.method === 'PUT' || !rebuilder || vault.rebuild_until! <= Date.now()) fail(403, 'Replication route not allowed');
+        await switchDatabase(vault, device);
+        json(res, 200, { ok: true }); return;
+      }
+      if (!replicationAllowed(req.method!, rest)) fail(403, 'Replication route not allowed');
+      completesRebuild = rebuilder && Boolean(vault.rebuild_started) && req.method === 'PUT' && rest[0] === '_local' && rest[1] === MILESTONE;
+      targetPath = `/${vault.database_name}` + (parts.length > 2 ? `/${rest.map(encodeURIComponent).join('/')}` : '');
     } else if (!['GET', 'HEAD'].includes(req.method!)) fail(403, 'Replication route not allowed');
     const url = new URL(config.couch.url + targetPath + query);
     const outgoing = (url.protocol === 'https:' ? httpsRequest : request)(url, {
       method: req.method, headers: { ...headers(req.headers), authorization: basic(config.couch.syncUser, config.couch.syncPassword) },
     }, response => {
+      // The rebuilding device has written the new milestone, so upstream locking now protects the other devices.
+      if (completesRebuild && response.statusCode! < 300) { clearRebuild(device.vault_id); audit(device.user_id, 'vault.rebuild-complete', device.vault_id); }
       res.writeHead(response.statusCode!, headers(response.headers));
       response.pipe(res);
       response.on('error', () => res.destroy());
     });
     stats.proxyRequests++;
-    active.set(outgoing, { device: device.id, user: device.user_id, res });
+    active.set(outgoing, { device: device.id, user: device.user_id, vault: device.vault_id, res });
     const timer = setTimeout(() => { outgoing.destroy(); res.destroy(); }, Math.min(config.streamMs ?? 300_000, device.expires_at - Date.now()));
     timer.unref();
     res.once('close', () => { clearTimeout(timer); active.delete(outgoing); outgoing.destroy(); });
@@ -180,6 +211,67 @@ export async function createGateway(config: Config) {
     });
     req.on('error', () => outgoing.destroy());
     req.pipe(outgoing);
+  }
+  async function rebuild(req: IncomingMessage, vault: Vault, user: User, rest: string[], method: string) {
+    if (rest.length === 0 && method === 'POST') {
+      const data = await body(req);
+      const deviceId = field(data, 'deviceId');
+      if (field(data, 'confirm') !== vault.name) fail(400, 'Confirmation does not match the vault name');
+      if (vault.state !== 'ready') fail(409, 'Vault is not ready');
+      if (vault.rebuild_started) fail(409, 'A rebuild is already in progress');
+      if (!db.prepare('SELECT id FROM devices WHERE id=? AND vault_id=? AND revoked=0 AND expires_at>?').get(deviceId, vault.id, Date.now())) fail(404, 'Active device not found');
+      db.prepare('UPDATE vaults SET rebuild_device=?, rebuild_until=? WHERE id=?').run(deviceId, Date.now() + (config.rebuildMs ?? 900_000), vault.id);
+      audit(user.id, 'vault.rebuild-arm', vault.id);
+    } else if (rest.length === 0 && method === 'DELETE') {
+      clearRebuild(vault.id);
+      audit(user.id, 'vault.rebuild-end', vault.id);
+    } else if (rest.length === 1 && rest[0] === 'revert' && method === 'POST') {
+      if (field(await body(req), 'confirm') !== vault.name) fail(400, 'Confirmation does not match the vault name');
+      const previous = db.prepare('SELECT database_name FROM retired_databases WHERE vault_id=? AND partial=0 ORDER BY retired_at DESC LIMIT 1').get(vault.id) as { database_name: string } | undefined;
+      if (!previous) fail(409, 'No retired database to revert to');
+      cancel(v => v.vault === vault.id);
+      // Undo the lock the rebuilding client placed on the previous database before replacing it.
+      const path = `/${previous!.database_name}/_local/${MILESTONE}`;
+      let response;
+      try { response = await couch.admin(path); } catch { fail(502, 'CouchDB unavailable'); }
+      if (response!.ok) {
+        const milestone = await response!.json() as Record<string, unknown>;
+        response = await couch.admin(path, 'PUT', { ...milestone, locked: false });
+        if (!response.ok) fail(502, 'Could not unlock the previous database');
+      }
+      await response!.arrayBuffer();
+      db.exec('BEGIN');
+      db.prepare('DELETE FROM retired_databases WHERE database_name=?').run(previous!.database_name);
+      db.prepare('INSERT INTO retired_databases VALUES(?,?,?,0)').run(vault.database_name, vault.id, Date.now());
+      db.prepare('UPDATE vaults SET database_name=?, rebuild_device=NULL, rebuild_until=NULL, rebuild_started=NULL WHERE id=?').run(previous!.database_name, vault.id);
+      audit(user.id, 'vault.rebuild-revert', vault.id);
+      db.exec('COMMIT');
+    } else fail(404, 'Route not found');
+    return publicVault(db.prepare('SELECT * FROM vaults WHERE id=?').get(vault.id) as unknown as Vault);
+  }
+  async function retired(vault: Vault, user: User, rest: string[], method: string) {
+    if (rest.length === 0 && method === 'GET') {
+      const rows = db.prepare('SELECT database_name AS name, retired_at AS retiredAt, partial FROM retired_databases WHERE vault_id=? ORDER BY retired_at DESC').all(vault.id) as { name: string; retiredAt: number; partial: number }[];
+      const result = [];
+      for (const row of rows) {
+        let response;
+        try { response = await couch.admin(`/${row.name}`); } catch { fail(502, 'CouchDB unavailable'); }
+        if (!response!.ok) { await response!.arrayBuffer(); fail(502, 'Database usage unavailable'); }
+        result.push({ ...row, partial: Boolean(row.partial), diskBytes: ((await response!.json()) as { sizes: { file: number } }).sizes.file });
+      }
+      return result;
+    }
+    if (rest.length === 1 && method === 'DELETE') {
+      if (!db.prepare('SELECT 1 FROM retired_databases WHERE database_name=? AND vault_id=?').get(rest[0], vault.id)) fail(404, 'Retired database not found');
+      let response;
+      try { response = await couch.admin(`/${rest[0]}`, 'DELETE'); } catch { fail(502, 'CouchDB unavailable'); }
+      await response!.arrayBuffer();
+      if (!response!.ok && response!.status !== 404) fail(502, 'Could not delete the database');
+      db.prepare('DELETE FROM retired_databases WHERE database_name=?').run(rest[0]);
+      audit(user.id, 'vault.database-delete', vault.id);
+      return { ok: true };
+    }
+    return fail(404, 'Route not found');
   }
   const server = createServer((req, res) => {
     stats.requests++;
@@ -214,7 +306,7 @@ export async function createGateway(config: Config) {
       try { const check = await couch.admin('/_up'); ready = check.ok; await check.arrayBuffer(); } catch { /* Upstream failure means not ready. */ }
       json(res, ready ? 200 : 503, { ok: ready }); return;
     }
-    if (parts[0] === 'sync') { proxy(req, res, parts, query.length ? `?${query.join('?')}` : ''); return; }
+    if (parts[0] === 'sync') { await proxy(req, res, parts, query.length ? `?${query.join('?')}` : ''); return; }
     if (parts[0] !== 'api' || parts[1] !== 'v1') fail(404, 'Route not found');
     const route = parts.slice(2);
     const method = req.method;
@@ -274,8 +366,8 @@ export async function createGateway(config: Config) {
           const data = await body(req); const ownerId = field(data, 'ownerId'); const name = field(data, 'name');
           if (!db.prepare('SELECT id FROM users WHERE id=? AND disabled=0').get(ownerId)) fail(404, 'Enabled owner not found');
           const id = randomUUID();
-          const vault: Vault = { id, owner_id: ownerId, name, database_name: `tab_${id.replaceAll('-', '')}`, state: 'provisioning' };
-          db.prepare('INSERT INTO vaults VALUES(?,?,?,?,?)').run(id, ownerId, name, vault.database_name, vault.state);
+          const vault: Vault = { id, owner_id: ownerId, name, database_name: `tab_${id.replaceAll('-', '')}`, state: 'provisioning', rebuild_device: null, rebuild_until: null, rebuild_started: null };
+          db.prepare('INSERT INTO vaults(id,owner_id,name,database_name,state) VALUES(?,?,?,?,?)').run(id, ownerId, name, vault.database_name, vault.state);
           audit(user.id, 'vault.create', id);
           json(res, 201, await provision(vault, user.id)); return;
         }
@@ -338,8 +430,8 @@ export async function createGateway(config: Config) {
       }
       if (route.length === 1 && method === 'POST') {
         const name = field(await body(req), 'name'); const id = randomUUID();
-        const vault: Vault = { id, owner_id: user.id, name, database_name: `tab_${id.replaceAll('-', '')}`, state: 'provisioning' };
-        db.prepare('INSERT INTO vaults VALUES(?,?,?,?,?)').run(id, user.id, name, vault.database_name, vault.state);
+        const vault: Vault = { id, owner_id: user.id, name, database_name: `tab_${id.replaceAll('-', '')}`, state: 'provisioning', rebuild_device: null, rebuild_until: null, rebuild_started: null };
+        db.prepare('INSERT INTO vaults(id,owner_id,name,database_name,state) VALUES(?,?,?,?,?)').run(id, user.id, name, vault.database_name, vault.state);
         audit(user.id, 'vault.create', id);
         json(res, 201, await provision(vault, user.id)); return;
       }
@@ -347,6 +439,8 @@ export async function createGateway(config: Config) {
       const vault = ownedVault(route[1], user);
       if (route.length === 2 && method === 'GET') { json(res, 200, publicVault(vault)); return; }
       if (route.length === 3 && route[2] === 'provision' && method === 'POST') { json(res, 200, await provision(vault, user.id)); return; }
+      if (route[2] === 'rebuild') { json(res, 200, await rebuild(req, vault, user, route.slice(3), method!)); return; }
+      if (route[2] === 'databases') { json(res, 200, await retired(vault, user, route.slice(3), method!)); return; }
       if (route[2] === 'devices') {
         if (route.length === 3 && method === 'GET') {
           json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt FROM devices WHERE vault_id=?').all(vault.id)); return;

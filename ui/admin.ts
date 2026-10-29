@@ -1,6 +1,8 @@
 export {};
 interface User { id: string; username: string; role: 'admin' | 'user'; disabled: boolean; mustChangePassword: boolean }
-interface Vault { id: string; name: string; state: string; syncPath: string; ownerId?: string; owner?: string }
+interface Rebuild { deviceId: string; until: number; started: number | null }
+interface Vault { id: string; name: string; state: string; syncPath: string; ownerId?: string; owner?: string; rebuild: Rebuild | null }
+interface Retired { name: string; retiredAt: number; partial: boolean; diskBytes: number }
 interface Device { id: string; name: string; revoked: number; expiresAt: number }
 interface Session { user: User; csrf: string }
 interface Overview { users: number; activeUsers: number; vaults: number; devices: number; requests: number; proxyRequests: number; activeProxyConnections: number; uptimeSeconds: number }
@@ -18,6 +20,8 @@ const errorMessages: Record<string, string> = {
   'Username already exists': '此用户名已存在。', 'CouchDB unavailable': '笔记存储服务暂时不可用，请检查服务器状态。',
   'Vault usage unavailable': '暂时无法读取此笔记库的用量。', 'Too many requests': '操作过于频繁，请稍后再试。',
   'Administrator required': '此操作需要管理员权限。', 'Enabled owner not found': '请选择有效且已启用的账户。',
+  'Confirmation does not match the vault name': '输入的名称与笔记库名称不一致。', 'Active device not found': '请选择未撤销且未过期的设备。',
+  'A rebuild is already in progress': '已有正在进行的重建，请先结束或撤销。', 'No retired database to revert to': '没有可以切回的旧数据库。',
 };
 class ApiError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 async function api<T>(path: string, method = 'GET', data?: unknown): Promise<T> {
@@ -127,8 +131,10 @@ async function vaultPage(vault: Vault) {
   const owner = !admin || vault.ownerId === session!.user.id;
   const base = `${admin ? '/admin' : ''}/vaults/${vault.id}`;
   const devices = await api<Device[]>(`${base}/devices`);
-  content(`<div class="actions"><button id="back">返回笔记库</button></div><br><section class="card"><h2>连接信息</h2><dl class="details"><dt>服务地址</dt><dd>${escape(location.origin)}/sync</dd><dt>笔记库 ID</dt><dd class="mono">${vault.id}</dd><dt>状态</dt><dd>${badge(vault.state)}</dd></dl><p>在兼容客户端中启用加密，各设备使用相同的笔记解密口令。</p>${vault.state !== 'ready' ? '<button id="retry">重试创建</button>' : ''}${admin ? '<button id="usage">查看数据库用量</button><div id="usage-result"></div>' : ''}</section>${owner && vault.state === 'ready' ? `<section class="card"><h2>添加同步设备</h2><form id="issue-device" class="inline-form">${input('设备名称', 'name', 'text', 'placeholder="例如：工作电脑" maxlength="128"')}<button class="primary" type="submit">签发凭据</button></form></section>` : '<p>设备凭据由笔记库所有者登录后签发。</p>'}<div id="new-secret"></div><section class="card table-wrap"><h2>同步设备</h2>${devices.length ? `<table><thead><tr><th>设备</th><th>状态</th><th>过期时间</th><th>操作</th></tr></thead><tbody>${devices.map(d => `<tr><td>${escape(d.name)}</td><td><span class="badge ${d.revoked || d.expiresAt <= Date.now() ? 'off' : ''}">${d.revoked ? '已撤销' : d.expiresAt <= Date.now() ? '已过期' : '可访问'}</span></td><td>${date(d.expiresAt)}</td><td>${d.revoked ? '—' : `<button class="danger" id="revoke-${d.id}">撤销</button>`}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">还没有设备。</div>'}</section>`);
+  const rebuildCard = owner && vault.state === 'ready' ? await rebuildSection(vault.id, devices) : '';
+  content(`<div class="actions"><button id="back">返回笔记库</button></div><br><section class="card"><h2>连接信息</h2><dl class="details"><dt>服务地址</dt><dd>${escape(location.origin)}/sync</dd><dt>笔记库 ID</dt><dd class="mono">${vault.id}</dd><dt>状态</dt><dd>${badge(vault.state)}</dd></dl><p>在兼容客户端中启用加密，各设备使用相同的笔记解密口令。</p>${vault.state !== 'ready' ? '<button id="retry">重试创建</button>' : ''}${admin ? '<button id="usage">查看数据库用量</button><div id="usage-result"></div>' : ''}</section>${owner && vault.state === 'ready' ? `<section class="card"><h2>添加同步设备</h2><form id="issue-device" class="inline-form">${input('设备名称', 'name', 'text', 'placeholder="例如：工作电脑" maxlength="128"')}<button class="primary" type="submit">签发凭据</button></form></section>` : '<p>设备凭据由笔记库所有者登录后签发。</p>'}<div id="new-secret"></div><section class="card table-wrap"><h2>同步设备</h2>${devices.length ? `<table><thead><tr><th>设备</th><th>状态</th><th>过期时间</th><th>操作</th></tr></thead><tbody>${devices.map(d => `<tr><td>${escape(d.name)}</td><td><span class="badge ${d.revoked || d.expiresAt <= Date.now() ? 'off' : ''}">${d.revoked ? '已撤销' : d.expiresAt <= Date.now() ? '已过期' : '可访问'}</span></td><td>${date(d.expiresAt)}</td><td>${d.revoked ? '—' : `<button class="danger" id="revoke-${d.id}">撤销</button>`}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">还没有设备。</div>'}</section>${rebuildCard}`);
   button('back', vaultsPage);
+  if (rebuildCard) bindRebuild(vault, devices);
   if (vault.state !== 'ready') button('retry', async () => { await api(`${base}/provision`, 'POST', {}); await vaultsPage(); });
   if (admin) button('usage', async () => {
     const usage = await api<Usage>(`${base}/usage`);
@@ -148,7 +154,43 @@ async function vaultPage(vault: Vault) {
     await api(`${base}/devices/${device.id}`, 'DELETE'); await vaultPage(vault);
   });
 }
-const actions: Record<string, string> = { 'user.create': '创建账户', 'user.disable': '禁用账户', 'user.enable': '启用账户', 'user.password-change': '修改密码', 'vault.create': '创建笔记库', 'vault.provision': '完成建库', 'device.issue': '签发设备', 'device.revoke': '撤销设备' };
+let retired: Retired[] = [];
+let rebuild: Rebuild | null = null;
+async function rebuildSection(vaultId: string, devices: Device[]) {
+  rebuild = (await api<Vault>(`/vaults/${vaultId}`)).rebuild;
+  retired = await api<Retired[]>(`/vaults/${vaultId}/databases`);
+  const active = devices.filter(d => !d.revoked && d.expiresAt > Date.now());
+  const deviceName = (id: string) => escape(devices.find(d => d.id === id)?.name ?? id);
+  const status = rebuild
+    ? `<dl class="details"><dt>授权设备</dt><dd>${deviceName(rebuild.deviceId)}</dd><dt>授权截止</dt><dd>${date(rebuild.until)}</dd><dt>状态</dt><dd>${rebuild.started ? '重建中，其他设备暂停同步' : '等待该设备发起重建'}</dd></dl><button id="rebuild-end">结束重建</button>`
+    : active.length
+      ? `<form id="rebuild-arm" class="inline-form"><label><span id="rebuild-device-label">设备</span><select name="deviceId" aria-labelledby="rebuild-device-label">${active.map(d => `<option value="${d.id}">${escape(d.name)}</option>`).join('')}</select></label>${input('输入笔记库名称确认', 'confirm', 'text', 'autocomplete="off" maxlength="128"')}<button class="primary" type="submit">授权 15 分钟</button></form>`
+      : '<div class="empty">没有可以授权的设备。</div>';
+  const revertTarget = retired.find(r => !r.partial);
+  const list = retired.length ? `<h3>保留的旧数据库</h3><table><thead><tr><th>退役时间</th><th>占用</th><th>内容</th><th>操作</th></tr></thead><tbody>${retired.map((r, i) => `<tr><td>${date(r.retiredAt)}</td><td>${bytes(r.diskBytes)}</td><td>${r.partial ? '未完成的重建' : '完整'}</td><td>${r === revertTarget ? '<button id="rebuild-revert">切回此库</button> ' : ''}<button class="danger" id="retired-${i}">删除</button></td></tr>`).join('')}</tbody></table>` : '';
+  return `<section class="card table-wrap"><h2>重建笔记库</h2><p>更换加密设置或清理远端数据时使用。授权一台设备后，在该设备的客户端中执行重建远端。原数据库会保留，可以切回；重建完成后，其他设备需要重新获取。</p>${status}${list}</section>`;
+}
+function bindRebuild(vault: Vault, devices: Device[]) {
+  const reload = () => vaultPage(vault);
+  if (rebuild) button('rebuild-end', async () => {
+    if (rebuild!.started && !confirm('重建设备尚未完成时结束，其他设备会连接到未完成的数据库。继续？')) return;
+    await api(`/vaults/${vault.id}/rebuild`, 'DELETE'); await reload(); message('重建已结束。');
+  });
+  else if (devices.some(d => !d.revoked && d.expiresAt > Date.now())) form('rebuild-arm', async data => {
+    await api(`/vaults/${vault.id}/rebuild`, 'POST', Object.fromEntries(data)); await reload(); message('已授权，请在 15 分钟内在该设备上执行重建远端。');
+  });
+  if (retired.some(r => !r.partial)) button('rebuild-revert', async () => {
+    const name = prompt('切回旧数据库后，已从新数据库重新获取的设备需要再次重新获取。输入笔记库名称确认：');
+    if (name === null) return;
+    await api(`/vaults/${vault.id}/rebuild/revert`, 'POST', { confirm: name }); await reload(); message('已切回旧数据库。');
+  });
+  retired.forEach((r, i) => button(`retired-${i}`, async () => {
+    if (!confirm('删除后无法恢复这个数据库。继续？')) return;
+    await api(`/vaults/${vault.id}/databases/${r.name}`, 'DELETE'); await reload(); message('旧数据库已删除。');
+  }));
+}
+const actions: Record<string, string> = { 'user.create': '创建账户', 'user.disable': '禁用账户', 'user.enable': '启用账户', 'user.password-change': '修改密码', 'vault.create': '创建笔记库', 'vault.provision': '完成建库', 'device.issue': '签发设备', 'device.revoke': '撤销设备',
+  'vault.rebuild-arm': '授权重建', 'vault.rebuild-end': '结束重建', 'vault.rebuild-switch': '重建切换数据库', 'vault.rebuild-complete': '重建完成', 'vault.rebuild-revert': '撤销重建', 'vault.database-delete': '删除旧数据库' };
 async function auditPage() {
   shell('操作记录', '最近 100 条管理动作，记录不包含密码或笔记内容。');
   const events = await api<Audit[]>('/admin/audit');

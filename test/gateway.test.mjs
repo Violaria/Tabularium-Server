@@ -192,6 +192,78 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       const secure = await fetch(url + '/api/v1/web-session', { method: 'POST', headers: { origin: config.publicUrl, 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'admin-updated-password' }) });
       assert.equal(secure.status, 201); assert.match(secure.headers.get('set-cookie'), /; Secure/); await secure.arrayBuffer(); delete config.publicUrl;
     });
+    await t.test('vault rebuild window, database switch, isolation, revert and retired databases', async () => {
+      const rv = await api('/vaults', 'POST', { name: 'rebuild-me' }, alice, 201);
+      const r1 = await enroll(rv), r2 = await enroll(rv);
+      const vs = async (path, method = 'GET', data, credentials = r1, expected = 200) => {
+        const response = await fetch(`${url}/sync/${rv.id}${path}`, { method, headers: { authorization: basic(credentials), 'content-type': 'application/json' },
+          body: data === undefined ? undefined : JSON.stringify(data) });
+        const text = await response.text(); assert.equal(response.status, expected, `${method} ${path}: ${text}`); return text ? JSON.parse(text) : undefined;
+      };
+      const couchAdmin = path => fetch(config.couch.url + path, { headers: { authorization: `Basic ${Buffer.from(`baseline:${password}`).toString('base64')}` } });
+      const arm = (deviceId, confirm = 'rebuild-me', session = alice, expected = 200) => api(`/vaults/${rv.id}/rebuild`, 'POST', { deviceId, confirm }, session, expected);
+      const original = `tab_${rv.id.replaceAll('-', '')}`;
+      const milestone = '/_local/obsydian_livesync_milestone';
+      await vs('/doc', 'PUT', { v: 1 }, r1, 201);
+
+      await vs('/', 'DELETE', undefined, r1, 403); await vs('/', 'PUT', undefined, r1, 403);
+      await arm(r1.id, 'wrong', alice, 400);
+      await arm(r1.id, 'rebuild-me', bob, 404);
+      await arm(device.id, 'rebuild-me', alice, 404);
+      config.rebuildMs = 1; await arm(r1.id); await sleep(5); await vs('/', 'DELETE', undefined, r1, 403); delete config.rebuildMs;
+
+      const armed = await arm(r1.id);
+      assert.equal(armed.rebuild.deviceId, r1.id); assert.equal(armed.rebuild.started, null); assert(armed.rebuild.until > Date.now());
+      await vs('/', 'DELETE', undefined, r2, 403);
+      // The upstream rebuild sequence: lock the old milestone, delete, recreate, write new parameters and milestone.
+      await vs(milestone, 'PUT', { locked: true, accepted_nodes: ['r1'] }, r1, 201);
+      const controller = new AbortController();
+      const live = await fetch(`${url}/sync/${rv.id}/_changes?feed=continuous&since=now&heartbeat=100`, { headers: { authorization: basic(r2) }, signal: controller.signal });
+      const reader = live.body.getReader(); await reader.read();
+      const ended = (async () => { try { while (!(await reader.read()).done) { /* Drain heartbeats. */ } } catch { /* Cancelled by the switch. */ } })();
+      await vs('/', 'DELETE', undefined, r1, 200);
+      await ended;
+      assert((await api(`/vaults/${rv.id}`, 'GET', undefined, alice)).rebuild.started > 0);
+      await vs('/', 'PUT', undefined, r1, 412);
+      await vs('/doc', 'GET', undefined, r2, 409);
+      await vs('/doc', 'GET', undefined, r1, 404);
+      await vs('/_local/obsidian_livesync_sync_parameters', 'PUT', { salt: 'first-attempt' }, r1, 201);
+      await vs('/', 'DELETE', undefined, r1, 200);
+      await vs('/_local/obsidian_livesync_sync_parameters', 'PUT', { salt: 'new' }, r1, 201);
+      await vs(milestone, 'PUT', { locked: true, accepted_nodes: ['r1'] }, r1, 201);
+      assert.equal((await api(`/vaults/${rv.id}`, 'GET', undefined, alice)).rebuild, null);
+      await vs('/doc2', 'PUT', { v: 2 }, r1, 201);
+      assert.equal((await vs(milestone, 'GET', undefined, r2)).locked, true);
+      await vs('/doc2', 'GET', undefined, r2);
+
+      let retired = await api(`/vaults/${rv.id}/databases`, 'GET', undefined, alice);
+      assert.equal(retired.length, 2); assert.equal(retired[1].name, original); assert.deepEqual(retired.map(r => r.partial), [true, false]);
+      assert.equal(typeof retired[0].diskBytes, 'number');
+      assert.equal((await (await couchAdmin(`/${original}/doc`)).json()).v, 1);
+      await api(`/vaults/${rv.id}/databases`, 'GET', undefined, bob, 404);
+
+      await api(`/vaults/${rv.id}/rebuild/revert`, 'POST', { confirm: 'wrong' }, alice, 400);
+      await api(`/vaults/${rv.id}/rebuild/revert`, 'POST', { confirm: 'rebuild-me' }, alice);
+      assert.equal((await vs('/doc', 'GET', undefined, r2)).v, 1);
+      assert.equal((await vs(milestone, 'GET', undefined, r2)).locked, false);
+      retired = await api(`/vaults/${rv.id}/databases`, 'GET', undefined, alice);
+      assert.equal(retired.length, 2); assert(!retired.some(r => r.name === original));
+      await api(`/vaults/${rv.id}/databases/${original}`, 'DELETE', undefined, alice, 404);
+      for (const { name } of retired) {
+        await api(`/vaults/${rv.id}/databases/${name}`, 'DELETE', undefined, alice);
+        assert.equal((await couchAdmin(`/${name}`)).status, 404);
+      }
+      assert.deepEqual(await api(`/vaults/${rv.id}/databases`, 'GET', undefined, alice), []);
+      await api(`/vaults/${rv.id}/rebuild/revert`, 'POST', { confirm: 'rebuild-me' }, alice, 409);
+
+      await arm(r1.id);
+      assert.equal((await api(`/vaults/${rv.id}/rebuild`, 'DELETE', undefined, alice)).rebuild, null);
+      await vs('/', 'DELETE', undefined, r1, 403);
+      await api(`/vaults/${rv.id}/devices/${r2.id}`, 'DELETE', undefined, alice);
+      await arm(r2.id, 'rebuild-me', alice, 404);
+      const actions = (await api('/admin/audit', 'GET', undefined, admin)).filter(e => e.targetId === rv.id).map(e => e.action);
+      for (const action of ['vault.rebuild-arm', 'vault.rebuild-switch', 'vault.rebuild-complete', 'vault.rebuild-revert', 'vault.database-delete', 'vault.rebuild-end']) assert(actions.includes(action), action);
+    });
     await t.test('limits and account disable cancel active replication', async () => {
       const limited = await enroll(vault); config.syncLimit = 1; await sync('', 'GET', undefined, limited); await sync('', 'GET', undefined, limited, 429); config.syncLimit = 2400;
       const connection = await stream();

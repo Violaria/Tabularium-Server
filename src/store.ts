@@ -15,7 +15,10 @@ export async function verifyPassword(password: string, stored: string) {
   return timingSafeEqual(await derive(password, salt, 64) as Buffer, Buffer.from(hash, 'hex'));
 }
 export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number }
-export interface Vault { id: string; owner_id: string; name: string; database_name: string; state: string }
+export interface Vault {
+  id: string; owner_id: string; name: string; database_name: string; state: string;
+  rebuild_device: string | null; rebuild_until: number | null; rebuild_started: number | null;
+}
 export interface Device { id: string; user_id: string; vault_id: string; secret_hash: string; name: string; revoked: number; expires_at: number }
 
 export function openStore(path: string) {
@@ -48,7 +51,8 @@ export function openStore(path: string) {
   `);
     version = 1;
   }
-  if (version === 1) db.exec(`
+  if (version === 1) {
+    db.exec(`
     BEGIN;
     CREATE TABLE audit_events (
       id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, actor_id TEXT NOT NULL,
@@ -57,6 +61,23 @@ export function openStore(path: string) {
     PRAGMA user_version=2;
     COMMIT;
   `);
-  else if (version !== 2) throw new Error(`Unsupported database schema: ${version}`);
+    version = 2;
+  }
+  if (version === 2) {
+    db.exec(`
+    BEGIN;
+    ALTER TABLE vaults ADD COLUMN rebuild_device TEXT REFERENCES devices(id);
+    ALTER TABLE vaults ADD COLUMN rebuild_until INTEGER;
+    ALTER TABLE vaults ADD COLUMN rebuild_started INTEGER;
+    CREATE TABLE retired_databases (
+      database_name TEXT PRIMARY KEY, vault_id TEXT NOT NULL REFERENCES vaults(id), retired_at INTEGER NOT NULL,
+      partial INTEGER NOT NULL
+    ) STRICT;
+    PRAGMA user_version=3;
+    COMMIT;
+  `);
+    version = 3;
+  }
+  if (version !== 3) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

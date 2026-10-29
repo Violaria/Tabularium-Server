@@ -98,6 +98,20 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await expect(alice.getByLabel('设备密码', { exact: true })).toHaveCount(0);
     report.scenarios.push('mobile-owner-issues-one-time-device-and-role-csrf-boundaries');
 
+    await alice.getByRole('button', { name: '团队笔记', exact: true }).click();
+    await alice.getByLabel('设备', { exact: true }).selectOption({ label: 'Alice 的电脑' });
+    await alice.getByLabel('输入笔记库名称确认', { exact: true }).fill('其他名称');
+    await alice.getByRole('button', { name: '授权 15 分钟' }).click();
+    await expect(alice.getByText('输入的名称与笔记库名称不一致。')).toBeVisible();
+    await alice.getByLabel('输入笔记库名称确认', { exact: true }).fill('团队笔记');
+    await alice.getByRole('button', { name: '授权 15 分钟' }).click();
+    await expect(alice.getByText('等待该设备发起重建')).toBeVisible();
+    await alice.screenshot({ path: join(results, 'mobile-rebuild.png'), fullPage: true });
+    assert.equal(await alice.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await alice.getByRole('button', { name: '结束重建' }).click();
+    await expect(alice.getByRole('button', { name: '授权 15 分钟' })).toBeVisible();
+    report.scenarios.push('owner-opens-and-ends-rebuild-window');
+
     await page.getByRole('button', { name: '笔记库', exact: true }).click();
     await page.getByRole('button', { name: '团队笔记', exact: true }).click();
     await expect(page.getByRole('cell', { name: 'Alice 的电脑', exact: true })).toBeVisible();
@@ -107,6 +121,8 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     assert.equal(revoked.status, 401); await revoked.arrayBuffer();
     await page.getByRole('button', { name: '操作记录', exact: true }).click();
     await expect(page.getByRole('cell', { name: '撤销设备', exact: true })).toBeVisible();
+    await expect(page.getByRole('cell', { name: '授权重建', exact: true })).toBeVisible();
+    await expect(page.getByRole('cell', { name: '结束重建', exact: true })).toBeVisible();
     assert.equal((await page.locator('body').innerText()).includes(secret), false);
     report.scenarios.push('admin-revocation-and-audit');
 
