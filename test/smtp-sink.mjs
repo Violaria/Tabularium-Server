@@ -1,8 +1,11 @@
-// A local SMTP receiver for tests: plain connection, AUTH PLAIN, keeps every accepted message.
+// A local SMTP receiver for tests: plain connection, AUTH PLAIN, keeps every accepted message
+// and, with `directory`, also writes it there as N.eml for another process to read.
 import { createServer } from 'node:net';
 import { once } from 'node:events';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
-export async function startSmtpSink({ user = 'sink', password = 'sink-password' } = {}) {
+export async function startSmtpSink({ user = 'sink', password = 'sink-password', directory } = {}) {
   const sink = { messages: [], rejectRecipients: false, port: 0, user, password };
   const server = createServer(socket => {
     let buffer = '', data = null, envelope = {};
@@ -14,6 +17,7 @@ export async function startSmtpSink({ user = 'sink', password = 'sink-password' 
           const end = buffer.indexOf('\r\n.\r\n');
           if (end < 0) return;
           sink.messages.push({ ...envelope, raw: Buffer.from(buffer.slice(0, end + 2), 'latin1') });
+          if (directory) writeFileSync(join(directory, `${sink.messages.length}.eml`), sink.messages.at(-1).raw);
           buffer = buffer.slice(end + 5); data = null; envelope = {};
           socket.write('250 queued\r\n');
           continue;
