@@ -187,6 +187,19 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       }
       config.deviceMs = 5; const expired = await enroll(vault); await sleep(10);
       await sync('', 'GET', undefined, expired, 401); delete config.deviceMs;
+      // Renewal: the secret stays and the expiry restarts from now; revoked or expired devices cannot renew.
+      const renew = credentials => fetch(url + '/api/v1/devices/current/renew', { method: 'POST', headers: { authorization: basic(credentials) } });
+      assert.equal((await renew(expired)).status, 401);
+      config.deviceMs = 60_000; const short = await enroll(vault); delete config.deviceMs;
+      const before = Date.now(); const renewed = await renew(short);
+      assert.equal(renewed.status, 200);
+      const { expiresAt } = await renewed.json();
+      assert(expiresAt >= before + 2_592_000_000 && expiresAt <= Date.now() + 2_592_000_000);
+      assert.equal((await api(`/vaults/${vault.id}/devices`, 'GET', undefined, alice)).find(d => d.id === short.id).expiresAt, expiresAt);
+      await sync('', 'GET', undefined, short);
+      await api(`/vaults/${vault.id}/devices/${short.id}`, 'DELETE', undefined, alice);
+      assert.equal((await renew(short)).status, 401);
+      assert((await api('/admin/audit', 'GET', undefined, admin)).some(e => e.action === 'device.renew' && e.targetId === short.id));
     });
     await t.test('persistent sessions and devices after restart; initial password not reset', async () => {
       await gateway.close(); gateway = await createGateway(config); url = await gateway.listen();

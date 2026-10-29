@@ -423,6 +423,16 @@ export async function createGateway(config: Config) {
       } else json(res, 201, { token: accessToken, expiresAt, user: publicUser(user!) });
       return;
     }
+    // A device in use renews its own credentials: the secret stays, the expiry restarts from now.
+    if (path === '/api/v1/devices/current/renew' && method === 'POST') {
+      const device = deviceAuth(req);
+      limit(`renew:${device.id}`, 10, res);
+      const expiresAt = Date.now() + (config.deviceMs ?? 2_592_000_000);
+      db.prepare('UPDATE devices SET expires_at=? WHERE id=?').run(expiresAt, device.id);
+      audit(device.user_id, 'device.renew', device.id);
+      json(res, 200, { expiresAt });
+      return;
+    }
     // Kindle delivery from the plug-in authenticates with the device's sync credentials.
     if (path === '/api/v1/kindle/status' && method === 'GET') {
       const owner = ownerOf(deviceAuth(req));
