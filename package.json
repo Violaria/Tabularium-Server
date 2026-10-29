@@ -1,0 +1,16 @@
+{
+  "name": "@tabularium/server",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.ui.json && node build-ui.mjs",
+    "check": "tsc --noEmit && tsc -p tsconfig.ui.json --noEmit",
+    "start": "node dist/main.js",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:browser": "npm run build && node --test test/browser.e2e.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.0"
+  }
+}

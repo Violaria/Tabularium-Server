@@ -1,0 +1,385 @@
+import { createServer, request, type IncomingMessage, type ServerResponse, type ClientRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { openStore, passwordHash, verifyPassword, token, digest, type User, type Vault, type Device } from './store.js';
+import { loadConsole } from './console-assets.js';
+import { Couch, basic, type CouchConfig } from './couch.js';
+
+export interface Config {
+  database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
+  origins: string[]; sessionMs?: number; deviceMs?: number; streamMs?: number;
+  loginLimit?: number; syncLimit?: number; publicUrl?: string;
+}
+class HttpError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) { super(message); this.status = status; }
+}
+const fail = (status: number, message: string): never => { throw new HttpError(status, message); };
+function json(res: ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
+  let size = 0;
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 16_384) fail(413, 'Request body too large');
+    chunks.push(chunk);
+  }
+  let parsed;
+  try { parsed = JSON.parse(Buffer.concat(chunks).toString()); } catch { fail(400, 'Invalid JSON'); }
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') fail(400, 'Expected JSON object');
+  return parsed;
+}
+function field(data: Record<string, unknown>, key: string, max = 128, min = 1): string {
+  const value = data[key];
+  if (typeof value !== 'string' || value.length < min || value.length > max) fail(400, `Invalid ${key}`);
+  return value as string;
+}
+const publicUser = (u: User) => ({ id: u.id, username: u.username, role: u.role, disabled: Boolean(u.disabled), mustChangePassword: Boolean(u.must_change_password) });
+const publicVault = (v: Vault) => ({ id: v.id, name: v.name, state: v.state, syncPath: `/sync/${v.id}` });
+const hopHeaders = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
+function headers(source: IncomingMessage['headers']) {
+  const blocked = new Set([...hopHeaders, ...(source.connection ?? '').toLowerCase().split(',').map(s => s.trim()),
+    'authorization', 'cookie', 'set-cookie', 'host', 'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-auth-couchdb-username', 'x-auth-couchdb-roles', 'x-auth-couchdb-token']);
+  return Object.fromEntries(Object.entries(source).filter(([key]) => !blocked.has(key) && !key.startsWith('access-control-')));
+}
+function segments(path: string) {
+  return path.split('/').filter((_, i) => i > 0).map(part => {
+    let value;
+    try { value = decodeURIComponent(part); } catch { return fail(400, 'Invalid path encoding'); }
+    if (value === '.' || value === '..' || /[%\\\x00-\x1f\x7f]/.test(value)) fail(400, 'Invalid path');
+    return value;
+  });
+}
+function replicationAllowed(method: string, parts: string[]) {
+  if (parts.length === 0 || (parts.length === 1 && !parts[0])) return ['GET', 'HEAD'].includes(method);
+  const [id] = parts;
+  if (parts.length === 2 && id === '_local' && parts[1]) return ['GET', 'PUT', 'HEAD'].includes(method);
+  if (parts.length !== 1) return false;
+  if (['_changes', '_all_docs'].includes(id)) return ['GET', 'POST'].includes(method);
+  if (['_revs_diff', '_bulk_get', '_bulk_docs', '_find'].includes(id)) return method === 'POST';
+  return Boolean(id) && !id.startsWith('_') && ['GET', 'PUT', 'HEAD'].includes(method);
+}
+
+export async function createGateway(config: Config) {
+  const serveConsole = await loadConsole();
+  const startedAt = Date.now();
+  const db = openStore(config.database);
+  const couch = new Couch(config.couch);
+  const active = new Map<ClientRequest, { device: string; user: string; res: ServerResponse }>();
+  const limits = new Map<string, { count: number; until: number }>();
+  const stats = { requests: 0, proxyRequests: 0, statuses: {} as Record<string, number> };
+  const cleanup = setInterval(() => {
+    for (const [key, value] of limits) if (value.until <= Date.now()) limits.delete(key);
+    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
+  }, 60_000);
+  cleanup.unref();
+  try {
+    await couch.prepare();
+    if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
+      if (!config.bootstrapUser || !config.bootstrapPassword || config.bootstrapPassword.length < 12) {
+        throw new Error('First startup requires bootstrap username and password (at least 12 characters)');
+      }
+      db.prepare('INSERT INTO users(id,username,password_hash,role) VALUES(?,?,?,?)')
+        .run(randomUUID(), config.bootstrapUser, await passwordHash(config.bootstrapPassword), 'admin');
+    }
+  } catch (error) { clearInterval(cleanup); db.close(); throw error; }
+
+  function limit(key: string, max: number, res: ServerResponse) {
+    const now = Date.now();
+    let bucket = limits.get(key);
+    if (!bucket || bucket.until <= now) { bucket = { count: 0, until: now + 60_000 }; limits.set(key, bucket); }
+    if (++bucket.count > max) { res.setHeader('retry-after', Math.ceil((bucket.until - now) / 1000)); fail(429, 'Too many requests'); }
+  }
+  function cancel(match: (v: { device: string; user: string }) => boolean) {
+    for (const [request, value] of active) if (match(value)) { request.destroy(); value.res.destroy(); }
+  }
+  function audit(actorId: string, action: string, targetId: string) {
+    db.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)')
+      .run(Date.now(), actorId, action, targetId);
+  }
+  const browserOrigin = (req: IncomingMessage) => config.publicUrl ? new URL(config.publicUrl).origin : `http://${req.headers.host}`;
+  const csrfFor = (hash: string) => digest(`csrf:${hash}`);
+  function setSessionCookie(res: ServerResponse, value: string, maxAge: number) {
+    res.setHeader('set-cookie', `tabularium_session=${value}; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${config.publicUrl?.startsWith('https:') ? '; Secure' : ''}`);
+  }
+  function session(req: IncomingMessage) {
+    const auth = req.headers.authorization;
+    const bearer = auth?.startsWith('Bearer ');
+    const value = bearer ? auth!.slice(7) : req.headers.cookie?.split(';').map(item => item.trim())
+      .find(item => item.startsWith('tabularium_session='))?.slice('tabularium_session='.length);
+    if (!value) return fail(401, 'Session required');
+    const hash = digest(value);
+    const user = db.prepare(`SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id
+      WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0`).get(hash, Date.now()) as unknown as User | undefined;
+    if (!user) return fail(401, 'Session expired or invalid');
+    if (!bearer && !['GET', 'HEAD'].includes(req.method!)) {
+      if (req.headers.origin !== browserOrigin(req) || req.headers['x-csrf-token'] !== csrfFor(hash)) fail(403, 'Invalid CSRF token or origin');
+    }
+    return { user, hash };
+  }
+  function ownedVault(id: string, user: User) {
+    const vault = db.prepare('SELECT * FROM vaults WHERE id=? AND owner_id=?').get(id, user.id) as unknown as Vault | undefined;
+    if (!vault) return fail(404, 'Vault not found');
+    return vault;
+  }
+  async function provision(vault: Vault, actorId: string) {
+    db.prepare("UPDATE vaults SET state='provisioning' WHERE id=?").run(vault.id);
+    try {
+      await couch.provision(vault.database_name);
+      db.prepare("UPDATE vaults SET state='ready' WHERE id=?").run(vault.id);
+      vault.state = 'ready';
+      audit(actorId, 'vault.provision', vault.id);
+    } catch {
+      db.prepare("UPDATE vaults SET state='failed' WHERE id=?").run(vault.id);
+      fail(502, `Vault provisioning failed; retry /api/v1/vaults/${vault.id}/provision`);
+    }
+    return publicVault(vault);
+  }
+  function deviceAuth(req: IncomingMessage) {
+    const auth = req.headers.authorization;
+    if (!auth?.startsWith('Basic ')) return fail(401, 'Device credentials required');
+    const decoded = Buffer.from(auth.slice(6), 'base64').toString();
+    const split = decoded.indexOf(':');
+    const device = db.prepare(`SELECT d.* FROM devices d JOIN users u ON u.id=d.user_id
+      WHERE d.id=? AND d.secret_hash=? AND d.revoked=0 AND d.expires_at>? AND u.disabled=0 AND u.must_change_password=0`)
+      .get(decoded.slice(0, split), digest(decoded.slice(split + 1)), Date.now()) as unknown as Device | undefined;
+    if (!device) return fail(401, 'Device credentials expired or invalid');
+    return device;
+  }
+  function proxy(req: IncomingMessage, res: ServerResponse, parts: string[], query: string) {
+    const device = deviceAuth(req);
+    limit(`device:${device.id}`, config.syncLimit ?? 2400, res);
+    let targetPath = '/';
+    if (parts.length > 1 && parts[1]) {
+      if (parts[1] !== device.vault_id) fail(403, 'Device belongs to another vault');
+      const vault = db.prepare('SELECT * FROM vaults WHERE id=?').get(device.vault_id) as unknown as Vault;
+      if (vault.state !== 'ready') fail(409, 'Vault is not ready');
+      if (!replicationAllowed(req.method!, parts.slice(2))) fail(403, 'Replication route not allowed');
+      targetPath = `/${vault.database_name}` + (parts.length > 2 ? `/${parts.slice(2).map(encodeURIComponent).join('/')}` : '');
+    } else if (!['GET', 'HEAD'].includes(req.method!)) fail(403, 'Replication route not allowed');
+    const url = new URL(config.couch.url + targetPath + query);
+    const outgoing = (url.protocol === 'https:' ? httpsRequest : request)(url, {
+      method: req.method, headers: { ...headers(req.headers), authorization: basic(config.couch.syncUser, config.couch.syncPassword) },
+    }, response => {
+      res.writeHead(response.statusCode!, headers(response.headers));
+      response.pipe(res);
+      response.on('error', () => res.destroy());
+    });
+    stats.proxyRequests++;
+    active.set(outgoing, { device: device.id, user: device.user_id, res });
+    const timer = setTimeout(() => { outgoing.destroy(); res.destroy(); }, Math.min(config.streamMs ?? 300_000, device.expires_at - Date.now()));
+    timer.unref();
+    res.once('close', () => { clearTimeout(timer); active.delete(outgoing); outgoing.destroy(); });
+    outgoing.on('error', () => {
+      if (res.destroyed) return;
+      if (res.headersSent) res.destroy(); else json(res, 502, { error: 'CouchDB unavailable' });
+    });
+    req.on('error', () => outgoing.destroy());
+    req.pipe(outgoing);
+  }
+  const server = createServer((req, res) => {
+    stats.requests++;
+    res.once('finish', () => { stats.statuses[res.statusCode] = (stats.statuses[res.statusCode] ?? 0) + 1; });
+    void handle(req, res).catch(error => {
+      if (res.destroyed) return;
+      if (res.headersSent) { res.destroy(); return; }
+      if (error instanceof HttpError) json(res, error.status, { error: error.message });
+      else { console.error('Gateway request failed:', error.code ?? error.name); json(res, 500, { error: 'Internal server error' }); }
+    });
+  });
+  async function handle(req: IncomingMessage, res: ServerResponse) {
+    const origin = req.headers.origin;
+    if (origin) {
+      if (origin !== browserOrigin(req) && !config.origins.includes(origin)) fail(403, 'Origin not allowed');
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('access-control-allow-credentials', 'true');
+      res.setHeader('access-control-expose-headers', 'etag, retry-after');
+      res.setHeader('vary', 'Origin');
+    }
+    const [path, ...query] = req.url!.split('?');
+    const parts = segments(path);
+    if (serveConsole(path, req.method!, res)) return;
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { 'access-control-allow-methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
+        'access-control-allow-headers': 'authorization, content-type, accept, if-none-match, if-match, x-csrf-token', 'access-control-max-age': '600' });
+      res.end(); return;
+    }
+    if (path === '/health/live' && req.method === 'GET') { json(res, 200, { ok: true }); return; }
+    if (path === '/health/ready' && req.method === 'GET') {
+      let ready = false;
+      try { const check = await couch.admin('/_up'); ready = check.ok; await check.arrayBuffer(); } catch { /* Upstream failure means not ready. */ }
+      json(res, ready ? 200 : 503, { ok: ready }); return;
+    }
+    if (parts[0] === 'sync') { proxy(req, res, parts, query.length ? `?${query.join('?')}` : ''); return; }
+    if (parts[0] !== 'api' || parts[1] !== 'v1') fail(404, 'Route not found');
+    const route = parts.slice(2);
+    const method = req.method;
+    if (['/api/v1/sessions', '/api/v1/web-session'].includes(path) && method === 'POST') {
+      const web = path === '/api/v1/web-session';
+      if (web && req.headers.origin !== browserOrigin(req)) fail(403, 'Browser login requires same origin');
+      limit(`login:${req.socket.remoteAddress}`, config.loginLimit ?? 20, res);
+      const data = await body(req);
+      const username = field(data, 'username'); const password = field(data, 'password', 1024);
+      const user = db.prepare('SELECT * FROM users WHERE username=?').get(username) as unknown as User | undefined;
+      if (!user || user.disabled || !await verifyPassword(password, user.password_hash)) fail(401, 'Invalid username or password');
+      const accessToken = token(); const expiresAt = Date.now() + (config.sessionMs ?? 43_200_000);
+      db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(digest(accessToken), user!.id, expiresAt);
+      if (web) {
+        setSessionCookie(res, accessToken, Math.ceil((expiresAt - Date.now()) / 1000));
+        json(res, 201, { csrf: csrfFor(digest(accessToken)), expiresAt, user: publicUser(user!) });
+      } else json(res, 201, { token: accessToken, expiresAt, user: publicUser(user!) });
+      return;
+    }
+    const { user, hash } = session(req);
+    if (path === '/api/v1/web-session' && method === 'GET') { json(res, 200, { user: publicUser(user), csrf: csrfFor(hash) }); return; }
+    if (path === '/api/v1/me' && method === 'GET') { json(res, 200, publicUser(user)); return; }
+    if (['/api/v1/sessions/current', '/api/v1/web-session'].includes(path) && method === 'DELETE') {
+      db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hash); setSessionCookie(res, '', 0); json(res, 200, { ok: true }); return;
+    }
+    if (path === '/api/v1/me/password' && method === 'PUT') {
+      const data = await body(req);
+      if (!await verifyPassword(field(data, 'currentPassword', 1024), user.password_hash)) fail(401, 'Invalid current password');
+      const replacement = await passwordHash(field(data, 'password', 1024, 12));
+      db.exec('BEGIN');
+      db.prepare('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?').run(replacement, user.id);
+      db.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>?').run(user.id, hash);
+      audit(user.id, 'user.password-change', user.id);
+      db.exec('COMMIT'); json(res, 200, { ok: true }); return;
+    }
+    if (user.must_change_password) fail(403, 'Change initial password first');
+    if (route[0] === 'admin') {
+      if (user.role !== 'admin') fail(403, 'Administrator required');
+      if (path === '/api/v1/admin/audit' && method === 'GET') {
+        json(res, 200, db.prepare(`SELECT a.id,a.occurred_at AS occurredAt,a.actor_id AS actorId,
+          u.username AS actor,a.action,a.target_id AS targetId FROM audit_events a
+          LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 100`).all()); return;
+      }
+      if (path === '/api/v1/admin/overview' && method === 'GET') {
+        const counts = db.prepare(`SELECT (SELECT count(*) FROM users) AS users,
+          (SELECT count(*) FROM users WHERE disabled=0) AS activeUsers,
+          (SELECT count(*) FROM vaults) AS vaults,
+          (SELECT count(*) FROM devices WHERE revoked=0 AND expires_at>?) AS devices`).get(Date.now());
+        json(res, 200, { ...stats, ...counts, activeProxyConnections: active.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }); return;
+      }
+      if (route[1] === 'vaults') {
+        if (route.length === 2 && method === 'GET') {
+          const rows = db.prepare(`SELECT v.*,u.username AS owner FROM vaults v JOIN users u ON u.id=v.owner_id`).all();
+          json(res, 200, rows.map(row => ({ ...publicVault(row as unknown as Vault), ownerId: row.owner_id, owner: row.owner }))); return;
+        }
+        if (route.length === 2 && method === 'POST') {
+          const data = await body(req); const ownerId = field(data, 'ownerId'); const name = field(data, 'name');
+          if (!db.prepare('SELECT id FROM users WHERE id=? AND disabled=0').get(ownerId)) fail(404, 'Enabled owner not found');
+          const id = randomUUID();
+          const vault: Vault = { id, owner_id: ownerId, name, database_name: `tab_${id.replaceAll('-', '')}`, state: 'provisioning' };
+          db.prepare('INSERT INTO vaults VALUES(?,?,?,?,?)').run(id, ownerId, name, vault.database_name, vault.state);
+          audit(user.id, 'vault.create', id);
+          json(res, 201, await provision(vault, user.id)); return;
+        }
+        if (route.length < 3) fail(404, 'Route not found');
+        const vault = db.prepare('SELECT * FROM vaults WHERE id=?').get(route[2]) as unknown as Vault | undefined;
+        if (!vault) fail(404, 'Vault not found');
+        if (route.length === 4 && route[3] === 'provision' && method === 'POST') {
+          json(res, 200, await provision(vault!, user.id)); return;
+        }
+        if (route.length === 4 && route[3] === 'usage' && method === 'GET') {
+          let response;
+          try { response = await couch.admin(`/${vault!.database_name}`); } catch { fail(502, 'CouchDB unavailable'); }
+          if (!response!.ok) { await response!.arrayBuffer(); fail(502, 'Vault usage unavailable'); }
+          const info = await response!.json() as { sizes: { file: number; active: number; external: number }; doc_count: number; doc_del_count: number };
+          json(res, 200, { diskBytes: info.sizes.file, activeBytes: info.sizes.active, documentBytes: info.sizes.external, documents: info.doc_count, deletedDocuments: info.doc_del_count }); return;
+        }
+        if (route.length === 4 && route[3] === 'devices' && method === 'GET') {
+          json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt FROM devices WHERE vault_id=?').all(vault!.id)); return;
+        }
+        if (route.length === 5 && route[3] === 'devices' && method === 'DELETE') {
+          const result = db.prepare('UPDATE devices SET revoked=1 WHERE id=? AND vault_id=?').run(route[4], vault!.id);
+          if (!result.changes) fail(404, 'Device not found');
+          cancel(v => v.device === route[4]); audit(user.id, 'device.revoke', route[4]);
+          json(res, 200, { ok: true }); return;
+        }
+      }
+      fail(404, 'Route not found');
+    }
+    if (route[0] === 'users' || route[0] === 'metrics') {
+      if (user.role !== 'admin') fail(403, 'Administrator required');
+      if (path === '/api/v1/metrics' && method === 'GET') { json(res, 200, { ...stats, activeProxyConnections: active.size }); return; }
+      if (route[0] === 'users' && route.length === 1 && method === 'GET') {
+        json(res, 200, (db.prepare('SELECT * FROM users').all() as unknown as User[]).map(publicUser)); return;
+      }
+      if (route[0] === 'users' && route.length === 1 && method === 'POST') {
+        const data = await body(req); const username = field(data, 'username');
+        if (db.prepare('SELECT id FROM users WHERE username=?').get(username)) fail(409, 'Username already exists');
+        const id = randomUUID(); const password = await passwordHash(field(data, 'password', 1024, 12));
+        db.prepare('INSERT INTO users(id,username,password_hash,role) VALUES(?,?,?,?)').run(id, username, password, 'user');
+        audit(user.id, 'user.create', id);
+        json(res, 201, { id, username, mustChangePassword: true }); return;
+      }
+      if (route.length === 2 && route[0] === 'users' && method === 'PATCH') {
+        const data = await body(req);
+        if (typeof data.disabled !== 'boolean') fail(400, 'Invalid disabled');
+        if (route[1] === user.id) fail(400, 'Cannot disable current administrator');
+        const result = db.prepare('UPDATE users SET disabled=? WHERE id=?').run(data.disabled ? 1 : 0, route[1]);
+        if (!result.changes) fail(404, 'User not found');
+        if (data.disabled) {
+          db.prepare('DELETE FROM sessions WHERE user_id=?').run(route[1]);
+          cancel(v => v.user === route[1]);
+        }
+        audit(user.id, data.disabled ? 'user.disable' : 'user.enable', route[1]);
+        json(res, 200, { ok: true }); return;
+      }
+    }
+    if (route[0] === 'vaults') {
+      if (route.length === 1 && method === 'GET') {
+        json(res, 200, (db.prepare('SELECT * FROM vaults WHERE owner_id=?').all(user.id) as unknown as Vault[]).map(publicVault)); return;
+      }
+      if (route.length === 1 && method === 'POST') {
+        const name = field(await body(req), 'name'); const id = randomUUID();
+        const vault: Vault = { id, owner_id: user.id, name, database_name: `tab_${id.replaceAll('-', '')}`, state: 'provisioning' };
+        db.prepare('INSERT INTO vaults VALUES(?,?,?,?,?)').run(id, user.id, name, vault.database_name, vault.state);
+        audit(user.id, 'vault.create', id);
+        json(res, 201, await provision(vault, user.id)); return;
+      }
+      if (route.length < 2) fail(404, 'Route not found');
+      const vault = ownedVault(route[1], user);
+      if (route.length === 2 && method === 'GET') { json(res, 200, publicVault(vault)); return; }
+      if (route.length === 3 && route[2] === 'provision' && method === 'POST') { json(res, 200, await provision(vault, user.id)); return; }
+      if (route[2] === 'devices') {
+        if (route.length === 3 && method === 'GET') {
+          json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt FROM devices WHERE vault_id=?').all(vault.id)); return;
+        }
+        if (route.length === 3 && method === 'POST') {
+          if (vault.state !== 'ready') fail(409, 'Vault is not ready');
+          const name = field(await body(req), 'name'); const id = randomUUID(); const secret = token();
+          const expiresAt = Date.now() + (config.deviceMs ?? 2_592_000_000);
+          db.prepare('INSERT INTO devices(id,user_id,vault_id,name,secret_hash,expires_at) VALUES(?,?,?,?,?,?)')
+            .run(id, user.id, vault.id, name, digest(secret), expiresAt);
+          audit(user.id, 'device.issue', id);
+          json(res, 201, { id, username: id, password: secret, expiresAt, syncPath: `/sync/${vault.id}` }); return;
+        }
+        if (route.length === 4 && method === 'DELETE') {
+          const result = db.prepare('UPDATE devices SET revoked=1 WHERE id=? AND vault_id=?').run(route[3], vault.id);
+          if (!result.changes) fail(404, 'Device not found');
+          cancel(v => v.device === route[3]); audit(user.id, 'device.revoke', route[3]); json(res, 200, { ok: true }); return;
+        }
+      }
+    }
+    fail(404, 'Route not found');
+  }
+  return {
+    server,
+    async listen(port = 0, host = '127.0.0.1') {
+      server.listen(port, host); await once(server, 'listening');
+      return `http://${host}:${(server.address() as import('node:net').AddressInfo).port}`;
+    },
+    async close() {
+      clearInterval(cleanup); cancel(() => true);
+      server.closeAllConnections();
+      if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      db.close();
+    },
+  };
+}

@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "ES2022", "strict": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": [], "outDir": "dist/public"
+  },
+  "include": ["ui/admin.ts"]
+}
