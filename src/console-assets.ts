@@ -21,6 +21,7 @@ export async function loadConsole() {
     ['/admin/messages.js', 'messages.js', 'text/javascript; charset=utf-8'],
     ['/admin/admin.css', 'admin.css', 'text/css; charset=utf-8'],
     ['/notes/', 'notes/index.html', 'text/html; charset=utf-8'],
+    ['/notes/sw.js', 'notes/sw.js', 'text/javascript; charset=utf-8'],
   ]) assets.set(path, { data: await readFile(new URL(`./public/${file}`, import.meta.url)), type });
   // Hashed bundle files of the web notes page, cached for long.
   for (const file of await readdir(new URL('./public/notes/assets/', import.meta.url))) {
@@ -35,7 +36,8 @@ export async function loadConsole() {
     const notes = path.startsWith('/notes/');
     res.writeHead(200, {
       'content-type': asset.type, 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
-      'cache-control': path.startsWith('/notes/assets/') ? 'public, max-age=31536000, immutable' : 'no-store',
+      'cache-control': path.startsWith('/notes/assets/') ? 'public, max-age=31536000, immutable' : path === '/notes/sw.js' ? 'no-cache' : 'no-store',
+      ...(path === '/notes/sw.js' ? { 'service-worker-allowed': '/notes/' } : {}),
       // The notes page runs the sync core: it compiles WebAssembly, shows images from blob: URLs and uses inline styles.
       'content-security-policy': notes
         ? "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
