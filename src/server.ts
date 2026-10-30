@@ -554,6 +554,38 @@ export async function createGateway(config: Config) {
       if (route[1] === 'vaults' && route.length === 4 && route[3] === 'proposals' && method === 'GET') {
         json(res, 200, t.proposals(ownedVault(route[2], user).id, user)); return;
       }
+      if (route[1] === 'approvals' && route.length === 3 && method === 'POST') {
+        const data = await body(req);
+        if (typeof data.approved !== 'boolean') fail(400, 'approved must be a boolean');
+        t.decide(route[2], user, data.approved as boolean);
+        json(res, 200, { ok: true }); return;
+      }
+      if (route[1] === 'hosts' || route[1] === 'commands') {
+        if (user.role !== 'admin') fail(403, 'Administrator required');
+        if (route[1] === 'commands' && route.length === 2 && method === 'GET') { json(res, 200, t.commands()); return; }
+        if (route.length === 2 && method === 'GET') { json(res, 200, t.hosts()); return; }
+        if (route.length === 2 && method === 'POST') {
+          const data = await body(req);
+          const port = Number(data.port ?? 22);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) fail(400, 'Invalid port');
+          const host = t.addHost({ name: field(data, 'name', 64), address: field(data, 'address', 255), port, username: field(data, 'username', 64),
+            policy: field(data, 'policy', 16), commands: field({ commands: '', ...data }, 'commands', 20_000, 0) });
+          audit(user.id, 'tabularius.host.add', host.id);
+          json(res, 201, host); return;
+        }
+        if (route.length === 3 && method === 'PUT') {
+          const data = await body(req);
+          const host = t.updateHost(route[2], { policy: field(data, 'policy', 16), commands: field({ commands: '', ...data }, 'commands', 20_000, 0) });
+          audit(user.id, 'tabularius.host.update', route[2]);
+          json(res, 200, host); return;
+        }
+        if (route.length === 3 && method === 'DELETE') { t.removeHost(route[2]); audit(user.id, 'tabularius.host.remove', route[2]); json(res, 200, { ok: true }); return; }
+        if (route.length === 4 && route[3] === 'check' && method === 'POST') {
+          const host = await t.checkHost(route[2]);
+          audit(user.id, 'tabularius.host.check', route[2]);
+          json(res, 200, host); return;
+        }
+      }
       if (route[1] === 'memories') {
         if (route.length === 2 && method === 'GET') { json(res, 200, t.memories(user)); return; }
         if (route.length === 2 && method === 'POST') { json(res, 201, await t.addMemory(user, (await body(req)).content)); return; }

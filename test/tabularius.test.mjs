@@ -215,3 +215,21 @@ test('the vLLM history drops whole exchanges from the start', async () => {
   const some = fit(history, 3500);
   assert.equal(some[1].parts[0].text, 'second');
 });
+
+test('commands are checked by permission mode', async () => {
+  const { refuse } = await import('../dist/tabularius/ssh.js');
+  assert.equal(refuse('read-only', 'systemctl status nginx', ''), undefined);
+  assert.equal(refuse('read-only', 'docker compose logs --tail 50 server', ''), undefined);
+  assert.match(refuse('read-only', 'systemctl restart nginx', ''), /read-only/);
+  for (const command of ['cat a; rm b', 'cat a | sh', 'cat $(id)', 'echo x > /etc/passwd', 'cat `id`', 'ls\nrm x']) assert.match(refuse('read-only', command, ''), /shell operators/, command);
+  assert.match(refuse('read-only', 'find / -name x -delete', ''), /find/);
+  assert.equal(refuse('restricted', 'systemctl restart nginx', 'systemctl restart nginx\ndocker compose -f /opt/x/compose.yaml up -d *'), undefined);
+  assert.equal(refuse('restricted', 'docker compose -f /opt/x/compose.yaml up -d --wait server', 'docker compose -f /opt/x/compose.yaml up -d *'), undefined);
+  assert.match(refuse('restricted', 'systemctl restart sshd', 'systemctl restart nginx'), /allow list/);
+  assert.match(refuse('restricted', 'systemctl restart nginx extra', 'systemctl restart nginx'), /allow list/);
+  assert.equal(refuse('restricted', 'touch /tmp/made', 'touch /tmp/*'), undefined);
+  assert.match(refuse('restricted', 'touch /etc/x', 'touch /tmp/*'), /allow list/);
+  assert.match(refuse('restricted', 'touch /tmp/../etc/x', 'touch /tmp/*'), /allow list/);
+  assert.equal(refuse('full', 'apt-get upgrade -y && reboot', ''), undefined);
+  assert.match(refuse('full', '  ', ''), /empty/);
+});

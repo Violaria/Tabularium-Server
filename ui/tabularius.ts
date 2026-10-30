@@ -16,7 +16,10 @@ interface Hunk { oldStart: number; oldLines: number; newStart: number; newLines:
 interface ProposalFile { op: 'create' | 'edit' | 'move' | 'delete'; path: string; to: string | null; automatic: boolean; binary: boolean; hunks: Hunk[] }
 interface ProposalDetail extends ProposalSummary { vaultId: string; files: ProposalFile[] }
 interface Source { url: string; title: string }
-interface Entry { role: 'user' | 'assistant'; text: string; tools?: ToolUse[]; read?: string[]; sources?: Source[]; error?: string }
+interface Approval { id: string; host: string; command: string; approved?: boolean }
+interface Entry { role: 'user' | 'assistant'; text: string; tools?: ToolUse[]; read?: string[]; sources?: Source[]; approvals?: Approval[]; error?: string }
+interface Host { id: string; name: string; address: string; port: number; username: string; policy: 'allowed' | 'authorize' | 'forbidden'; commands: string; fingerprint: string | null; publicKey: string }
+interface CommandRecord { id: string; host: string | null; user: string | null; command: string; mode: string; status: string; exitCode: number | null; reason: string | null; createdAt: number }
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let session: Session | undefined;
@@ -83,6 +86,8 @@ function toolLabel(tool: ToolUse) {
   if (tool.name === 'read_note') return t('tabularius.toolRead', { path: value('path') });
   if (tool.name === 'list_notes') return t('tabularius.toolList', { folder: value('folder') || '/' });
   if (tool.name === 'search_knowledge_base') return t('tabularius.toolKnowledge', { query: value('question') });
+  if (tool.name === 'list_hosts') return t('tabularius.toolHosts');
+  if (tool.name === 'run_command') return t('tabularius.toolCommand', { host: value('host'), command: value('command') });
   if (tool.name === 'search_memories') return t('tabularius.toolMemorySearch', { query: value('query') });
   if (tool.name === 'add_memory' || tool.name === 'update_memory') return t('tabularius.toolMemoryWrite', { content: value('content') });
   if (tool.name === 'delete_memory') return t('tabularius.toolMemoryDelete');
@@ -103,7 +108,10 @@ function entryHtml(entry: Entry) {
   const web = (entry.sources ?? []).filter(source => /^https?:/.test(source.url));
   const sources = web.length ? `<div class="read"><small>${t('tabularius.sources')}</small><ol class="sources">${web.map(source =>
     `<li><a href="${escape(source.url)}" target="_blank" rel="noopener noreferrer">${escape(source.title || source.url)}</a></li>`).join('')}</ol></div>` : '';
-  return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}<div class="answer">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}${sources}</div>`;
+  const approvals = (entry.approvals ?? []).map(a => `<div class="notice approval"><p>${t('tabularius.approvalAsk', { host: escape(a.host) })}</p><pre class="mono">${escape(a.command)}</pre>
+    ${a.approved === undefined ? `<div class="actions"><button class="primary" data-approve="${escape(a.id)}">${t('tabularius.approve')}</button><button data-deny="${escape(a.id)}">${t('tabularius.deny')}</button></div>`
+      : `<span class="badge${a.approved ? '' : ' warn'}">${a.approved ? t('tabularius.approved') : t('tabularius.denied')}</span>`}</div>`).join('');
+  return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}${approvals}<div class="answer">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}${sources}</div>`;
 }
 
 function login() {
@@ -141,7 +149,7 @@ function shell(content: string) {
   document.getElementById('language')!.replaceChildren(languageSelect(draw));
   document.getElementById('vault')?.addEventListener('change', event => { vaultId = (event.target as HTMLSelectElement).value; view = 'chat'; void run(openVault); });
   document.getElementById('new')?.addEventListener('click', () => { view = 'chat'; conversationId = undefined; entries = []; draw(); });
-  document.getElementById('settings')?.addEventListener('click', () => { view = 'settings'; void run(refresh); });
+  document.getElementById('settings')?.addEventListener('click', () => { view = 'settings'; void run(async () => { await loadHosts(); await refresh(); }); });
   document.getElementById('proposals')?.addEventListener('click', () => void run(showProposals));
   document.getElementById('memories')?.addEventListener('click', () => void run(showMemories));
   for (const item of document.querySelectorAll<HTMLButtonElement>('[data-proposal]')) item.addEventListener('click', () => void run(() => showProposal(item.dataset.proposal!)));
@@ -189,6 +197,22 @@ function statusText(current: VaultStatus) {
   return `${state} <small>${t('tabularius.counts', { notes: current.notes ?? 0, chunks: current.chunks ?? 0 })}</small>${current.indexError ? `<p class="notice error">${t('tabularius.indexError', { error: escape(current.indexError) })}</p>` : ''}`;
 }
 
+let isAdmin = false;
+let hosts: Host[] = [];
+let commandLog: CommandRecord[] = [];
+const policyField = (policy: Host['policy']) => `<label>${t('tabularius.hostPolicy')}<select name="policy">${(['allowed', 'authorize', 'forbidden'] as const).map(p =>
+  `<option value="${p}" ${p === policy ? 'selected' : ''}>${t(`tabularius.policy.${p}`)}</option>`).join('')}</select></label>`;
+function hostHtml(host: Host) {
+  return `<form class="host stack" data-host="${escape(host.id)}"><h3>${escape(host.name)} <small>${escape(`${host.username}@${host.address}:${host.port}`)}</small></h3>
+    <p><small>${host.fingerprint ? t('tabularius.hostFingerprint', { fingerprint: escape(host.fingerprint) }) : t('tabularius.hostUnchecked')}</small></p>
+    <label>${t('tabularius.hostPublicKey')}<input readonly value="${escape(host.publicKey)}" class="mono"></label>
+    ${policyField(host.policy)}<label>${t('tabularius.hostCommands')}<textarea name="commands" rows="2" spellcheck="false">${escape(host.commands)}</textarea></label>
+    <div class="actions"><button type="submit">${t('common.save')}</button><button type="button" data-check>${t('tabularius.checkHost')}</button><button type="button" class="danger" data-remove>${t('tabularius.removeHost')}</button></div></form>`;
+}
+async function loadHosts() {
+  try { [hosts, commandLog] = await Promise.all([api<Host[]>('/tabularius/hosts'), api<CommandRecord[]>('/tabularius/commands')]); isAdmin = true; }
+  catch (error) { if (!(error instanceof ApiError && error.status === 403)) throw error; isAdmin = false; hosts = []; commandLog = []; }
+}
 function drawSettings(current: VaultStatus) {
   shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${escape(current.name)}</h1><p>${statusText(current)}</p></div><button id="reload">${t('common.refresh')}</button></header>
     <div class="card"><h2>${t('tabularius.rules')}</h2><form id="rules" class="stack">
@@ -198,6 +222,12 @@ function drawSettings(current: VaultStatus) {
       <label>${t('tabularius.mode')}<select id="mode">${(['read-only', 'restricted', 'full'] as Mode[]).map(mode =>
         `<option value="${mode}" ${current.mode === mode ? 'selected' : ''} ${overview!.modes.includes(mode) ? '' : 'disabled'}>${t(`tabularius.mode.${mode}`)}</option>`).join('')}</select></label>
       ${overview!.web ? `<label class="check"><input type="checkbox" id="web" ${current.web ? 'checked' : ''}> ${t('tabularius.webEnable')}</label><small>${t('tabularius.webDesc')}</small>` : ''}</div>
+    ${isAdmin ? `<div class="card" id="hosts-card"><h2>${t('tabularius.hosts')}</h2><p>${t('tabularius.hostsDesc')}</p>${hosts.map(hostHtml).join('')}
+      <form id="add-host" class="stack"><h3>${t('tabularius.addHost')}</h3><div class="inline-form"><label>${t('tabularius.hostName')}<input name="name" required></label><label>${t('tabularius.hostAddress')}<input name="address" required></label>
+        <label>${t('tabularius.hostPort')}<input name="port" type="number" value="22" min="1" max="65535"></label><label>${t('tabularius.hostUser')}<input name="username" required></label></div>
+        ${policyField('allowed')}<label>${t('tabularius.hostCommands')}<textarea name="commands" rows="3" spellcheck="false"></textarea><small>${t('tabularius.hostCommandsHint')}</small></label>
+        <button class="primary" type="submit">${t('tabularius.addHost')}</button></form>
+      ${commandLog.length ? `<details><summary>${t('tabularius.commandLog')}</summary><table><tbody>${commandLog.slice(0, 30).map(c => `<tr><td>${formatDate(c.createdAt)}</td><td>${escape(c.host ?? '')}</td><td><code>${escape(c.command)}</code></td><td>${escape(c.status)}${c.exitCode !== null ? ` (${c.exitCode})` : ''}${c.reason ? ` · ${escape(c.reason)}` : ''}</td></tr>`).join('')}</tbody></table></details>` : ''}</div>` : ''}
     <div class="card"><h2>${t('tabularius.paramsTitle')}</h2><form id="params" class="stack"><label>${t('tabularius.params')}<textarea name="params" rows="3" spellcheck="false" placeholder='{"effort": "high"}'>${escape(current.params ?? '')}</textarea>
       <small>${t('tabularius.paramsHint', { names: escape(overview!.paramNames.join(', ')), defaults: escape(JSON.stringify(overview!.params)) })}</small></label><button class="primary" type="submit">${t('common.save')}</button></form></div>
     ${overview!.knowledge ? `<div class="card"><h2>${t('tabularius.knowledge')}</h2><p>${t('tabularius.knowledgeDesc')}</p>
@@ -218,6 +248,23 @@ function drawSettings(current: VaultStatus) {
     await api(`/tabularius/vaults/${vaultId}/web`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
     await refresh(); message(t('tabularius.saved'));
   }));
+  form('add-host', async data => {
+    await api('/tabularius/hosts', 'POST', { name: data.get('name'), address: data.get('address'), port: Number(data.get('port')), username: data.get('username'), policy: data.get('policy'), commands: data.get('commands') });
+    await loadHosts(); draw(); message(t('tabularius.hostAdded'));
+  });
+  for (const item of document.querySelectorAll<HTMLFormElement>('form.host')) {
+    const id = item.dataset.host!;
+    item.addEventListener('submit', event => {
+      event.preventDefault();
+      const data = new FormData(item);
+      void run(async () => { await api(`/tabularius/hosts/${id}`, 'PUT', { policy: data.get('policy'), commands: data.get('commands') }); await loadHosts(); draw(); message(t('tabularius.saved')); });
+    });
+    item.querySelector('[data-check]')!.addEventListener('click', () => void run(async () => { await api(`/tabularius/hosts/${id}/check`, 'POST'); await loadHosts(); draw(); message(t('tabularius.hostChecked')); }));
+    item.querySelector('[data-remove]')!.addEventListener('click', () => void run(async () => {
+      if (!confirm(t('tabularius.confirmRemoveHost'))) return;
+      await api(`/tabularius/hosts/${id}`, 'DELETE'); await loadHosts(); draw();
+    }));
+  }
   form('params', async data => {
     await api(`/tabularius/vaults/${vaultId}/params`, 'PUT', { params: data.get('params') });
     await refresh(); message(t('tabularius.saved'));
@@ -356,7 +403,11 @@ async function ask(text: string) {
           if (!conversationId) { conversationId = data.id; conversations.unshift({ id: data.id, title: data.title, updatedAt: Date.now() }); }
         } else if (event === 'text') answer.text += data.text;
         else if (event === 'tool') answer.tools!.push(data);
-        else if (event === 'proposal') {
+        else if (event === 'approval') {
+          const list = answer.approvals ??= [];
+          const known = list.find(a => a.id === data.id);
+          if (known) known.approved = data.approved; else list.push(data);
+        } else if (event === 'proposal') {
           const tool = answer.tools!.find(item => item.name === 'propose_changes' && !item.proposal);
           if (tool) tool.proposal = data;
         }
@@ -370,6 +421,15 @@ async function ask(text: string) {
     draw();
   }
 }
+
+// Approval buttons appear inside a streaming answer, which is re-rendered as it grows, so clicks are handled here.
+document.addEventListener('click', event => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-approve],[data-deny]');
+  if (!button) return;
+  const id = button.dataset.approve ?? button.dataset.deny!;
+  button.disabled = true;
+  void run(() => api(`/tabularius/approvals/${id}`, 'POST', { approved: Boolean(button.dataset.approve) }));
+});
 
 void run(async () => {
   try { session = await api<Session>('/web-session'); } catch (error) {

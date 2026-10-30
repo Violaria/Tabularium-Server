@@ -189,6 +189,26 @@ export function openStore(path: string) {
   `);
     version = 9;
   }
-  if (version !== 9) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 9) {
+    // Tabularius hosts for SSH, and the record of every command it ran or was refused.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE tabularius_hosts (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, address TEXT NOT NULL, port INTEGER NOT NULL, username TEXT NOT NULL,
+      policy TEXT NOT NULL CHECK(policy IN ('allowed','authorize','forbidden')), commands TEXT NOT NULL DEFAULT '', fingerprint TEXT,
+      private_key BLOB NOT NULL, public_key TEXT NOT NULL, created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE tabularius_commands (
+      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, user_id TEXT NOT NULL, host_id TEXT NOT NULL, command TEXT NOT NULL, mode TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','denied','refused','done','failed')), exit_code INTEGER, reason TEXT, approved_by TEXT,
+      created_at INTEGER NOT NULL, finished_at INTEGER
+    ) STRICT;
+    CREATE INDEX tabularius_commands_time ON tabularius_commands(created_at);
+    PRAGMA user_version=10;
+    COMMIT;
+  `);
+    version = 10;
+  }
+  if (version !== 10) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

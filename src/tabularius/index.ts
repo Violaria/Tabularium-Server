@@ -12,6 +12,7 @@ import type { KnowledgeBase } from './knowledge.js';
 import { checkParams, PARAMS, ParamsError, type Params } from './params.js';
 import { addressPolicy, fetchPage, searxng, urlsIn, type WebOptions } from './web.js';
 import { createMemories, MemoryError } from './memory.js';
+import { detectFingerprint, generateKey, refuse, run as runSsh, type Target } from './ssh.js';
 import { BUILT_IN, MEMORIES, VAULT_RULES } from './prompt.js';
 import { ProviderError, type Message, type Part, type Provider, type Tool } from './providers.js';
 import { apply, build, ProposalError, type Change } from './proposals.js';
@@ -27,10 +28,13 @@ export interface TabulariusConfig {
   modeLimit: Mode;
   /** Server-wide model parameters; a vault's own parameters override them. */
   params: Params;
+  /** Seconds a command may run over SSH. */
+  sshTimeout?: number;
 }
 /** What one answer has used so far: notes read, cited pages, and client-side web calls against the limits. */
 interface Answer { read: Set<string>; sources: Map<string, string>; searches: number; fetches: number }
 interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string; knowledge: number; embedding_model: string | null; web: number; mode: Mode; params: string }
+interface Host { id: string; name: string; address: string; port: number; username: string; policy: 'allowed' | 'authorize' | 'forbidden'; commands: string; fingerprint: string | null; private_key: Uint8Array; public_key: string; created_at: number }
 interface Proposal { id: string; conversation_id: string; call_id: string; vault_id: string; user_id: string; title: string; summary: string; status: 'pending' | 'applied' | 'discarded'; error: string | null; created_at: number; decided_at: number | null }
 interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number }
 
@@ -75,6 +79,14 @@ const MEMORY_TOOLS: Tool[] = [
   { name: 'read_conversation', description: 'Reads the questions and answers of an earlier conversation by id.',
     parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
 ];
+const SSH_TOOLS: Tool[] = [
+  { name: 'list_hosts', description: 'Lists the hosts registered for SSH, with their access policy.', parameters: { type: 'object', properties: {}, required: [] } },
+  { name: 'run_command', description: 'Runs one command on a registered host over SSH and returns its output and exit code. What may run depends on the vault\'s permission mode: ' +
+    'read-only mode allows read-only commands (cat, ls, grep, systemctl status, journalctl, docker ps, docker logs and the like), restricted mode also the host\'s allow list, ' +
+    'full mode anything. Outside full mode, run one program with its arguments, without pipes, redirections or substitutions. Some hosts ask the user to approve each command.',
+    parameters: { type: 'object', properties: { host: { type: 'string', description: 'Host name from list_hosts' }, command: { type: 'string' } }, required: ['host', 'command'] } },
+];
+const APPROVAL_MS = 5 * 60_000;
 const MEMORY_LIMIT = 5;
 const CONVERSATION_LIMIT = 30_000;
 
@@ -104,6 +116,11 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   const row = (vaultId: string) => db.prepare('SELECT * FROM tabularius_vaults WHERE vault_id=?').get(vaultId) as unknown as Row | undefined;
   const filterOf = (r: Row) => createFilter(r.excluded, r.masks);
   const memories = createMemories(db, config.embedder);
+  const approvals = new Map<string, (decision: { approved: boolean; by: string }) => void>();
+  const hostByName = (name: string) => db.prepare('SELECT * FROM tabularius_hosts WHERE name=?').get(name) as unknown as Host | undefined;
+  const target = (host: Host): Target => ({ address: host.address, port: host.port, username: host.username, privateKey: open(config.key, host.private_key) });
+  const publicHost = (host: Host) => ({ id: host.id, name: host.name, address: host.address, port: host.port, username: host.username, policy: host.policy,
+    commands: host.commands, fingerprint: host.fingerprint, publicKey: host.public_key, createdAt: host.created_at });
 
   /** Serialises index updates per vault; a call during an update waits for it and runs again. */
   function reindex(vaultId: string) {
@@ -189,6 +206,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   function audit(actorId: string, action: string, targetId: string) {
     db.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now(), actorId, action, targetId);
   }
+  const hasHosts = () => Boolean(db.prepare('SELECT 1 FROM tabularius_hosts LIMIT 1').get());
   const webOn = (vaultId: string) => Boolean(config.web && row(vaultId)?.web && (config.provider.nativeWeb || config.web.searxng));
   /** URLs the user or a tool result has shown in this conversation; outside the full mode only these can be fetched. */
   function seenUrls(conversationId: string) {
@@ -236,6 +254,46 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         if (error instanceof MemoryError) return `Error: ${error.message}.`;
         throw error;
       }
+    }
+    if (call.name === 'list_hosts') {
+      const hosts = db.prepare('SELECT * FROM tabularius_hosts ORDER BY name').all() as unknown as Host[];
+      return hosts.length ? hosts.map(h => `${h.name} (${h.username}@${h.address}): ${h.policy === 'forbidden' ? 'forbidden, never connected' : h.policy === 'authorize' ? 'each command needs the user\'s approval' : 'allowed'}`).join('\n') : 'No hosts are registered.';
+    }
+    if (call.name === 'run_command') {
+      const host = hostByName(String(call.input.host ?? ''));
+      const command = typeof call.input.command === 'string' ? call.input.command.trim() : '';
+      const mode = row(vaultId)!.mode;
+      const id = randomUUID();
+      const record = (status: string, extra: { exit_code?: number | null; reason?: string; approved_by?: string } = {}) => {
+        db.prepare(`INSERT INTO tabularius_commands(id,conversation_id,user_id,host_id,command,mode,status,exit_code,reason,approved_by,created_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(id) DO UPDATE SET status=excluded.status, exit_code=excluded.exit_code, reason=excluded.reason, approved_by=COALESCE(excluded.approved_by, approved_by), finished_at=excluded.finished_at`)
+          .run(id, conversation.id, conversation.user_id, host?.id ?? '', command, mode, status, extra.exit_code ?? null, extra.reason ?? null, extra.approved_by ?? null, Date.now(), status === 'pending' ? null : Date.now());
+        if (status !== 'pending') audit(conversation.user_id, 'tabularius.ssh', host?.id ?? conversation.id);
+      };
+      if (!host) return 'Error: no such host; use list_hosts.';
+      if (host.policy === 'forbidden') { record('refused', { reason: 'forbidden host' }); return `Error: ${host.name} is a forbidden host and is never connected.`; }
+      if (!host.fingerprint) { record('refused', { reason: 'no fingerprint' }); return `Error: ${host.name} has not been checked by an administrator yet.`; }
+      const reason = refuse(mode, command, host.commands);
+      if (reason) { record('refused', { reason }); return `Error: refused: ${reason}.`; }
+      let approvedBy: string | undefined;
+      if (host.policy === 'authorize') {
+        record('pending');
+        send('approval', { id, host: host.name, command });
+        const decision = await new Promise<{ approved: boolean; by: string }>(resolve => {
+          const timer = setTimeout(() => { approvals.delete(id); resolve({ approved: false, by: '' }); }, APPROVAL_MS);
+          approvals.set(id, d => { clearTimeout(timer); approvals.delete(id); resolve(d); });
+        });
+        send('approval', { id, host: host.name, command, approved: decision.approved });
+        if (!decision.approved) { record('denied', { reason: decision.by ? 'denied by the user' : 'no answer in time' }); return 'Error: the user did not approve this command.'; }
+        approvedBy = decision.by;
+      }
+      let result;
+      try { result = await runSsh(target(host), host.fingerprint, command, (config.sshTimeout ?? 60) * 1000); } catch (error) {
+        record('failed', { reason: (error as Error).message.slice(0, 300), approved_by: approvedBy });
+        return `Error: ${(error as Error).message.slice(0, 300)}`;
+      }
+      record('done', { exit_code: result.code, approved_by: approvedBy });
+      return filter.mask(`Exit code: ${result.code}\n${result.stdout ? `\nstdout:\n${result.stdout}` : ''}${result.stderr ? `\nstderr:\n${result.stderr}` : ''}`);
     }
     if (call.name === 'search_conversations') {
       const query = typeof call.input.query === 'string' ? call.input.query.trim() : '';
@@ -348,7 +406,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     try {
       for (let round = 0; ; round++) {
         const web = webOn(conversation.vault_id);
-        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(config.knowledge && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
+        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() ? SSH_TOOLS : []), ...(config.knowledge && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
           ...(web && !config.provider.nativeWeb ? WEB_TOOLS : [])];
         const turn = await config.provider.turn(conversation.system, tools, loadMessages(conversation.id), delta => send('text', { text: delta }), {
           web: web && config.provider.nativeWeb ? config.web!.options : undefined,
@@ -450,6 +508,43 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       if (user.role !== 'admin') fail(403, 'Administrator required');
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
       db.prepare('UPDATE tabularius_vaults SET knowledge=? WHERE vault_id=?').run(Number(enabled), vaultId);
+    },
+    hosts() { return (db.prepare('SELECT * FROM tabularius_hosts ORDER BY name').all() as unknown as Host[]).map(publicHost); },
+    /** A new host gets its own key pair; the administrator installs the public key, then checks the host to record its key. */
+    addHost(data: { name: string; address: string; port: number; username: string; policy: string; commands: string }) {
+      if (!['allowed', 'authorize', 'forbidden'].includes(data.policy)) fail(400, 'Invalid host policy');
+      if (hostByName(data.name)) fail(409, 'A host with this name exists');
+      const key = generateKey(); const id = randomUUID();
+      db.prepare('INSERT INTO tabularius_hosts(id,name,address,port,username,policy,commands,fingerprint,private_key,public_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, data.name, data.address, data.port, data.username, data.policy, data.commands, null, seal(config.key, key.privateKey), key.publicKey, Date.now());
+      return publicHost(db.prepare('SELECT * FROM tabularius_hosts WHERE id=?').get(id) as unknown as Host);
+    },
+    updateHost(id: string, data: { policy: string; commands: string }) {
+      if (!['allowed', 'authorize', 'forbidden'].includes(data.policy)) fail(400, 'Invalid host policy');
+      if (!db.prepare('UPDATE tabularius_hosts SET policy=?, commands=? WHERE id=?').run(data.policy, data.commands, id).changes) fail(404, 'Host not found');
+      return publicHost(db.prepare('SELECT * FROM tabularius_hosts WHERE id=?').get(id) as unknown as Host);
+    },
+    removeHost(id: string) { if (!db.prepare('DELETE FROM tabularius_hosts WHERE id=?').run(id).changes) fail(404, 'Host not found'); },
+    /** Connects once and records the host key the administrator sees; later connections must present the same key. */
+    async checkHost(id: string) {
+      const host = db.prepare('SELECT * FROM tabularius_hosts WHERE id=?').get(id) as unknown as Host | undefined;
+      if (!host) fail(404, 'Host not found');
+      if (host!.policy === 'forbidden') fail(409, 'Forbidden hosts are never connected');
+      let fingerprint;
+      try { fingerprint = await detectFingerprint(target(host!)); } catch (error) { fail(502, `Connection failed: ${(error as Error).message.slice(0, 200)}`); }
+      db.prepare('UPDATE tabularius_hosts SET fingerprint=? WHERE id=?').run(fingerprint!, id);
+      return publicHost(db.prepare('SELECT * FROM tabularius_hosts WHERE id=?').get(id) as unknown as Host);
+    },
+    commands() {
+      return db.prepare(`SELECT c.id, c.command, c.mode, c.status, c.exit_code AS exitCode, c.reason, c.created_at AS createdAt, h.name AS host, u.username AS user
+        FROM tabularius_commands c LEFT JOIN tabularius_hosts h ON h.id=c.host_id LEFT JOIN users u ON u.id=c.user_id ORDER BY c.created_at DESC LIMIT 200`).all();
+    },
+    /** Approves or denies a waiting command; only the user of that conversation may decide. */
+    decide(id: string, user: User, approved: boolean) {
+      const command = db.prepare("SELECT user_id FROM tabularius_commands WHERE id=? AND status='pending'").get(id) as { user_id: string } | undefined;
+      const resolve = approvals.get(id);
+      if (!command || command.user_id !== user.id || !resolve) fail(404, 'No such command is waiting');
+      resolve!({ approved, by: user.id });
     },
     memories(user: User) { return memories.list(user.id); },
     async addMemory(user: User, content: unknown) {

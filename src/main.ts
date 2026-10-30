@@ -48,6 +48,7 @@ if (provider) {
       searxng: process.env.TABULARIUS_SEARXNG_URL || undefined, intranet: list('TABULARIUS_INTRANET'),
     } : undefined,
     modeLimit: (process.env.TABULARIUS_MODE_LIMIT || 'read-only') as Mode,
+    sshTimeout: Number(process.env.TABULARIUS_SSH_TIMEOUT || 60),
     params: checkParams(provider as 'anthropic' | 'openai' | 'vllm', process.env.TABULARIUS_MODEL_PARAMS ?? ''),
   };
   if (!MODES.includes(tabularius.modeLimit)) throw new Error('TABULARIUS_MODE_LIMIT must be read-only, restricted or full');
