@@ -554,6 +554,12 @@ export async function createGateway(config: Config) {
       if (route[1] === 'vaults' && route.length === 4 && route[3] === 'proposals' && method === 'GET') {
         json(res, 200, t.proposals(ownedVault(route[2], user).id, user)); return;
       }
+      if (route[1] === 'memories') {
+        if (route.length === 2 && method === 'GET') { json(res, 200, t.memories(user)); return; }
+        if (route.length === 2 && method === 'POST') { json(res, 201, await t.addMemory(user, (await body(req)).content)); return; }
+        if (route.length === 3 && method === 'PUT') { json(res, 200, await t.updateMemory(user, route[2], (await body(req)).content)); return; }
+        if (route.length === 3 && method === 'DELETE') { t.removeMemory(user, route[2]); json(res, 200, { ok: true }); return; }
+      }
       if (route[1] === 'proposals' && route.length >= 3) {
         if (route.length === 3 && method === 'GET') { json(res, 200, t.proposal(route[2], user)); return; }
         if (route.length === 4 && route[3] === 'apply' && method === 'POST') {

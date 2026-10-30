@@ -120,7 +120,7 @@ export async function search(db: DatabaseSync, vaultId: string, query: string, e
     .map(({ row }) => ({ path: row.path, heading: row.heading, snippet: row.text.slice(0, 600) }));
 }
 
-function cosine(a: Float32Array, b: Float32Array) {
+export function cosine(a: Float32Array, b: Float32Array) {
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
   return dot / (Math.sqrt(na * nb) || 1);

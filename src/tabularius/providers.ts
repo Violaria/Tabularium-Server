@@ -58,7 +58,10 @@ export function anthropic(model: string): Provider {
       const stream = client.beta.messages.stream({
         model, max_tokens: (params.max_tokens as number | undefined) ?? 64000,
         thinking: { type: 'adaptive' }, output_config: { effort: (params.effort as 'medium' | undefined) ?? 'medium' },
-        ...(fallback ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
+        // Compaction summarises early context server-side near the window's limit; its block is replayed with the turn.
+        betas: ['compact-2026-01-12', ...(fallback ? ['server-side-fallback-2026-07-01'] : [])],
+        context_management: { edits: [{ type: 'compact_20260112' }] },
+        ...(fallback ? { fallbacks: 'default' as const } : {}),
         cache_control: { type: 'ephemeral' },
         system,
         tools: [...tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters, eager_input_streaming: true })),
@@ -118,7 +121,7 @@ export function openai(model: string): Provider {
       let response: OpenAI.Responses.Response | undefined;
       try {
         const stream = await client.responses.create({
-          model, stream: true, store: false, include: ['reasoning.encrypted_content'],
+          model, stream: true, store: false, include: ['reasoning.encrypted_content'], truncation: 'auto',
           ...(params.reasoning_effort ? { reasoning: { effort: params.reasoning_effort as OpenAI.ReasoningEffort } } : {}),
           ...(params.verbosity ? { text: { verbosity: params.verbosity as 'low' | 'medium' | 'high' } } : {}),
           ...(params.max_output_tokens ? { max_output_tokens: params.max_output_tokens as number } : {}),
@@ -166,7 +169,7 @@ export function openai(model: string): Provider {
  * thinking during tool calls), so it is stored and replayed. Tool calls need the server's --enable-auto-tool-choice and a
  * --tool-call-parser for the model. Sampling defaults come from the model's generation_config on the server.
  */
-export function vllm(model: string, baseURL: string, apiKey?: string): Provider {
+export function vllm(model: string, baseURL: string, apiKey?: string, contextTokens = 32_768): Provider {
   const client = new OpenAI({ baseURL, apiKey: apiKey || 'none' });
   type Assistant = OpenAI.Chat.ChatCompletionAssistantMessageParam & { reasoning?: string };
   const toMessages = (message: Message): OpenAI.Chat.ChatCompletionMessageParam[] => {
@@ -193,7 +196,7 @@ export function vllm(model: string, baseURL: string, apiKey?: string): Provider 
         const stream = await client.chat.completions.create({
           ...params,
           model, stream: true,
-          messages: [{ role: 'system', content: system }, ...messages.flatMap(toMessages)],
+          messages: [{ role: 'system', content: system }, ...fit(messages, contextTokens - estimate(system) - estimate(JSON.stringify(tools))).flatMap(toMessages)],
           tools: tools.map(tool => ({ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
         } as OpenAI.Chat.ChatCompletionCreateParamsStreaming);
         for await (const chunk of stream) {
@@ -220,6 +223,28 @@ export function vllm(model: string, baseURL: string, apiKey?: string): Provider 
       return { parts, native: { provider: 'vllm', content: { reasoning } } };
     },
   };
+}
+
+// About three characters per token, a cautious average for mixed Chinese and English.
+const estimate = (text: string) => Math.ceil(text.length / 3);
+
+/**
+ * Keeps the history within three quarters of `budget` tokens by dropping whole exchanges from the start. An exchange runs
+ * from one of the user's questions to the next, so a tool call is never separated from its result; the current exchange
+ * is always kept.
+ */
+export function fit(messages: Message[], budget: number): Message[] {
+  const size = (message: Message) => estimate(JSON.stringify(message.parts)) + estimate(JSON.stringify(message.native?.content ?? ''));
+  const starts = messages.flatMap((message, i) => message.role === 'user' && message.parts.some(part => part.type === 'text') ? [i] : []);
+  let total = messages.reduce((sum, message) => sum + size(message), 0);
+  let from = 0;
+  for (const start of starts.slice(1)) {
+    if (total <= budget * 0.75) break;
+    total -= messages.slice(from, start).reduce((sum, message) => sum + size(message), 0);
+    from = start;
+  }
+  if (!from) return messages;
+  return [{ role: 'user', parts: [{ type: 'text', text: '(The earlier part of this conversation was left out to fit the context window.)' }] }, ...messages.slice(from)];
 }
 
 /** Embeddings through the OpenAI embeddings API shape: OpenAI itself, or a local service (Infinity, vLLM) at TABULARIUS_EMBEDDING_URL. */

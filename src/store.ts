@@ -175,6 +175,20 @@ export function openStore(path: string) {
   `);
     version = 8;
   }
-  if (version !== 8) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 8) {
+    // Tabularius memories: facts and preferences per user, shared across vaults.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE tabularius_memories (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, content TEXT NOT NULL, embedding BLOB,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX tabularius_memories_user ON tabularius_memories(user_id, updated_at);
+    PRAGMA user_version=9;
+    COMMIT;
+  `);
+    version = 9;
+  }
+  if (version !== 9) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

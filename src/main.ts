@@ -37,7 +37,7 @@ if (provider) {
     cli: resolve(process.env.TABULARIUS_CLI || new URL('../cli/index.cjs', import.meta.url).pathname),
     provider: provider === 'anthropic' ? anthropic(process.env.TABULARIUS_MODEL || 'claude-opus-5-5')
       : provider === 'openai' ? openai(required('TABULARIUS_MODEL'))
-        : vllm(required('TABULARIUS_MODEL'), required('TABULARIUS_VLLM_URL'), process.env.TABULARIUS_VLLM_KEY || undefined),
+        : vllm(required('TABULARIUS_MODEL'), required('TABULARIUS_VLLM_URL'), process.env.TABULARIUS_VLLM_KEY || undefined, Number(process.env.TABULARIUS_VLLM_CONTEXT || 32768)),
     embedder: process.env.TABULARIUS_EMBEDDING_MODEL
       ? embedder(process.env.TABULARIUS_EMBEDDING_MODEL, process.env.TABULARIUS_EMBEDDING_URL || undefined, process.env.TABULARIUS_EMBEDDING_KEY || undefined,
         Number(process.env.TABULARIUS_EMBEDDING_BATCH || 64)) : undefined,

@@ -22,7 +22,9 @@ const app = document.querySelector<HTMLDivElement>('#app')!;
 let session: Session | undefined;
 let overview: Overview | undefined;
 let vaultId = new URLSearchParams(location.search).get('vault') ?? '';
-let view: 'chat' | 'settings' | 'proposals' | 'proposal' = 'chat';
+let view: 'chat' | 'settings' | 'proposals' | 'proposal' | 'memories' = 'chat';
+interface MemoryItem { id: string; content: string; createdAt: number; updatedAt: number }
+let memories: MemoryItem[] = [];
 let proposals: ProposalSummary[] = [];
 let proposal: ProposalDetail | undefined;
 let conversations: Summary[] = [];
@@ -81,6 +83,11 @@ function toolLabel(tool: ToolUse) {
   if (tool.name === 'read_note') return t('tabularius.toolRead', { path: value('path') });
   if (tool.name === 'list_notes') return t('tabularius.toolList', { folder: value('folder') || '/' });
   if (tool.name === 'search_knowledge_base') return t('tabularius.toolKnowledge', { query: value('question') });
+  if (tool.name === 'search_memories') return t('tabularius.toolMemorySearch', { query: value('query') });
+  if (tool.name === 'add_memory' || tool.name === 'update_memory') return t('tabularius.toolMemoryWrite', { content: value('content') });
+  if (tool.name === 'delete_memory') return t('tabularius.toolMemoryDelete');
+  if (tool.name === 'search_conversations') return t('tabularius.toolConversations', { query: value('query') });
+  if (tool.name === 'read_conversation') return t('tabularius.toolConversation');
   if (tool.name === 'web_search') return t('tabularius.toolWebSearch', { query: value('query') });
   if (tool.name === 'web_fetch' || tool.name === 'fetch_url') return t('tabularius.toolWebFetch', { url: value('url') });
   if (tool.name === 'propose_changes') return tool.proposal
@@ -128,7 +135,7 @@ function shell(content: string) {
   const list = conversations.map(c => `<button class="conversation" data-id="${escape(c.id)}" ${c.id === conversationId ? 'aria-current="page"' : ''}>${escape(c.title)}<small>${formatDate(c.updatedAt)}</small></button>`).join('');
   app.innerHTML = `<aside class="sidebar"><div class="brand"><span class="brand-mark">T</span><div><strong>Tabularius</strong><small>${t('tabularius.subtitle')}</small></div></div>
     <nav aria-label="${t('tabularius.conversations')}">${overview!.vaults.length ? `<select id="vault" aria-label="${t('tabularius.vault')}">${options}</select>` : ''}
-    ${current?.enabled ? `<button id="new" class="new">${t('tabularius.newChat')}</button>${list || `<small>${t('tabularius.noConversations')}</small>`}<button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button>` : ''}</nav>
+    ${current?.enabled ? `<button id="new" class="new">${t('tabularius.newChat')}</button>${list || `<small>${t('tabularius.noConversations')}</small>`}<button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="memories" ${view === 'memories' ? 'aria-current="page"' : ''}>${t('tabularius.memories')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button>` : ''}</nav>
     <div class="account"><div><strong>${escape(session!.user.username)}</strong><br><a href="/admin/">${t('home.console')}</a> · <a href="/notes/">${t('home.notes')}</a></div><div id="language"></div><button id="logout">${t('common.signOut')}</button></div></aside>
     <main class="main tabularius"><div id="message" role="status" hidden></div>${content}</main>`;
   document.getElementById('language')!.replaceChildren(languageSelect(draw));
@@ -136,6 +143,7 @@ function shell(content: string) {
   document.getElementById('new')?.addEventListener('click', () => { view = 'chat'; conversationId = undefined; entries = []; draw(); });
   document.getElementById('settings')?.addEventListener('click', () => { view = 'settings'; void run(refresh); });
   document.getElementById('proposals')?.addEventListener('click', () => void run(showProposals));
+  document.getElementById('memories')?.addEventListener('click', () => void run(showMemories));
   for (const item of document.querySelectorAll<HTMLButtonElement>('[data-proposal]')) item.addEventListener('click', () => void run(() => showProposal(item.dataset.proposal!)));
   document.getElementById('logout')!.addEventListener('click', () => void run(async () => { await api('/web-session', 'DELETE'); session = undefined; login(); }));
   for (const item of document.querySelectorAll<HTMLButtonElement>('.conversation')) item.addEventListener('click', () => void run(async () => {
@@ -151,6 +159,7 @@ function draw() {
   if (!current.enabled) { drawEnable(current); return; }
   if (view === 'settings') { drawSettings(current); return; }
   if (view === 'proposals') { drawProposals(); return; }
+  if (view === 'memories') { drawMemories(); return; }
   if (view === 'proposal' && proposal) { drawProposal(proposal); return; }
   drawChat(current);
 }
@@ -228,6 +237,28 @@ function drawSettings(current: VaultStatus) {
   }));
 }
 
+async function showMemories() {
+  memories = await api<MemoryItem[]>('/tabularius/memories');
+  view = 'memories'; draw();
+}
+function drawMemories() {
+  const items = memories.map(m => `<form class="memory stack" data-id="${escape(m.id)}"><textarea name="content" rows="2" aria-label="${t('tabularius.memory')}">${escape(m.content)}</textarea>
+    <div class="actions"><small>${formatDate(m.updatedAt)}</small><button type="submit">${t('common.save')}</button><button type="button" class="danger" data-delete>${t('tabularius.deleteMemory')}</button></div></form>`).join('');
+  shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.memories')}</h1><p>${t('tabularius.memoriesDesc')}</p></div></header>
+    <div class="card"><form id="add-memory" class="stack"><label>${t('tabularius.newMemory')}<textarea name="content" rows="2" required></textarea></label><button class="primary" type="submit">${t('tabularius.addMemory')}</button></form></div>
+    <div class="card">${items || `<p class="muted">${t('tabularius.noMemories')}</p>`}</div>`);
+  form('add-memory', async data => { await api('/tabularius/memories', 'POST', { content: data.get('content') }); await showMemories(); message(t('tabularius.saved')); });
+  for (const item of document.querySelectorAll<HTMLFormElement>('form.memory')) {
+    item.addEventListener('submit', event => {
+      event.preventDefault();
+      void run(async () => { await api(`/tabularius/memories/${item.dataset.id}`, 'PUT', { content: new FormData(item).get('content') }); await showMemories(); message(t('tabularius.saved')); });
+    });
+    item.querySelector('[data-delete]')!.addEventListener('click', () => void run(async () => {
+      if (!confirm(t('tabularius.confirmDeleteMemory'))) return;
+      await api(`/tabularius/memories/${item.dataset.id}`, 'DELETE'); await showMemories();
+    }));
+  }
+}
 async function showProposals() {
   proposals = await api<ProposalSummary[]>(`/tabularius/vaults/${vaultId}/proposals`);
   view = 'proposals'; draw();

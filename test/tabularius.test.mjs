@@ -199,3 +199,19 @@ test('web fetch addresses follow the permission mode', async () => {
   assert.equal(htmlText('<p>a &amp; b</p><script>x()</script><div>c&#x4e2d;</div>'), 'a & b\n\nc中');
   assert.deepEqual(urlsIn('见 https://example.com/a#x，以及 (https://b.org/c).'), ['https://example.com/a', 'https://b.org/c']);
 });
+
+test('the vLLM history drops whole exchanges from the start', async () => {
+  const { fit } = await import('../dist/tabularius/providers.js');
+  const question = (text) => ({ role: 'user', parts: [{ type: 'text', text }] });
+  const call = (id) => ({ role: 'assistant', parts: [{ type: 'tool_call', id, name: 'read_note', input: { path: 'x'.repeat(300) } }] });
+  const result = (id) => ({ role: 'user', parts: [{ type: 'tool_result', id, content: 'y'.repeat(3000) }] });
+  const history = [question('first'), call('a'), result('a'), { role: 'assistant', parts: [{ type: 'text', text: 'one' }] },
+    question('second'), call('b'), result('b'), { role: 'assistant', parts: [{ type: 'text', text: 'two' }] }, question('third'), call('c'), result('c')];
+  assert.equal(fit(history, 100_000), history);
+  const kept = fit(history, 2000);
+  assert.match(kept[0].parts[0].text, /left out/);
+  assert.equal(kept[1].parts[0].text, 'third', 'the current exchange stays even when it alone is over the budget');
+  assert.deepEqual(kept.slice(1), history.slice(8));
+  const some = fit(history, 3500);
+  assert.equal(some[1].parts[0].text, 'second');
+});
