@@ -49,6 +49,10 @@ if (provider) {
     } : undefined,
     modeLimit: (process.env.TABULARIUS_MODE_LIMIT || 'read-only') as Mode,
     sshTimeout: Number(process.env.TABULARIUS_SSH_TIMEOUT || 60),
+    sandbox: process.env.TABULARIUS_SANDBOX_URL ? {
+      url: process.env.TABULARIUS_SANDBOX_URL, token: required('TABULARIUM_SANDBOX_TOKEN'),
+      images: (process.env.TABULARIUS_SANDBOX_IMAGES || 'python:3.13-slim,node:24-slim,alpine:3').split(',').map(image => image.trim()).filter(Boolean),
+    } : undefined,
     params: checkParams(provider as 'anthropic' | 'openai' | 'vllm', process.env.TABULARIUS_MODEL_PARAMS ?? ''),
   };
   if (!MODES.includes(tabularius.modeLimit)) throw new Error('TABULARIUS_MODE_LIMIT must be read-only, restricted or full');

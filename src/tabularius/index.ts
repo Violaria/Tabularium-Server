@@ -30,6 +30,8 @@ export interface TabulariusConfig {
   params: Params;
   /** Seconds a command may run over SSH. */
   sshTimeout?: number;
+  /** The sandbox service, its token and the images it runs. */
+  sandbox?: { url: string; token: string; images: string[] };
 }
 /** What one answer has used so far: notes read, cited pages, and client-side web calls against the limits. */
 interface Answer { read: Set<string>; sources: Map<string, string>; searches: number; fetches: number }
@@ -86,6 +88,15 @@ const SSH_TOOLS: Tool[] = [
     'full mode anything. Outside full mode, run one program with its arguments, without pipes, redirections or substitutions. Some hosts ask the user to approve each command.',
     parameters: { type: 'object', properties: { host: { type: 'string', description: 'Host name from list_hosts' }, command: { type: 'string' } }, required: ['host', 'command'] } },
 ];
+const sandboxTool = (images: string[]): Tool => ({ name: 'run_sandbox',
+  description: `Runs a command in a throwaway container to reproduce what a note describes (code, commands, data). Images: ${images.join(', ')}. ` +
+    'The container has no network unless network is true (full permission mode only), a read-only root, writable /work and /tmp, 512 MB of memory and one CPU; ' +
+    'files are written into /work first. Nothing from the vault or the server is inside unless you pass it in files.',
+  parameters: { type: 'object', properties: {
+    image: { type: 'string', enum: images }, command: { type: 'string', description: 'Shell command, run with sh -c in /work' },
+    files: { type: 'object', additionalProperties: { type: 'string' }, description: 'File name to content, written into /work' },
+    network: { type: 'boolean' }, timeout: { type: 'integer', description: 'Seconds, default 60, at most 300' },
+  }, required: ['image', 'command'] } });
 const APPROVAL_MS = 5 * 60_000;
 const MEMORY_LIMIT = 5;
 const CONVERSATION_LIMIT = 30_000;
@@ -295,6 +306,26 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       record('done', { exit_code: result.code, approved_by: approvedBy });
       return filter.mask(`Exit code: ${result.code}\n${result.stdout ? `\nstdout:\n${result.stdout}` : ''}${result.stderr ? `\nstderr:\n${result.stderr}` : ''}`);
     }
+    if (call.name === 'run_sandbox' && config.sandbox) {
+      const mode = row(vaultId)!.mode;
+      const id = randomUUID();
+      const command = typeof call.input.command === 'string' ? call.input.command : '';
+      const record = (status: string, exitCode: number | null, reason: string | null) => {
+        db.prepare('INSERT INTO tabularius_commands(id,conversation_id,user_id,host_id,command,mode,status,exit_code,reason,approved_by,created_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(id, conversation.id, conversation.user_id, 'sandbox', `[${String(call.input.image)}${call.input.network ? ', network' : ''}] ${command}`, mode, status, exitCode, reason, null, Date.now(), Date.now());
+        audit(conversation.user_id, 'tabularius.sandbox', conversation.id);
+      };
+      if (call.input.network === true && mode !== 'full') { record('refused', null, 'network outside full mode'); return 'Error: refused: the sandbox can use the network only in full permission mode.'; }
+      const response = await fetch(`${config.sandbox.url.replace(/\/+$/, '')}/run`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${config.sandbox.token}` },
+        body: JSON.stringify({ image: call.input.image, command, files: call.input.files, network: call.input.network === true, timeout: call.input.timeout }),
+        signal: AbortSignal.timeout(320_000),
+      });
+      const result = await response.json() as { error?: string; stdout: string; stderr: string; exitCode: number | null; timedOut: boolean };
+      if (!response.ok) { record(response.status === 400 ? 'refused' : 'failed', null, result.error ?? `HTTP ${response.status}`); return `Error: ${result.error ?? `sandbox HTTP ${response.status}`}`; }
+      record('done', result.exitCode, result.timedOut ? 'timed out' : null);
+      return filter.mask(`${result.timedOut ? 'Timed out and stopped.' : `Exit code: ${result.exitCode}`}\n${result.stdout ? `\nstdout:\n${result.stdout}` : ''}${result.stderr ? `\nstderr:\n${result.stderr}` : ''}`);
+    }
     if (call.name === 'search_conversations') {
       const query = typeof call.input.query === 'string' ? call.input.query.trim() : '';
       if (!query) return 'Error: query must be a non-empty string.';
@@ -406,7 +437,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     try {
       for (let round = 0; ; round++) {
         const web = webOn(conversation.vault_id);
-        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() ? SSH_TOOLS : []), ...(config.knowledge && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
+        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() ? SSH_TOOLS : []), ...(config.sandbox ? [sandboxTool(config.sandbox.images)] : []), ...(config.knowledge && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
           ...(web && !config.provider.nativeWeb ? WEB_TOOLS : [])];
         const turn = await config.provider.turn(conversation.system, tools, loadMessages(conversation.id), delta => send('text', { text: delta }), {
           web: web && config.provider.nativeWeb ? config.web!.options : undefined,

@@ -88,6 +88,7 @@ function toolLabel(tool: ToolUse) {
   if (tool.name === 'search_knowledge_base') return t('tabularius.toolKnowledge', { query: value('question') });
   if (tool.name === 'list_hosts') return t('tabularius.toolHosts');
   if (tool.name === 'run_command') return t('tabularius.toolCommand', { host: value('host'), command: value('command') });
+  if (tool.name === 'run_sandbox') return t('tabularius.toolSandbox', { image: value('image'), command: value('command') });
   if (tool.name === 'search_memories') return t('tabularius.toolMemorySearch', { query: value('query') });
   if (tool.name === 'add_memory' || tool.name === 'update_memory') return t('tabularius.toolMemoryWrite', { content: value('content') });
   if (tool.name === 'delete_memory') return t('tabularius.toolMemoryDelete');
