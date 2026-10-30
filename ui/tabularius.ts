@@ -4,9 +4,10 @@ import { formatDate, languageSelect, serverError, t } from './i18n.js';
 interface Session { user: { username: string; mustChangePassword: boolean }; csrf: string }
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
-  deviceRevoked?: boolean; knowledge?: boolean; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
+  deviceRevoked?: boolean; knowledge?: boolean; web?: boolean; mode?: Mode; params?: string; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
 }
-interface Overview { provider: string; model: string; embeddings: boolean; knowledge: boolean; vaults: VaultStatus[] }
+type Mode = 'read-only' | 'restricted' | 'full';
+interface Overview { provider: string; model: string; embeddings: boolean; knowledge: boolean; web: boolean; modes: Mode[]; params: Record<string, unknown>; paramNames: string[]; vaults: VaultStatus[] }
 interface Summary { id: string; title: string; updatedAt: number }
 interface ProposalRef { id: string; title: string; status: string; files?: number }
 interface ToolUse { name: string; input: Record<string, unknown>; proposal?: ProposalRef }
@@ -14,7 +15,8 @@ interface ProposalSummary { id: string; conversationId: string; title: string; s
 interface Hunk { oldStart: number; oldLines: number; newStart: number; newLines: number; lines: string[] }
 interface ProposalFile { op: 'create' | 'edit' | 'move' | 'delete'; path: string; to: string | null; automatic: boolean; binary: boolean; hunks: Hunk[] }
 interface ProposalDetail extends ProposalSummary { vaultId: string; files: ProposalFile[] }
-interface Entry { role: 'user' | 'assistant'; text: string; tools?: ToolUse[]; read?: string[]; error?: string }
+interface Source { url: string; title: string }
+interface Entry { role: 'user' | 'assistant'; text: string; tools?: ToolUse[]; read?: string[]; sources?: Source[]; error?: string }
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let session: Session | undefined;
@@ -79,6 +81,8 @@ function toolLabel(tool: ToolUse) {
   if (tool.name === 'read_note') return t('tabularius.toolRead', { path: value('path') });
   if (tool.name === 'list_notes') return t('tabularius.toolList', { folder: value('folder') || '/' });
   if (tool.name === 'search_knowledge_base') return t('tabularius.toolKnowledge', { query: value('question') });
+  if (tool.name === 'web_search') return t('tabularius.toolWebSearch', { query: value('query') });
+  if (tool.name === 'web_fetch' || tool.name === 'fetch_url') return t('tabularius.toolWebFetch', { url: value('url') });
   if (tool.name === 'propose_changes') return tool.proposal
     ? `<button class="proposal-link" data-proposal="${escape(tool.proposal.id)}">${t('tabularius.toolPropose', { title: escape(tool.proposal.title) })}</button> ${statusBadge(tool.proposal.status)}`
     : t('tabularius.toolProposeFailed');
@@ -89,7 +93,10 @@ function entryHtml(entry: Entry) {
   if (entry.role === 'user') return `<div class="turn user"><p>${escape(entry.text).replace(/\n/g, '<br>')}</p></div>`;
   const tools = (entry.tools ?? []).map(tool => `<li>${toolLabel(tool)}</li>`).join('');
   const read = entry.read?.length ? `<div class="read"><small>${t('tabularius.readNotes')}</small>${render(entry.read.map(path => `[[${path}]]`).join('  '))}</div>` : '';
-  return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}<div class="answer">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}</div>`;
+  const web = (entry.sources ?? []).filter(source => /^https?:/.test(source.url));
+  const sources = web.length ? `<div class="read"><small>${t('tabularius.sources')}</small><ol class="sources">${web.map(source =>
+    `<li><a href="${escape(source.url)}" target="_blank" rel="noopener noreferrer">${escape(source.title || source.url)}</a></li>`).join('')}</ol></div>` : '';
+  return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}<div class="answer">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}${sources}</div>`;
 }
 
 function login() {
@@ -178,6 +185,12 @@ function drawSettings(current: VaultStatus) {
     <div class="card"><h2>${t('tabularius.rules')}</h2><form id="rules" class="stack">
       ${rulesFields(current.excluded ?? '', current.masks ?? '')}
       <button class="primary" type="submit">${t('common.save')}</button></form></div>
+    <div class="card"><h2>${t('tabularius.modeTitle')}</h2><p>${t('tabularius.modeDesc')}</p>
+      <label>${t('tabularius.mode')}<select id="mode">${(['read-only', 'restricted', 'full'] as Mode[]).map(mode =>
+        `<option value="${mode}" ${current.mode === mode ? 'selected' : ''} ${overview!.modes.includes(mode) ? '' : 'disabled'}>${t(`tabularius.mode.${mode}`)}</option>`).join('')}</select></label>
+      ${overview!.web ? `<label class="check"><input type="checkbox" id="web" ${current.web ? 'checked' : ''}> ${t('tabularius.webEnable')}</label><small>${t('tabularius.webDesc')}</small>` : ''}</div>
+    <div class="card"><h2>${t('tabularius.paramsTitle')}</h2><form id="params" class="stack"><label>${t('tabularius.params')}<textarea name="params" rows="3" spellcheck="false" placeholder='{"effort": "high"}'>${escape(current.params ?? '')}</textarea>
+      <small>${t('tabularius.paramsHint', { names: escape(overview!.paramNames.join(', ')), defaults: escape(JSON.stringify(overview!.params)) })}</small></label><button class="primary" type="submit">${t('common.save')}</button></form></div>
     ${overview!.knowledge ? `<div class="card"><h2>${t('tabularius.knowledge')}</h2><p>${t('tabularius.knowledgeDesc')}</p>
       <label class="check"><input type="checkbox" id="knowledge" ${current.knowledge ? 'checked' : ''}> ${t('tabularius.knowledgeEnable')}</label></div>` : ''}
     <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.model')}</dt><dd>${escape(`${overview!.provider} ${overview!.model}`)}</dd>
@@ -186,6 +199,20 @@ function drawSettings(current: VaultStatus) {
       ${current.log?.length ? `<details><summary>${t('tabularius.log')}</summary><pre class="mono">${escape(current.log.join('\n'))}</pre></details>` : ''}</div>
     <div class="card"><h2>${t('tabularius.disable')}</h2><p>${t('tabularius.disableDesc')}</p><button id="disable" class="danger">${t('tabularius.disable')}</button></div>`);
   document.getElementById('reload')!.addEventListener('click', () => void run(refresh));
+  document.getElementById('mode')!.addEventListener('change', event => void run(async () => {
+    const select = event.target as HTMLSelectElement;
+    if (select.value === 'full' && !confirm(t('tabularius.confirmFull'))) { select.value = current.mode ?? 'read-only'; return; }
+    await api(`/tabularius/vaults/${vaultId}/mode`, 'PUT', { mode: select.value });
+    await refresh(); message(t('tabularius.saved'));
+  }));
+  document.getElementById('web')?.addEventListener('change', event => void run(async () => {
+    await api(`/tabularius/vaults/${vaultId}/web`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
+    await refresh(); message(t('tabularius.saved'));
+  }));
+  form('params', async data => {
+    await api(`/tabularius/vaults/${vaultId}/params`, 'PUT', { params: data.get('params') });
+    await refresh(); message(t('tabularius.saved'));
+  });
   document.getElementById('knowledge')?.addEventListener('change', event => void run(async () => {
     await api(`/tabularius/vaults/${vaultId}/knowledge`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
     await refresh(); message(t('tabularius.saved'));
@@ -302,7 +329,7 @@ async function ask(text: string) {
           const tool = answer.tools!.find(item => item.name === 'propose_changes' && !item.proposal);
           if (tool) tool.proposal = data;
         }
-        else if (event === 'done') answer.read = data.read;
+        else if (event === 'done') { answer.read = data.read; answer.sources = data.sources; }
         else if (event === 'error') answer.error = data.message;
         update();
       }

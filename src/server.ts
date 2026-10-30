@@ -7,7 +7,7 @@ import { loadConsole } from './console-assets.js';
 import { rejection } from './policy.js';
 import { sendMail, type SmtpConfig } from './smtp.js';
 import { Couch, basic, type CouchConfig } from './couch.js';
-import { createTabularius, type TabulariusConfig } from './tabularius/index.js';
+import { createTabularius, MODES, type TabulariusConfig } from './tabularius/index.js';
 
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
@@ -500,7 +500,8 @@ export async function createGateway(config: Config) {
       const t = tabularius!;
       if (route.length === 1 && method === 'GET') {
         const vaults = db.prepare('SELECT * FROM vaults WHERE owner_id=?').all(user.id) as unknown as Vault[];
-        json(res, 200, { provider: t.provider.name, model: t.provider.model, embeddings: t.embeddings, knowledge: t.knowledge && user.role === 'admin', vaults: vaults.map(t.status) }); return;
+        json(res, 200, { provider: t.provider.name, model: t.provider.model, embeddings: t.embeddings, knowledge: t.knowledge && user.role === 'admin', web: t.web, params: t.params, paramNames: t.paramNames,
+          modes: user.role === 'admin' ? MODES.slice(0, MODES.indexOf(t.modeLimit) + 1) : ['read-only'], vaults: vaults.map(t.status) }); return;
       }
       if (route[1] === 'vaults' && route.length >= 3) {
         const vault = ownedVault(route[2], user);
@@ -526,6 +527,23 @@ export async function createGateway(config: Config) {
           if (typeof data.enabled !== 'boolean') fail(400, 'enabled must be a boolean');
           t.setKnowledge(vault.id, user, data.enabled as boolean);
           audit(user.id, data.enabled ? 'tabularius.knowledge.enable' : 'tabularius.knowledge.disable', vault.id);
+          json(res, 200, t.status(vault)); return;
+        }
+        if (route.length === 4 && route[3] === 'web' && method === 'PUT') {
+          const data = await body(req);
+          if (typeof data.enabled !== 'boolean') fail(400, 'enabled must be a boolean');
+          t.setWeb(vault.id, data.enabled as boolean);
+          audit(user.id, data.enabled ? 'tabularius.web.enable' : 'tabularius.web.disable', vault.id);
+          json(res, 200, t.status(vault)); return;
+        }
+        if (route.length === 4 && route[3] === 'params' && method === 'PUT') {
+          t.setParams(vault.id, field(await body(req), 'params', 4000, 0));
+          json(res, 200, t.status(vault)); return;
+        }
+        if (route.length === 4 && route[3] === 'mode' && method === 'PUT') {
+          const data = await body(req);
+          t.setMode(vault.id, user, data.mode);
+          audit(user.id, `tabularius.mode.${data.mode}`, vault.id);
           json(res, 200, t.status(vault)); return;
         }
         if (route.length === 4 && route[3] === 'conversations' && method === 'GET') { json(res, 200, t.conversations(vault.id, user)); return; }

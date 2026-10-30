@@ -163,6 +163,18 @@ export function openStore(path: string) {
   `);
     version = 7;
   }
-  if (version !== 7) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 7) {
+    // Tabularius: web access, the permission mode and model parameters, per vault.
+    db.exec(`
+    BEGIN;
+    ALTER TABLE tabularius_vaults ADD COLUMN web INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tabularius_vaults ADD COLUMN mode TEXT NOT NULL DEFAULT 'read-only' CHECK(mode IN ('read-only','restricted','full'));
+    ALTER TABLE tabularius_vaults ADD COLUMN params TEXT NOT NULL DEFAULT '';
+    PRAGMA user_version=8;
+    COMMIT;
+  `);
+    version = 8;
+  }
+  if (version !== 8) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

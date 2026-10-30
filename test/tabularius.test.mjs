@@ -170,3 +170,32 @@ test('proposals are checked against the working copy and applied without turning
     await assert.rejects(apply(root, built.changes), /missing\t/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('model parameters are checked per provider', async () => {
+  const { checkParams, ParamsError } = await import('../dist/tabularius/params.js');
+  assert.deepEqual(checkParams('anthropic', '{"effort":"high","max_tokens":32000}'), { effort: 'high', max_tokens: 32000 });
+  assert.deepEqual(checkParams('anthropic', ''), {});
+  assert.throws(() => checkParams('anthropic', '{"temperature":0.7}'), ParamsError);
+  assert.throws(() => checkParams('openai', '{"reasoning_effort":"huge"}'), /reasoning_effort/);
+  assert.deepEqual(checkParams('vllm', '{"temperature":0.6,"top_k":20,"chat_template_kwargs":{"enable_thinking":false}}').top_k, 20);
+  assert.throws(() => checkParams('vllm', '{"top_k":1.5}'), /top_k/);
+  assert.throws(() => checkParams('vllm', '[1]'), /JSON object/);
+});
+
+test('web fetch addresses follow the permission mode', async () => {
+  const { addressPolicy, domainAllowed, htmlText, urlsIn } = await import('../dist/tabularius/web.js');
+  const readOnly = addressPolicy('read-only', []);
+  assert.equal(readOnly('93.184.216.34', 'example.com'), true);
+  assert.equal(readOnly('2606:4700::1111', 'x'), true);
+  for (const address of ['127.0.0.1', '10.1.2.3', '192.168.10.100', '169.254.169.254', '::1', 'fd00::1', '100.64.0.1', '::ffff:127.0.0.1', '::ffff:10.0.0.1']) assert.equal(readOnly(address, 'x'), false, address);
+  const restricted = addressPolicy('restricted', ['192.168.10.0/24', 'gitlab.lan']);
+  assert.equal(restricted('192.168.10.100', 'oblivaria'), true);
+  assert.equal(restricted('10.0.0.9', 'gitlab.lan'), true);
+  assert.equal(restricted('10.0.0.9', 'other.lan'), false);
+  assert.equal(addressPolicy('full', [])('127.0.0.1', 'localhost'), true);
+  assert.equal(domainAllowed({ allowed: ['docs.vllm.ai'], blocked: [], maxUses: 1 }, 'https://docs.vllm.ai/en/latest'), true);
+  assert.equal(domainAllowed({ allowed: ['docs.vllm.ai'], blocked: [], maxUses: 1 }, 'https://vllm.ai'), false);
+  assert.equal(domainAllowed({ allowed: [], blocked: ['example.org'], maxUses: 1 }, 'https://a.example.org/x'), false);
+  assert.equal(htmlText('<p>a &amp; b</p><script>x()</script><div>c&#x4e2d;</div>'), 'a & b\n\nc中');
+  assert.deepEqual(urlsIn('见 https://example.com/a#x，以及 (https://b.org/c).'), ['https://example.com/a', 'https://b.org/c']);
+});
