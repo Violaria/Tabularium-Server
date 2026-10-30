@@ -37,7 +37,7 @@ for (const version of [1, 2]) {
     legacy.close();
     try {
       const upgraded = openStore(path);
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 6);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 7);
       assert.equal(upgraded.prepare('SELECT kindle_address FROM users').get().kindle_address, null);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM kindle_deliveries').get().n, 0);
       assert.deepEqual(read(upgraded), before);

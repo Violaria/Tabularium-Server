@@ -152,6 +152,17 @@ export function openStore(path: string) {
   `);
     version = 6;
   }
-  if (version !== 6) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 6) {
+    // Tabularius: the administrator's knowledge base switch, and the embedding model the index was built with.
+    db.exec(`
+    BEGIN;
+    ALTER TABLE tabularius_vaults ADD COLUMN knowledge INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tabularius_vaults ADD COLUMN embedding_model TEXT;
+    PRAGMA user_version=7;
+    COMMIT;
+  `);
+    version = 7;
+  }
+  if (version !== 7) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

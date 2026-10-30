@@ -8,13 +8,14 @@ import type { Couch } from '../couch.js';
 import { digest, token, type User, type Vault } from '../store.js';
 import { createClients, inspect, open, seal, WrongPassphrase } from './client.js';
 import { checkMasks, createFilter, type Filter } from './filter.js';
+import type { KnowledgeBase } from './knowledge.js';
 import { BUILT_IN, VAULT_RULES } from './prompt.js';
 import { ProviderError, type Message, type Part, type Provider, type Tool } from './providers.js';
 import { apply, build, ProposalError, type Change } from './proposals.js';
 import { forget, notes, search, update, type Embedder } from './search.js';
 
-export interface TabulariusConfig { key: Buffer; root: string; cli: string; provider: Provider; embedder?: Embedder }
-interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string }
+export interface TabulariusConfig { key: Buffer; root: string; cli: string; provider: Provider; embedder?: Embedder; knowledge?: KnowledgeBase }
+interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string; knowledge: number; embedding_model: string | null }
 interface Proposal { id: string; conversation_id: string; call_id: string; vault_id: string; user_id: string; title: string; summary: string; status: 'pending' | 'applied' | 'discarded'; error: string | null; created_at: number; decided_at: number | null }
 interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number }
 
@@ -45,6 +46,11 @@ const TOOLS: Tool[] = [
       }, required: ['op'] } },
     }, required: ['title', 'summary', 'changes'] } },
 ];
+const KNOWLEDGE_TOOL: Tool = { name: 'search_knowledge_base',
+  description: 'Searches the local knowledge base on this server (RAGFlow, with reranking), which holds ingested copies of the owner\'s notes. ' +
+    'It updates on a schedule and may lag behind the vault, so prefer search_notes and read_note for what this vault says now. ' +
+    'A result shown as [[path]] is also a note in this vault: cite and read it as a note. Cite other results by their dataset and path in plain text.',
+  parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question or keywords, in the language of the notes' } }, required: ['question'] } };
 
 /**
  * The AI curator. `fail` raises the gateway's HTTP errors; `cancel` drops proxied sync connections of a revoked device.
@@ -64,6 +70,12 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     const next = (indexing.get(vaultId) ?? Promise.resolve()).then(async () => {
       const current = row(vaultId);
       if (!current) return;
+      // Vectors of different models are not comparable: a new model rebuilds the vault's index.
+      const model = config.embedder?.model ?? null;
+      if (current.embedding_model !== model) {
+        forget(db, vaultId);
+        db.prepare('UPDATE tabularius_vaults SET embedding_model=? WHERE vault_id=?').run(model, vaultId);
+      }
       try { await update(db, vaultId, clients.working(vaultId), filterOf(current), config.embedder); indexErrors.delete(vaultId); }
       catch (error) { indexErrors.set(vaultId, (error as Error).message.slice(0, 300)); }
     });
@@ -125,7 +137,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     const counts = db.prepare('SELECT (SELECT count(*) FROM tabularius_files WHERE vault_id=?) AS notes, (SELECT count(*) FROM tabularius_chunks WHERE vault_id=?) AS chunks').get(vault.id, vault.id) as { notes: number; chunks: number };
     return { id: vault.id, name: vault.name, enabled: true, enabledAt: current.enabled_at, excluded: current.excluded, masks: current.masks,
       running: Boolean(client?.running), replicated: Boolean(client?.replicated), restarts: client?.restarts ?? 0, deviceRevoked: Boolean(device.revoked),
-      indexError: indexErrors.get(vault.id) ?? null, log: client?.log.slice(-8) ?? [], ...counts };
+      knowledge: Boolean(current.knowledge), indexError: indexErrors.get(vault.id) ?? null, log: client?.log.slice(-8) ?? [], ...counts };
   }
 
   // Tools: read-only access to the working copy, filtered and masked before anything leaves the server.
@@ -138,6 +150,14 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     send: (event: string, data: unknown) => void): Promise<string> {
     const vaultId = conversation.vault_id;
     const root = clients.working(vaultId);
+    if (call.name === 'search_knowledge_base' && config.knowledge && row(vaultId)?.knowledge) {
+      if (typeof call.input.question !== 'string' || !call.input.question.trim()) return 'Error: question must be a non-empty string.';
+      const present = new Set(await notes(root));
+      const chunks = (await config.knowledge.search(call.input.question)).filter(chunk => !filter.excluded(chunk.document_name));
+      if (!chunks.length) return 'No matching passages in the knowledge base.';
+      return filter.mask(chunks.map(chunk => `${present.has(chunk.document_name) ? `[[${chunk.document_name}]]` : `Knowledge base ${chunk.dataset_name}: ${chunk.document_name}`}` +
+        ` (similarity ${chunk.similarity.toFixed(2)})\n${chunk.content}`).join('\n\n---\n\n'));
+    }
     if (call.name === 'propose_changes') {
       let built;
       try { built = await build(root, filter, call.input); } catch (error) {
@@ -210,7 +230,8 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     const read = new Set<string>();
     try {
       for (let round = 0; ; round++) {
-        const turn = await config.provider.turn(conversation.system, TOOLS, loadMessages(conversation.id), delta => send('text', { text: delta }));
+        const tools = config.knowledge && row(conversation.vault_id)?.knowledge ? [...TOOLS, KNOWLEDGE_TOOL] : TOOLS;
+        const turn = await config.provider.turn(conversation.system, tools, loadMessages(conversation.id), delta => send('text', { text: delta }));
         append(conversation.id, { role: 'assistant', ...turn });
         const calls = turn.parts.filter((part): part is Extract<Part, { type: 'tool_call' }> => part.type === 'tool_call');
         if (!calls.length) break;
@@ -263,6 +284,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   return {
     provider: config.provider,
     embeddings: Boolean(config.embedder),
+    knowledge: Boolean(config.knowledge),
     async start(url: string) {
       syncUrl = url;
       renew();
@@ -272,6 +294,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       clearInterval(timer);
       for (const { vault_id } of db.prepare('SELECT vault_id FROM tabularius_vaults').all() as { vault_id: string }[]) await clients.stop(vault_id);
       await Promise.all(indexing.values());
+      await config.knowledge?.close();
     },
     status, enable, disable, reindex,
     rules(vaultId: string, excluded: string, masks: string) {
@@ -286,6 +309,13 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         db.prepare('DELETE FROM tabularius_files WHERE vault_id=? AND path=?').run(vaultId, path);
       }
       void reindex(vaultId);
+    },
+    /** The knowledge base belongs to the server, so only an administrator switches it on, for their own vault. */
+    setKnowledge(vaultId: string, user: User, enabled: boolean) {
+      if (!config.knowledge) fail(409, 'No knowledge base is configured');
+      if (user.role !== 'admin') fail(403, 'Administrator required');
+      if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
+      db.prepare('UPDATE tabularius_vaults SET knowledge=? WHERE vault_id=?').run(Number(enabled), vaultId);
     },
     conversations(vaultId: string, user: User) {
       return db.prepare('SELECT id, title, created_at AS createdAt, updated_at AS updatedAt FROM tabularius_conversations WHERE vault_id=? AND user_id=? ORDER BY updated_at DESC').all(vaultId, user.id);

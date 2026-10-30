@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createGateway } from './server.js';
 import type { SmtpConfig } from './smtp.js';
+import { ragflow } from './tabularius/knowledge.js';
 import { anthropic, embedder, openai } from './tabularius/providers.js';
 import type { TabulariusConfig } from './tabularius/index.js';
 
@@ -33,7 +34,10 @@ if (provider) {
     cli: resolve(process.env.TABULARIUS_CLI || new URL('../cli/index.cjs', import.meta.url).pathname),
     provider: provider === 'anthropic' ? anthropic(process.env.TABULARIUS_MODEL || 'claude-opus-5-5') : openai(required('TABULARIUS_MODEL')),
     embedder: process.env.TABULARIUS_EMBEDDING_MODEL
-      ? embedder(process.env.TABULARIUS_EMBEDDING_MODEL, process.env.TABULARIUS_EMBEDDING_URL || undefined, process.env.TABULARIUS_EMBEDDING_KEY || undefined) : undefined,
+      ? embedder(process.env.TABULARIUS_EMBEDDING_MODEL, process.env.TABULARIUS_EMBEDDING_URL || undefined, process.env.TABULARIUS_EMBEDDING_KEY || undefined,
+        Number(process.env.TABULARIUS_EMBEDDING_BATCH || 64)) : undefined,
+    knowledge: process.env.TABULARIUS_RAGFLOW_MCP_URL
+      ? ragflow(process.env.TABULARIUS_RAGFLOW_MCP_URL, required('TABULARIUS_RAGFLOW_DATASETS').split(',').map(id => id.trim()).filter(Boolean)) : undefined,
   };
 }
 const gateway = await createGateway({

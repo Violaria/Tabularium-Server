@@ -114,14 +114,14 @@ export function openai(model: string): Provider {
 }
 
 /** Embeddings through an OpenAI-compatible endpoint: OpenAI itself, or a local service at TABULARIUS_EMBEDDING_URL. */
-export function embedder(model: string, url?: string, key?: string): Embedder {
+export function embedder(model: string, url?: string, key?: string, batch = 64): Embedder {
   const client = new OpenAI({ ...(url ? { baseURL: url } : {}), apiKey: key || process.env.OPENAI_API_KEY || 'none' });
   return {
     model,
     async embed(texts) {
       const vectors: Float32Array[] = [];
-      for (let i = 0; i < texts.length; i += 64) {
-        const response = await client.embeddings.create({ model, input: texts.slice(i, i + 64) });
+      for (let i = 0; i < texts.length; i += batch) {
+        const response = await client.embeddings.create({ model, input: texts.slice(i, i + batch) });
         for (const item of response.data.sort((a, b) => a.index - b.index)) vectors.push(Float32Array.from(item.embedding));
       }
       return vectors;

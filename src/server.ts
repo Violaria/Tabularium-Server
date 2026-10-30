@@ -500,7 +500,7 @@ export async function createGateway(config: Config) {
       const t = tabularius!;
       if (route.length === 1 && method === 'GET') {
         const vaults = db.prepare('SELECT * FROM vaults WHERE owner_id=?').all(user.id) as unknown as Vault[];
-        json(res, 200, { provider: t.provider.name, model: t.provider.model, embeddings: t.embeddings, vaults: vaults.map(t.status) }); return;
+        json(res, 200, { provider: t.provider.name, model: t.provider.model, embeddings: t.embeddings, knowledge: t.knowledge && user.role === 'admin', vaults: vaults.map(t.status) }); return;
       }
       if (route[1] === 'vaults' && route.length >= 3) {
         const vault = ownedVault(route[2], user);
@@ -519,6 +519,13 @@ export async function createGateway(config: Config) {
         if (route.length === 4 && route[3] === 'rules' && method === 'PUT') {
           const data = await body(req, 65_536);
           t.rules(vault.id, field(data, 'excluded', 20_000, 0), field(data, 'masks', 20_000, 0));
+          json(res, 200, t.status(vault)); return;
+        }
+        if (route.length === 4 && route[3] === 'knowledge' && method === 'PUT') {
+          const data = await body(req);
+          if (typeof data.enabled !== 'boolean') fail(400, 'enabled must be a boolean');
+          t.setKnowledge(vault.id, user, data.enabled as boolean);
+          audit(user.id, data.enabled ? 'tabularius.knowledge.enable' : 'tabularius.knowledge.disable', vault.id);
           json(res, 200, t.status(vault)); return;
         }
         if (route.length === 4 && route[3] === 'conversations' && method === 'GET') { json(res, 200, t.conversations(vault.id, user)); return; }

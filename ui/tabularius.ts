@@ -4,9 +4,9 @@ import { formatDate, languageSelect, serverError, t } from './i18n.js';
 interface Session { user: { username: string; mustChangePassword: boolean }; csrf: string }
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
-  deviceRevoked?: boolean; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
+  deviceRevoked?: boolean; knowledge?: boolean; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
 }
-interface Overview { provider: string; model: string; embeddings: boolean; vaults: VaultStatus[] }
+interface Overview { provider: string; model: string; embeddings: boolean; knowledge: boolean; vaults: VaultStatus[] }
 interface Summary { id: string; title: string; updatedAt: number }
 interface ProposalRef { id: string; title: string; status: string; files?: number }
 interface ToolUse { name: string; input: Record<string, unknown>; proposal?: ProposalRef }
@@ -78,6 +78,7 @@ function toolLabel(tool: ToolUse) {
   if (tool.name === 'search_notes') return t('tabularius.toolSearch', { query: value('query') });
   if (tool.name === 'read_note') return t('tabularius.toolRead', { path: value('path') });
   if (tool.name === 'list_notes') return t('tabularius.toolList', { folder: value('folder') || '/' });
+  if (tool.name === 'search_knowledge_base') return t('tabularius.toolKnowledge', { query: value('question') });
   if (tool.name === 'propose_changes') return tool.proposal
     ? `<button class="proposal-link" data-proposal="${escape(tool.proposal.id)}">${t('tabularius.toolPropose', { title: escape(tool.proposal.title) })}</button> ${statusBadge(tool.proposal.status)}`
     : t('tabularius.toolProposeFailed');
@@ -177,12 +178,18 @@ function drawSettings(current: VaultStatus) {
     <div class="card"><h2>${t('tabularius.rules')}</h2><form id="rules" class="stack">
       ${rulesFields(current.excluded ?? '', current.masks ?? '')}
       <button class="primary" type="submit">${t('common.save')}</button></form></div>
+    ${overview!.knowledge ? `<div class="card"><h2>${t('tabularius.knowledge')}</h2><p>${t('tabularius.knowledgeDesc')}</p>
+      <label class="check"><input type="checkbox" id="knowledge" ${current.knowledge ? 'checked' : ''}> ${t('tabularius.knowledgeEnable')}</label></div>` : ''}
     <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.model')}</dt><dd>${escape(`${overview!.provider} ${overview!.model}`)}</dd>
       <dt>${t('tabularius.embeddings')}</dt><dd>${overview!.embeddings ? t('tabularius.embeddingsOn') : t('tabularius.embeddingsOff')}</dd>
       <dt>${t('tabularius.enabledAt')}</dt><dd>${formatDate(current.enabledAt!)}</dd></dl>
       ${current.log?.length ? `<details><summary>${t('tabularius.log')}</summary><pre class="mono">${escape(current.log.join('\n'))}</pre></details>` : ''}</div>
     <div class="card"><h2>${t('tabularius.disable')}</h2><p>${t('tabularius.disableDesc')}</p><button id="disable" class="danger">${t('tabularius.disable')}</button></div>`);
   document.getElementById('reload')!.addEventListener('click', () => void run(refresh));
+  document.getElementById('knowledge')?.addEventListener('change', event => void run(async () => {
+    await api(`/tabularius/vaults/${vaultId}/knowledge`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
+    await refresh(); message(t('tabularius.saved'));
+  }));
   form('rules', async data => {
     await api(`/tabularius/vaults/${vaultId}/rules`, 'PUT', { excluded: data.get('excluded'), masks: data.get('masks') });
     await refresh(); message(t('tabularius.saved'));
