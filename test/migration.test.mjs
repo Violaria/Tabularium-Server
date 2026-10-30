@@ -37,7 +37,7 @@ for (const version of [1, 2]) {
     legacy.close();
     try {
       const upgraded = openStore(path);
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 5);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 6);
       assert.equal(upgraded.prepare('SELECT kindle_address FROM users').get().kindle_address, null);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM kindle_deliveries').get().n, 0);
       assert.deepEqual(read(upgraded), before);
@@ -45,6 +45,7 @@ for (const version of [1, 2]) {
       assert.deepEqual({ ...upgraded.prepare('SELECT rebuild_device,rebuild_until,rebuild_started FROM vaults').get() },
         { rebuild_device: null, rebuild_until: null, rebuild_started: null });
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM retired_databases').get().n, 0);
+      assert.equal(upgraded.prepare('SELECT count(*) AS n FROM tabularius_proposals').get().n, 0);
       upgraded.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now(), 'u', 'device.revoke', 'd');
       upgraded.close();
       const reopened = openStore(path);

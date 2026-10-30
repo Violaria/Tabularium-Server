@@ -6,7 +6,10 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { openStore } from '../dist/store.js';
 import { chunk, search, update } from '../dist/tabularius/search.js';
-import { createFilter, REDACTED } from '../dist/tabularius/filter.js';
+import { applyMaskedEdit, createFilter, REDACTED } from '../dist/tabularius/filter.js';
+import { repairLinks } from '../dist/tabularius/links.js';
+import { apply, build, ProposalError } from '../dist/tabularius/proposals.js';
+import { readFile, stat, utimes } from 'node:fs/promises';
 import { open, seal } from '../dist/tabularius/client.js';
 
 test('chunks follow headings, skip front matter and keep fenced headings as text', () => {
@@ -93,4 +96,77 @@ test('index updates incrementally and search combines full text, short terms and
     db.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('edits on masked text keep the masked values', () => {
+  const filter = createFilter('', '');
+  const original = '## 数据库\n\n地址 db.local\npassword: hunter2\ntoken=abc123 备注\n';
+  const masked = filter.mask(original);
+  assert.equal(masked, `## 数据库\n\n地址 db.local\npassword: ${REDACTED}\ntoken=${REDACTED} 备注\n`);
+  const edited = applyMaskedEdit(filter, original, `地址 db.local\npassword: ${REDACTED}\ntoken=${REDACTED}`, `主机 \`db.local\`\npassword: ${REDACTED}\ntoken=${REDACTED}`);
+  assert.equal(edited, '## 数据库\n\n主机 `db.local`\npassword: hunter2\ntoken=abc123 备注\n');
+  assert.equal(applyMaskedEdit(filter, original, `password: ${REDACTED}\n`, ''), '## 数据库\n\n地址 db.local\ntoken=abc123 备注\n');
+  assert.throws(() => applyMaskedEdit(filter, original, `password: ${REDACTED}`, `password: ${REDACTED} ${REDACTED}`), /more \[REDACTED\]/);
+  assert.throws(() => applyMaskedEdit(filter, original, 'password: [RED', 'x'), /cuts through/);
+  assert.throws(() => applyMaskedEdit(filter, original, 'hunter2', 'x'), /not found/);
+  assert.throws(() => applyMaskedEdit(filter, 'a a', 'a', 'b'), /more than once/);
+});
+
+test('links follow moved notes', () => {
+  const before = new Set(['a/旧 名.md', 'b/索引.md', 'a/图.png', 'c/其他.md', 'd/旧 名.md']);
+  const after = new Set(['x/新名.md', 'b/索引.md', 'a/图.png', 'c/其他.md', 'd/旧 名.md']);
+  const moves = new Map([['a/旧 名.md', 'x/新名.md']]);
+  const index = '[看](../a/旧%20名.md#安装) [别处](../c/其他.md) [网](https://e.com/a.md) [[a/旧 名|别名]] [[旧 名]] [[其他]]';
+  assert.equal(repairLinks(index, 'b/索引.md', 'b/索引.md', moves, before, after),
+    '[看](../x/新名.md#安装) [别处](../c/其他.md) [网](https://e.com/a.md) [[x/新名|别名]] [[旧 名]] [[其他]]');
+  // The moved note's own relative links are recomputed from its new folder.
+  assert.equal(repairLinks('![图](图.png) [b](../b/索引.md)', 'a/旧 名.md', 'x/新名.md', moves, before, after), '![图](../a/图.png) [b](../b/索引.md)');
+});
+
+test('proposals are checked against the working copy and applied without turning back modification times', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tabularius-proposal-'));
+  try {
+    await mkdir(join(root, 'a'), { recursive: true }); await mkdir(join(root, 'b')); await mkdir(join(root, '.livesync'));
+    await writeFile(join(root, 'a/旧名.md'), '# 旧名\n\npassword: hunter2\n');
+    await writeFile(join(root, 'a/附图.png'), Buffer.from([1, 2, 3]));
+    await writeFile(join(root, 'b/索引.md'), '- [旧名](../a/旧名.md)\n');
+    await writeFile(join(root, '私密.md'), '[x](a/旧名.md)\n');
+    await writeFile(join(root, '.livesync/x.md'), 'internal');
+    const old = new Date('2020-01-01');
+    await utimes(join(root, 'a/旧名.md'), old, old);
+    const filter = createFilter('私密.md', '');
+
+    await assert.rejects(build(root, filter, { title: 't', changes: [
+      { op: 'edit', path: 'a/旧名.md', edits: [{ old: 'nothing', new: 'x' }] },
+      { op: 'create', path: 'b/索引.md', content: 'x' },
+      { op: 'delete', path: '私密.md' },
+      { op: 'create', path: 'n.md', content: REDACTED },
+      { op: 'move', from: '../etc', to: 'x' },
+    ] }), error => error instanceof ProposalError && error.message.split('\n').length === 5);
+
+    const built = await build(root, filter, { title: '改名', summary: 's', changes: [
+      { op: 'move', from: 'a', to: 'c' },
+      { op: 'edit', path: 'b/索引.md', edits: [{ old: '- [旧名]', new: '- [笔记]' }] },
+      { op: 'create', path: 'b/新.md', content: '新的\n' },
+    ] });
+    assert.deepEqual(built.changes.map(c => [c.op, c.path, c.to, c.automatic]), [
+      ['move', 'a/旧名.md', 'c/旧名.md', false], ['move', 'a/附图.png', 'c/附图.png', false],
+      ['edit', 'b/索引.md', null, false], ['create', 'b/新.md', null, false], ['edit', '私密.md', null, true]]);
+    assert.equal(built.changes[2].after, '- [笔记](../c/旧名.md)\n');
+    assert.equal(built.changes[4].after, '[x](c/旧名.md)\n');
+    assert.equal(built.repaired, 1);
+
+    await writeFile(join(root, 'b/索引.md'), 'changed elsewhere\n');
+    await assert.rejects(apply(root, built.changes), /changed\tb\/索引.md/);
+    assert.equal(await readFile(join(root, 'a/旧名.md'), 'utf8'), '# 旧名\n\npassword: hunter2\n');
+    await writeFile(join(root, 'b/索引.md'), '- [旧名](../a/旧名.md)\n');
+
+    await apply(root, built.changes);
+    assert.equal(await readFile(join(root, 'c/旧名.md'), 'utf8'), '# 旧名\n\npassword: hunter2\n');
+    assert((await stat(join(root, 'c/旧名.md'))).mtimeMs > old.getTime() + 86_400_000);
+    assert.deepEqual([...await readFile(join(root, 'c/附图.png'))], [1, 2, 3]);
+    await assert.rejects(stat(join(root, 'a')));
+    assert.equal(await readFile(join(root, 'b/新.md'), 'utf8'), '新的\n');
+    await assert.rejects(apply(root, built.changes), /missing\t/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -131,6 +131,27 @@ export function openStore(path: string) {
   `);
     version = 5;
   }
-  if (version !== 5) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 5) {
+    // Tabularius change proposals: one row per file, with the source's hash and text at proposal time.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE tabularius_proposals (
+      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES tabularius_conversations(id) ON DELETE CASCADE,
+      call_id TEXT NOT NULL,
+      vault_id TEXT NOT NULL REFERENCES vaults(id), user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL, summary TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','applied','discarded')), error TEXT, created_at INTEGER NOT NULL, decided_at INTEGER
+    ) STRICT;
+    CREATE INDEX tabularius_proposals_user ON tabularius_proposals(user_id, vault_id, created_at);
+    CREATE TABLE tabularius_changes (
+      proposal_id TEXT NOT NULL REFERENCES tabularius_proposals(id) ON DELETE CASCADE, seq INTEGER NOT NULL,
+      op TEXT NOT NULL CHECK(op IN ('create','edit','move','delete')), path TEXT NOT NULL, to_path TEXT, hash TEXT, before TEXT, after TEXT,
+      automatic INTEGER NOT NULL, PRIMARY KEY(proposal_id, seq)
+    ) STRICT;
+    PRAGMA user_version=6;
+    COMMIT;
+  `);
+    version = 6;
+  }
+  if (version !== 6) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

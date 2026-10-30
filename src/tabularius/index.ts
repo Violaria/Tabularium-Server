@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { structuredPatch } from 'diff';
 import { readFile } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
 import { join } from 'node:path';
@@ -9,10 +10,12 @@ import { createClients, inspect, open, seal, WrongPassphrase } from './client.js
 import { checkMasks, createFilter, type Filter } from './filter.js';
 import { BUILT_IN, VAULT_RULES } from './prompt.js';
 import { ProviderError, type Message, type Part, type Provider, type Tool } from './providers.js';
+import { apply, build, ProposalError, type Change } from './proposals.js';
 import { forget, notes, search, update, type Embedder } from './search.js';
 
 export interface TabulariusConfig { key: Buffer; root: string; cli: string; provider: Provider; embedder?: Embedder }
 interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string }
+interface Proposal { id: string; conversation_id: string; call_id: string; vault_id: string; user_id: string; title: string; summary: string; status: 'pending' | 'applied' | 'discarded'; error: string | null; created_at: number; decided_at: number | null }
 interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number }
 
 const RENEW_BEFORE_MS = 15 * 86_400_000;
@@ -25,6 +28,22 @@ const TOOLS: Tool[] = [
     parameters: { type: 'object', properties: { path: { type: 'string', description: 'Vault path, e.g. folder/note.md' } }, required: ['path'] } },
   { name: 'list_notes', description: 'Lists the notes and subfolders directly inside a folder. Use an empty string for the vault root.',
     parameters: { type: 'object', properties: { folder: { type: 'string', description: 'Folder path without trailing slash; empty for the root' } }, required: ['folder'] } },
+  { name: 'propose_changes', description: 'Proposes one batch of changes to the vault for the user to review. Nothing changes until the user applies the proposal. ' +
+    'Ops: create a new note (path, content); edit a note (path, edits: replace each old text, copied exactly from the note as read_note returned it and occurring once, with new text; keep [REDACTED] where the value must stay); ' +
+    'move or rename a file or folder (from, to); delete a file or folder (path). Each path may appear in one change only. Links to moved files are repaired automatically. ' +
+    'If the result reports errors, nothing was saved: fix them and propose again.',
+    parameters: { type: 'object', properties: {
+      title: { type: 'string', description: 'Short title of the proposal, in the user\'s language' },
+      summary: { type: 'string', description: 'What the proposal changes and why, in a few sentences' },
+      changes: { type: 'array', items: { type: 'object', properties: {
+        op: { type: 'string', enum: ['create', 'edit', 'move', 'delete'] },
+        path: { type: 'string', description: 'create, edit, delete: vault path' },
+        content: { type: 'string', description: 'create: the full note' },
+        edits: { type: 'array', items: { type: 'object', properties: { old: { type: 'string' }, new: { type: 'string' } }, required: ['old', 'new'] }, description: 'edit: replacements applied in order' },
+        from: { type: 'string', description: 'move: current path' },
+        to: { type: 'string', description: 'move: new path' },
+      }, required: ['op'] } },
+    }, required: ['title', 'summary', 'changes'] } },
 ];
 
 /**
@@ -115,8 +134,29 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     if (!path || path.split('/').some(part => part === '..' || part === '.' || part.startsWith('.')) || !path.endsWith('.md') || filter.excluded(path)) return undefined;
     return path;
   }
-  async function runTool(vaultId: string, filter: Filter, call: Extract<Part, { type: 'tool_call' }>, read: Set<string>): Promise<string> {
+  async function runTool(conversation: Conversation, filter: Filter, call: Extract<Part, { type: 'tool_call' }>, read: Set<string>,
+    send: (event: string, data: unknown) => void): Promise<string> {
+    const vaultId = conversation.vault_id;
     const root = clients.working(vaultId);
+    if (call.name === 'propose_changes') {
+      let built;
+      try { built = await build(root, filter, call.input); } catch (error) {
+        if (error instanceof ProposalError) return `Error: the proposal was not saved.\n${error.message}`;
+        throw error;
+      }
+      const id = randomUUID();
+      db.exec('BEGIN');
+      db.prepare('INSERT INTO tabularius_proposals(id,conversation_id,call_id,vault_id,user_id,title,summary,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(id, conversation.id, call.id, vaultId, conversation.user_id, built.title, built.summary, 'pending', Date.now());
+      const insert = db.prepare('INSERT INTO tabularius_changes VALUES(?,?,?,?,?,?,?,?,?)');
+      built.changes.forEach((c, i) => insert.run(id, i, c.op, c.path, c.to, c.hash, c.before, c.after, Number(c.automatic)));
+      db.exec('COMMIT');
+      send('proposal', { id, title: built.title, status: 'pending', files: built.changes.length });
+      const own = built.changes.filter(c => !c.automatic).map(c => `${c.op} ${c.path}${c.to ? ` -> ${c.to}` : ''}`);
+      return `Proposal saved for review: ${built.title}\n${own.join('\n')}` +
+        (built.repaired ? `\nLinks to moved files are also updated in ${built.repaired} other note(s).` : '') +
+        '\nIt takes effect only when the user applies it.';
+    }
     if (call.name === 'search_notes') {
       if (typeof call.input.query !== 'string' || !call.input.query.trim()) return 'Error: query must be a non-empty string.';
       await reindex(vaultId);
@@ -174,11 +214,11 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         append(conversation.id, { role: 'assistant', ...turn });
         const calls = turn.parts.filter((part): part is Extract<Part, { type: 'tool_call' }> => part.type === 'tool_call');
         if (!calls.length) break;
-        for (const call of calls) send('tool', { name: call.name, input: call.input });
+        for (const call of calls) send('tool', { name: call.name, input: call.name === 'propose_changes' ? {} : call.input });
         const results: Part[] = round >= MAX_TOOL_ROUNDS
           ? calls.map(call => ({ type: 'tool_result', id: call.id, content: 'Tool limit reached for this answer. Answer with what you have found.' }))
           : await Promise.all(calls.map(async call => ({ type: 'tool_result' as const, id: call.id,
-            content: await runTool(conversation.vault_id, filter, call, read).catch((error: Error) => `Error: ${error.message.slice(0, 300)}`) })));
+            content: await runTool(conversation, filter, call, read, send).catch((error: Error) => `Error: ${error.message.slice(0, 300)}`) })));
         append(conversation.id, { role: 'user', parts: results });
         // A closed page stops the answer after the current round; the transcript stays complete.
         if (round > MAX_TOOL_ROUNDS || res.destroyed) break;
@@ -196,17 +236,29 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     if (!conversation) fail(404, 'Conversation not found');
     return conversation!;
   }
-  /** The visible transcript: user questions, assistant text, and the tools used in between. */
+  /** The visible transcript: user questions, assistant text, and the tools used in between, with proposals by tool call. */
   function transcript(conversationId: string) {
+    const proposals = new Map((db.prepare('SELECT call_id, id, title, status FROM tabularius_proposals WHERE conversation_id=?').all(conversationId) as { call_id: string; id: string; title: string; status: string }[])
+      .map(p => [p.call_id, { id: p.id, title: p.title, status: p.status }]));
     return loadMessages(conversationId).flatMap(message => {
       if (message.role === 'user') {
         const text = message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
         return text ? [{ role: 'user', text }] : [];
       }
       return [{ role: 'assistant', text: message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''),
-        tools: message.parts.flatMap(part => part.type === 'tool_call' ? [{ name: part.name, input: part.input }] : []) }];
+        tools: message.parts.flatMap(part => part.type === 'tool_call'
+          ? [{ name: part.name, input: part.name === 'propose_changes' ? {} : part.input, ...(proposals.has(part.id) ? { proposal: proposals.get(part.id) } : {}) }] : []) }];
     });
   }
+
+  function proposalFor(id: string, user: User) {
+    const proposal = db.prepare('SELECT * FROM tabularius_proposals WHERE id=? AND user_id=?').get(id, user.id) as unknown as Proposal | undefined;
+    if (!proposal) fail(404, 'Proposal not found');
+    return proposal!;
+  }
+  const changesOf = (id: string) => (db.prepare('SELECT op, path, to_path AS "to", hash, before, after, automatic FROM tabularius_changes WHERE proposal_id=? ORDER BY seq').all(id) as unknown as (Omit<Change, 'automatic'> & { automatic: number })[])
+    .map(c => ({ ...c, automatic: Boolean(c.automatic) }));
+  const summaryOf = (p: Proposal) => ({ id: p.id, conversationId: p.conversation_id, title: p.title, summary: p.summary, status: p.status, error: p.error, createdAt: p.created_at, decidedAt: p.decided_at });
 
   return {
     provider: config.provider,
@@ -254,6 +306,40 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       const conversation = conversationFor(id, user);
       if (!row(conversation.vault_id)) fail(404, 'Tabularius is not enabled for this vault');
       await converse(res, conversation, text);
+    },
+    proposals(vaultId: string, user: User) {
+      return (db.prepare('SELECT * FROM tabularius_proposals WHERE vault_id=? AND user_id=? ORDER BY created_at DESC').all(vaultId, user.id) as unknown as Proposal[]).map(summaryOf);
+    },
+    /** A proposal with a unified diff per file; the user sees the notes as they are, without masking. */
+    proposal(id: string, user: User) {
+      const proposal = proposalFor(id, user);
+      return { ...summaryOf(proposal), vaultId: proposal.vault_id, files: changesOf(id).map(c => ({
+        op: c.op, path: c.path, to: c.to, automatic: c.automatic, binary: c.before === null && c.op !== 'create',
+        hunks: c.after === null && c.op === 'move' || c.before === null && c.op !== 'create' ? []
+          : structuredPatch(c.path, c.to ?? c.path, c.before ?? '', c.after ?? '', '', '', { context: 3 }).hunks,
+      })) };
+    },
+    /** Writes a pending proposal into the working copy; the hosted client then syncs it like any local edit. */
+    async apply(id: string, user: User) {
+      const proposal = proposalFor(id, user);
+      if (proposal.status !== 'pending') fail(409, 'Proposal is not pending');
+      if (!row(proposal.vault_id)) fail(404, 'Tabularius is not enabled for this vault');
+      const client = clients.state(proposal.vault_id);
+      if (!client?.running || !client.replicated) fail(409, 'The hosted client is not in sync');
+      try { await apply(clients.working(proposal.vault_id), changesOf(id)); } catch (error) {
+        db.prepare('UPDATE tabularius_proposals SET error=? WHERE id=?').run((error as Error).message.slice(0, 2000), id);
+        if (!(error instanceof ProposalError)) throw error;
+        fail(409, 'Proposal cannot be applied');
+      }
+      db.prepare("UPDATE tabularius_proposals SET status='applied', error=NULL, decided_at=? WHERE id=?").run(Date.now(), id);
+      void reindex(proposal.vault_id);
+      return summaryOf(proposalFor(id, user));
+    },
+    discard(id: string, user: User) {
+      const proposal = proposalFor(id, user);
+      if (proposal.status !== 'pending') fail(409, 'Proposal is not pending');
+      db.prepare("UPDATE tabularius_proposals SET status='discarded', decided_at=? WHERE id=?").run(Date.now(), id);
+      return summaryOf(proposalFor(id, user));
     },
     remove_conversation(id: string, user: User) {
       conversationFor(id, user);

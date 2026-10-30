@@ -526,6 +526,18 @@ export async function createGateway(config: Config) {
           await t.start_conversation(res, vault.id, user, field(await body(req, 65_536), 'message', 8000)); return;
         }
       }
+      if (route[1] === 'vaults' && route.length === 4 && route[3] === 'proposals' && method === 'GET') {
+        json(res, 200, t.proposals(ownedVault(route[2], user).id, user)); return;
+      }
+      if (route[1] === 'proposals' && route.length >= 3) {
+        if (route.length === 3 && method === 'GET') { json(res, 200, t.proposal(route[2], user)); return; }
+        if (route.length === 4 && route[3] === 'apply' && method === 'POST') {
+          const result = await t.apply(route[2], user);
+          audit(user.id, 'tabularius.apply', route[2]);
+          json(res, 200, result); return;
+        }
+        if (route.length === 4 && route[3] === 'discard' && method === 'POST') { json(res, 200, t.discard(route[2], user)); return; }
+      }
       if (route[1] === 'conversations' && route.length >= 3) {
         if (route.length === 3 && method === 'GET') { json(res, 200, t.conversation(route[2], user)); return; }
         if (route.length === 3 && method === 'DELETE') { t.remove_conversation(route[2], user); json(res, 200, { ok: true }); return; }
