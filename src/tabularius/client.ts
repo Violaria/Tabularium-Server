@@ -67,12 +67,13 @@ export function createClients(root: string, cli: string, syncUrl: () => string) 
     await chmod(base, 0o700);
     const settings = join(base, 'settings.json');
     await exec(process.execPath, [cli, 'init-settings', '--force', settings]);
-    // The settings file holds the passphrase in plain text, readable only by the server's user.
+    // The settings file holds the passphrase in plain text, readable only by the server's user. The hosted copy needs every
+    // note, so chunks come in batches with replication; fetching them one by one on demand trips the per-device rate limit.
     await writeFile(settings, JSON.stringify({
       ...JSON.parse(await readFile(settings, 'utf8')), ...hosted.tweaks,
       couchDB_URI: syncUrl(), couchDB_DBNAME: hosted.vaultId, couchDB_USER: hosted.deviceId, couchDB_PASSWORD: hosted.secret,
       isConfigured: true, encrypt: true, passphrase: hosted.passphrase, E2EEAlgorithm: 'v2', usePathObfuscation: true,
-      liveSync: true, syncOnStart: false, syncOnSave: false, usePluginSync: false, deviceAndVaultName: 'Tabularius',
+      liveSync: true, readChunksOnline: false, syncOnStart: false, syncOnSave: false, usePluginSync: false, deviceAndVaultName: 'Tabularius',
     }), { mode: 0o600 });
     return settings;
   }

@@ -23,8 +23,11 @@ export interface Provider {
   nativeWeb: boolean;
   turn(system: string, tools: Tool[], messages: Message[], onText: (text: string) => void, options?: TurnOptions): Promise<Turn>;
 }
-/** `web`: the provider's own web tools with these limits; `params`: checked model parameters (see params.ts). */
-export interface TurnOptions { web?: WebOptions; params?: Params }
+/**
+ * `web`: the provider's own web tools with these limits; `params`: checked model parameters (see params.ts); `answerOnly`: the
+ * tool limit is reached, so the model must answer without calling tools.
+ */
+export interface TurnOptions { web?: WebOptions; params?: Params; answerOnly?: boolean }
 
 /** Cited pages, once each, in order of first citation. */
 function sources(list: { url: string; title?: string | null }[]): Part[] {
@@ -53,7 +56,7 @@ export function anthropic(model: string): Provider {
   };
   return {
     name: 'anthropic', model, nativeWeb: true,
-    async turn(system, tools, messages, onText, { web, params = {} } = {}) {
+    async turn(system, tools, messages, onText, { web, params = {}, answerOnly = false } = {}) {
       const fallback = FALLBACK_MODELS.has(model);
       const stream = client.beta.messages.stream({
         model, max_tokens: (params.max_tokens as number | undefined) ?? 64000,
@@ -66,6 +69,7 @@ export function anthropic(model: string): Provider {
         system,
         tools: [...tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters, eager_input_streaming: true })),
           ...(web ? webTools(web) : [])],
+        ...(answerOnly ? { tool_choice: { type: 'none' as const } } : {}),
         // Turns from another provider that left nothing readable here (only its own web activity) are skipped.
         messages: messages.map(message => ({
           role: message.role,
@@ -117,7 +121,7 @@ export function openai(model: string): Provider {
   };
   return {
     name: 'openai', model, nativeWeb: true,
-    async turn(system, tools, messages, onText, { web, params = {} } = {}) {
+    async turn(system, tools, messages, onText, { web, params = {}, answerOnly = false } = {}) {
       let response: OpenAI.Responses.Response | undefined;
       try {
         const stream = await client.responses.create({
@@ -130,6 +134,7 @@ export function openai(model: string): Provider {
           instructions: system, input: messages.flatMap(toItems),
           tools: [...tools.map(tool => ({ type: 'function' as const, name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })),
             ...(web ? [{ type: 'web_search' as const, ...(web.allowed.length ? { filters: { allowed_domains: web.allowed } } : {}) }] : [])],
+          ...(answerOnly ? { tool_choice: 'none' as const } : {}),
         });
         for await (const event of stream) {
           if (event.type === 'response.output_text.delta') onText(event.delta);
@@ -188,7 +193,7 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
   };
   return {
     name: 'vllm', model, nativeWeb: false,
-    async turn(system, tools, messages, onText, { params = {} } = {}) {
+    async turn(system, tools, messages, onText, { params = {}, answerOnly = false } = {}) {
       const calls: { id: string; name: string; arguments: string }[] = [];
       let text = ''; let reasoning = '';
       try {
@@ -196,8 +201,11 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
         const stream = await client.chat.completions.create({
           ...params,
           model, stream: true,
-          messages: [{ role: 'system', content: system }, ...fit(messages, contextTokens - estimate(system) - estimate(JSON.stringify(tools))).flatMap(toMessages)],
+          messages: [{ role: 'system', content: system }, ...fit(messages, contextTokens - estimate(system) - estimate(JSON.stringify(tools))).flatMap(toMessages),
+            // With tool_choice none alone Qwen often still tries a call, which vLLM drops, leaving an empty answer.
+            ...(answerOnly ? [{ role: 'user' as const, content: ANSWER_NOW }] : [])],
           tools: tools.map(tool => ({ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
+          ...(answerOnly ? { tool_choice: 'none' as const } : {}),
         } as OpenAI.Chat.ChatCompletionCreateParamsStreaming);
         for await (const chunk of stream) {
           const delta = chunk.choices[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning?: string }) | undefined;
@@ -224,6 +232,9 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
     },
   };
 }
+
+// Sent only in the request, never stored, so it is not taken for one of the user's questions.
+const ANSWER_NOW = 'The tool limit for this answer is reached. Answer now with what you have found, without calling tools.';
 
 // About three characters per token, a cautious average for mixed Chinese and English.
 const estimate = (text: string) => Math.ceil(text.length / 3);
