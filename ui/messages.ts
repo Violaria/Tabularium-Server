@@ -759,6 +759,8 @@ const en = {
   'error.Model not available': 'This model is not offered on this server.',
   'error.Tabularius.md not found': 'The vault has no Tabularius.md.',
   'error.Tabularius.md is excluded': 'Tabularius.md is excluded from what Tabularius may read.',
+  'notes.copyCode': 'Copy',
+  'notes.codeCopied': 'Copied',
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1521,6 +1523,8 @@ const zh: Catalogue = {
   'error.Model not available': '这台服务器没有提供这个模型。',
   'error.Tabularius.md not found': '笔记库中没有 Tabularius.md。',
   'error.Tabularius.md is excluded': 'Tabularius.md 在排除的路径中。',
+  'notes.copyCode': '复制',
+  'notes.codeCopied': '已复制',
 };
 
 const la: Catalogue = {
@@ -2280,6 +2284,8 @@ const la: Catalogue = {
   "error.Model not available": "Hoc exemplar in hoc ministro non offertur.",
   "error.Tabularius.md not found": "Tabularium Tabularius.md non habet.",
   "error.Tabularius.md is excluded": "Tabularius.md ex legendis exclusum est.",
+  "notes.copyCode": "Exscribe",
+  "notes.codeCopied": "Exscriptum",
 };
 
 export const catalogues = { en, zh, la } as const;
