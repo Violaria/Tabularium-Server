@@ -34,7 +34,7 @@ export function createServerSettings(db: DatabaseSync, secret: Buffer | undefine
     const smtp = initial.smtp;
     write({
       mail: smtp ? { host: smtp.host, port: smtp.port, security: smtp.security, user: smtp.user ?? '', from: smtp.from,
-        password: smtp.password && secret ? sealed(smtp.password) : null, hint: smtp.password ? hintOf(smtp.password) : '' } : null,
+        password: smtp.password && secret ? sealed(smtp.password) : null, hint: smtp.password && secret ? hintOf(smtp.password) : '' } : null,
       kindle: { domains: initial.kindleDomains ?? ['kindle.com', 'free.kindle.com'], daily: initial.kindleDaily ?? 30, maxMegabytes: Math.round((initial.kindleMaxBytes ?? 50 * MB) / MB) },
       shares: { enabled: initial.shares?.enabled ?? true, url: initial.shares?.url ?? '', maxMegabytes: Math.round((initial.shares?.maxBytes ?? 50 * MB) / MB) },
       access: {
@@ -56,8 +56,9 @@ export function createServerSettings(db: DatabaseSync, secret: Buffer | undefine
     smtp(): SmtpConfig | undefined {
       const mail = values().mail;
       if (!mail?.host || !mail.from) return undefined;
-      return { host: mail.host, port: mail.port, security: mail.security, user: mail.user || undefined, from: mail.from,
-        password: mail.password && secret ? open(secret, Buffer.from(mail.password, 'base64')) : undefined };
+      // Without the secret key no password can be stored; the one given in the configuration is used as it is.
+      const password = mail.password && secret ? open(secret, Buffer.from(mail.password, 'base64')) : secret ? undefined : initial.smtp?.password;
+      return { host: mail.host, port: mail.port, security: mail.security, user: mail.user || undefined, from: mail.from, password };
     },
     kindleDomains: () => values().kindle.domains,
     kindleDaily: () => values().kindle.daily,
@@ -74,7 +75,8 @@ export function createServerSettings(db: DatabaseSync, secret: Buffer | undefine
     /** What the settings page shows: the password only as set or not, with its last four characters. */
     view() {
       const { mail, ...rest } = values();
-      return { ...rest, mail: mail ? { host: mail.host, port: mail.port, security: mail.security, user: mail.user, from: mail.from, passwordSet: Boolean(mail.password), passwordHint: mail.hint } : null,
+      return { ...rest, mail: mail ? { host: mail.host, port: mail.port, security: mail.security, user: mail.user, from: mail.from,
+        passwordSet: Boolean(mail.password) || (!secret && Boolean(initial.smtp?.password)), passwordHint: mail.hint } : null,
         secretKey: Boolean(secret) };
     },
     /** Saves the sections the page sent. A password is replaced only when one is given; an empty one removes it. */
