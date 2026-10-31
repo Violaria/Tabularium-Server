@@ -73,9 +73,12 @@ export function anthropic(model: string, apiKey?: string): Provider {
         ...(fallback ? { fallbacks: 'default' as const } : {}),
         cache_control: { type: 'ephemeral' },
         system,
-        tools: [...tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters, eager_input_streaming: true })),
-          ...(web ? webTools(web) : [])],
-        ...(answerOnly ? { tool_choice: { type: 'none' as const } } : {}),
+        // A request without tools (a connection test) leaves the fields out: the APIs reject an empty list.
+        ...(tools.length || web ? {
+          tools: [...tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters, eager_input_streaming: true })),
+            ...(web ? webTools(web) : [])],
+          ...(answerOnly ? { tool_choice: { type: 'none' as const } } : {}),
+        } : {}),
         // Turns from another provider that left nothing readable here (only its own web activity) are skipped.
         messages: messages.map(message => ({
           role: message.role,
@@ -138,9 +141,11 @@ export function openai(model: string, apiKey?: string): Provider {
           ...(params.temperature !== undefined ? { temperature: params.temperature as number } : {}),
           ...(params.top_p !== undefined ? { top_p: params.top_p as number } : {}),
           instructions: system, input: messages.flatMap(toItems),
-          tools: [...tools.map(tool => ({ type: 'function' as const, name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })),
-            ...(web ? [{ type: 'web_search' as const, ...(web.allowed.length ? { filters: { allowed_domains: web.allowed } } : {}) }] : [])],
-          ...(answerOnly ? { tool_choice: 'none' as const } : {}),
+          ...(tools.length || web ? {
+            tools: [...tools.map(tool => ({ type: 'function' as const, name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })),
+              ...(web ? [{ type: 'web_search' as const, ...(web.allowed.length ? { filters: { allowed_domains: web.allowed } } : {}) }] : [])],
+            ...(answerOnly ? { tool_choice: 'none' as const } : {}),
+          } : {}),
         });
         for await (const event of stream) {
           if (event.type === 'response.output_text.delta') onText(event.delta);
@@ -210,8 +215,10 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
           messages: [{ role: 'system', content: system }, ...fit(messages, contextTokens - estimate(system) - estimate(JSON.stringify(tools))).flatMap(toMessages),
             // With tool_choice none alone Qwen often still tries a call, which vLLM drops, leaving an empty answer.
             ...(answerOnly ? [{ role: 'user' as const, content: ANSWER_NOW }] : [])],
-          tools: tools.map(tool => ({ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
-          ...(answerOnly ? { tool_choice: 'none' as const } : {}),
+          ...(tools.length ? {
+            tools: tools.map(tool => ({ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
+            ...(answerOnly ? { tool_choice: 'none' as const } : {}),
+          } : {}),
         } as OpenAI.Chat.ChatCompletionCreateParamsStreaming);
         for await (const chunk of stream) {
           const delta = chunk.choices[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning?: string }) | undefined;
