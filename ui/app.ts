@@ -1,7 +1,7 @@
 // The Tabularium web application: one sign-in, one shell, and the modules home, web notes, Tabularius, administration
 // and account settings. Every path of the application loads this page; the path selects the module.
-import { languageSelect, t, type Language } from './i18n.js';
-import { api, ApiError, applyTheme, captureLinks, connect, escape, form, icon, input, message, navigate, run, state, type Session } from './core.js';
+import { t, type Language } from './i18n.js';
+import { api, ApiError, applyTheme, captureLinks, connect, escape, form, icon, input, message, navigate, run, state, storedTheme, clearMessage, type Session } from './core.js';
 import { renderHome } from './home.js';
 import { renderAdmin } from './admin.js';
 import { renderAccount } from './account.js';
@@ -44,7 +44,7 @@ function moduleOf(path: string): Module {
 
 function signIn() {
   document.title = 'Tabularium';
-  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('console.signInTitle')}</h1><div id="message" role="status" hidden></div><form id="login" class="stack">${input(t('common.username'), 'username', 'text', 'autocomplete="username"')}${input(t('common.password'), 'password', 'password', 'autocomplete="current-password"')}<button class="primary" type="submit">${t('common.signIn')}</button></form></div><small>${t('console.accountsHint')}</small></div></div>`;
+  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('console.signInTitle')}</h1><form id="login" class="stack">${input(t('common.username'), 'username', 'text', 'autocomplete="username"')}${input(t('common.password'), 'password', 'password', 'autocomplete="current-password"')}<button class="primary" type="submit">${t('common.signIn')}</button></form></div><small>${t('console.accountsHint')}</small></div></div>`;
   form('login', async data => {
     state.session = await api<Session>('/web-session', 'POST', Object.fromEntries(data));
     draw();
@@ -53,7 +53,7 @@ function signIn() {
 
 /** The first sign-in replaces the initial password before any module opens. */
 function initialPassword() {
-  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('password.initialTitle')}</h1><p>${t('password.desc')}</p><div id="message" role="status" hidden></div><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(t('password.new'), 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<small>${t('password.hint')}</small><button class="primary" type="submit">${t('password.save')}</button></form></div></div></div>`;
+  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('password.initialTitle')}</h1><p>${t('password.desc')}</p><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(t('password.new'), 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<small>${t('password.hint')}</small><button class="primary" type="submit">${t('password.save')}</button></form></div></div></div>`;
   form('password', async data => {
     if (data.get('password') !== data.get('confirmation')) { message(t('password.mismatch'), true); return; }
     await api('/me/password', 'PUT', { currentPassword: data.get('currentPassword'), password: data.get('password') });
@@ -74,13 +74,12 @@ function frame(current: Module) {
     const items: [Module, string, string, string][] = [
       ['home', '/', 'home', t('nav.home')],
       ['notes', '/notes/', 'notes', t('home.notes')],
-      ['tabularius', '/tabularius/', 'assistant', t('home.tabularius')],
+      ['tabularius', '/tabularius/', 'assistant', t('nav.tabularius')],
       ...(user.role === 'admin' ? [['admin', '/admin/', 'admin', t('nav.admin')] as [Module, string, string, string]] : []),
     ];
     app.innerHTML = `<div class="shell"><aside class="side"><a href="/" data-route class="brand">${mark()}</a><nav aria-label="${t('console.navLabel')}">${items.map(([module, href, glyph, label]) =>
-      `<a href="${href}" data-route data-module="${module}">${icon(glyph)}<span>${label}</span></a>`).join('')}</nav><div class="account"><a href="/account/" data-route data-module="account" class="who"><span class="avatar">${escape(user.username.slice(0, 1).toUpperCase())}</span><span><strong>${escape(user.username)}</strong><small>${user.role === 'admin' ? t('role.admin') : t('role.user')}</small></span></a><div id="language"></div><button id="logout" type="button">${t('common.signOut')}</button></div></aside><main class="content" id="content"></main></div>`;
+      `<a href="${href}" data-route data-module="${module}">${icon(glyph)}<span>${label}</span></a>`).join('')}</nav><div class="account"><a href="/account/" data-route data-module="account" class="who"><span class="avatar">${escape(user.username.slice(0, 1).toUpperCase())}</span><span><strong>${escape(user.username)}</strong><small>${user.role === 'admin' ? t('role.admin') : t('role.user')}</small></span></a><button id="logout" type="button">${t('common.signOut')}</button></div></aside><main class="content" id="content"></main></div>`;
     if (kept) document.getElementById('content')!.replaceWith(kept);
-    document.getElementById('language')!.replaceChildren(languageSelect(() => { framed = ''; notes?.changeLanguage(document.documentElement.lang as Language); draw(); }));
     document.getElementById('logout')!.addEventListener('click', () => void run(async () => {
       await api('/web-session', 'DELETE'); state.session = undefined; history.pushState(null, '', '/'); signIn();
     }));
@@ -90,11 +89,14 @@ function frame(current: Module) {
   return document.getElementById('content')!;
 }
 
+let drawnPath = '';
 function draw() {
   if (!state.session) { signIn(); return; }
-  applyTheme(state.session.user.theme);
+  applyTheme(state.session.user.theme, state.session.user.recipe);
   if (state.session.user.mustChangePassword) { initialPassword(); return; }
   const path = location.pathname;
+  // Toasts belong to the page they were raised on.
+  if (path !== drawnPath) { drawnPath = path; clearMessage(); }
   const current = moduleOf(path);
   const content = frame(current);
   void run(async () => {
@@ -122,7 +124,7 @@ function offlineSession() {
   let last: { id: string; username: string } | null = null;
   try { last = JSON.parse(localStorage.getItem('tabularium-notes:last-user') ?? 'null'); } catch { /* no record */ }
   if (!last) return undefined;
-  return { user: { ...last, role: 'user' as const, disabled: false, mustChangePassword: false, theme: '' }, csrf: '' };
+  return { user: { ...last, role: 'user' as const, disabled: false, mustChangePassword: false, ...storedTheme() }, csrf: '' };
 }
 void (async () => {
   try { state.session = await api<Session>('/web-session'); }

@@ -1,6 +1,7 @@
 // Account settings, open to every user: own vaults and devices (issue, revoke, rebuild, unlock), Kindle, password.
-import { formatDate, t } from './i18n.js';
-import { ago, api, applyTheme, button, bytes, confirmAction, DEFAULT_THEME, escape, form, input, message, navigate, page, state, THEMES } from './core.js';
+import { formatDate, languageSelect, t } from './i18n.js';
+import { shareTable, type ShareRow } from './shares.js';
+import { ago, api, applyTheme, button, bytes, confirmAction, DEFAULT_THEME, escape, form, input, message, navigate, page, RECIPES, state, THEMES, type Recipe } from './core.js';
 
 interface Rebuild { deviceId: string; until: number; started: number | null }
 export interface Vault { id: string; name: string; state: string; ownerId?: string; owner?: string; rebuild: Rebuild | null }
@@ -15,15 +16,16 @@ export const when = (value: number) => ago(value, formatDate, {
 });
 export const badge = (value: string) =>
   `<span class="badge ${value === 'ready' ? '' : 'warn'}">${(['ready', 'failed', 'provisioning'].includes(value) ? t(`state.${value}` as 'state.ready') : escape(value))}</span>`;
-const tabs = (): [string, string][] => [['/account/', t('account.vaults')], ['/account/appearance', t('account.appearance')], ['/account/kindle', t('nav.kindle')], ['/account/password', t('nav.password')]];
+const tabs = (): [string, string][] => [['/account/', t('account.vaults')], ['/account/interface', t('account.interface')], ['/account/shares', t('shares.mine')], ['/account/kindle', t('nav.kindle')], ['/account/password', t('nav.password')]];
 const frame = (content: HTMLElement) => page(content, { title: t('account.title'), subtitle: t('account.desc'), tabs: tabs() });
 
 export async function renderAccount(content: HTMLElement, path: string) {
   const vault = path.match(/^\/account\/vaults\/([^/]+)/)?.[1];
   if (vault) await vaultPage(content, vault);
   else if (path.startsWith('/account/kindle')) await kindlePage(content);
+  else if (path.startsWith('/account/shares')) await sharesPage(content);
   else if (path.startsWith('/account/password')) passwordPage(content);
-  else if (path.startsWith('/account/appearance')) appearancePage(content);
+  else if (path.startsWith('/account/interface') || path.startsWith('/account/appearance')) interfacePage(content);
   else await vaultsPage(content);
 }
 
@@ -127,6 +129,13 @@ async function kindlePage(content: HTMLElement) {
   if (settings.address && settings.configured) button('kindle-test', async () => { await api('/me/kindle/test', 'POST', {}); await kindlePage(content); message(t('kindle.testSent')); });
 }
 
+async function sharesPage(content: HTMLElement) {
+  const body = frame(content);
+  const [{ shares }, vaults] = await Promise.all([api<{ shares: ShareRow[] }>('/shares'), api<Vault[]>('/vaults')]);
+  const names = new Map(vaults.map(vault => [vault.id, vault.name]));
+  shareTable(body, shares, share => names.get(share.vaultId) ?? '', false, () => sharesPage(content));
+}
+
 function passwordPage(content: HTMLElement) {
   const body = frame(content);
   body.innerHTML = `<section class="card"><p>${t('password.desc')}</p><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(t('password.new'), 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<small>${t('password.hint')}</small><button class="primary" type="submit">${t('password.save')}</button></form></section>`;
@@ -138,15 +147,54 @@ function passwordPage(content: HTMLElement) {
   });
 }
 
-function appearancePage(content: HTMLElement) {
+/** Interface: the language of this browser and the account's colour scheme, including a custom recipe. */
+function interfacePage(content: HTMLElement) {
   const body = frame(content);
-  const current = state.session!.user.theme || DEFAULT_THEME;
-  body.innerHTML = `<section class="card"><h2>${t('theme.title')}</h2><p>${t('theme.desc')}</p><div class="themes">${THEMES.map(theme => `<button type="button" class="theme-card" id="theme-${theme}" aria-pressed="${theme === current}"><span class="swatches ${theme}"><span></span><span></span><span></span></span><span>${t(`theme.${theme}`)}</span><small>${t(`theme.${theme}Desc`)}</small></button>`).join('')}</div></section>`;
+  const user = state.session!.user;
+  const current = user.theme || DEFAULT_THEME;
+  const recipe: Recipe = { ...(user.recipe ?? RECIPES.sakura) };
+  const editing = current === 'custom';
+  body.innerHTML = `<section class="card"><h2>${t('interface.language')}</h2><p>${t('interface.languageDesc')}</p><div id="language-choice" class="language-choice"></div></section>
+    <section class="card"><h2>${t('theme.title')}</h2><p>${t('theme.desc')}</p><div class="themes">${THEMES.map(theme => `<button type="button" class="theme-card" id="theme-${theme}" aria-pressed="${theme === current}"><span class="swatches ${theme}"><span></span><span></span><span></span></span><span>${t(`theme.${theme}`)}</span><small>${t(`theme.${theme}Desc`)}</small></button>`).join('')}</div>
+    <form id="recipe" class="recipe" ${editing ? '' : 'hidden'}><h3>${t('recipe.title')}</h3><div class="recipe-fields">
+      <label>${t('recipe.accent')}<input type="color" name="accent" value="${escape(recipe.accent)}"></label>
+      <label>${t('recipe.tint')}<input type="range" name="tint" min="6" max="40" step="1" value="${recipe.tint}"></label>
+      <fieldset><legend>${t('recipe.side')}</legend><label class="check"><input type="radio" name="side" value="light" ${recipe.side === 'light' ? 'checked' : ''}> ${t('recipe.light')}</label><label class="check"><input type="radio" name="side" value="dark" ${recipe.side === 'dark' ? 'checked' : ''}> ${t('recipe.dark')}</label></fieldset>
+    </div><small>${t('recipe.hint')}</small><button class="primary" type="submit">${t('recipe.save')}</button></form></section>`;
+  document.getElementById('language-choice')!.append(languageSelect(() => navigate(location.pathname)));
+  const custom = body.querySelector<HTMLElement>('.swatches.custom')!.children;
+  const recipeForm = document.getElementById('recipe') as HTMLFormElement;
+  const read = (): Recipe => {
+    const data = new FormData(recipeForm);
+    return { accent: String(data.get('accent')), tint: Number(data.get('tint')), side: data.get('side') === 'dark' ? 'dark' : 'light' };
+  };
+  const paintSwatches = (value: Recipe) => {
+    (custom[0] as HTMLElement).style.background = value.accent;
+    (custom[1] as HTMLElement).style.background = `color-mix(in oklab, ${value.accent} ${value.side === 'dark' ? 30 : value.tint * 1.4}%, ${value.side === 'dark' ? '#17131a' : '#fff'})`;
+    (custom[2] as HTMLElement).style.background = `color-mix(in oklab, ${value.accent} ${value.tint}%, #fff)`;
+  };
+  paintSwatches(recipe);
+  // Changes are previewed at once; they are kept only when saved.
+  recipeForm.addEventListener('input', () => { const value = read(); paintSwatches(value); applyTheme('custom', value); });
+  form('recipe', async () => {
+    const value = read();
+    await api('/me/theme', 'PUT', { theme: 'custom', recipe: value });
+    user.theme = 'custom'; user.recipe = value;
+    applyTheme('custom', value);
+    interfacePage(content);
+    message(t('theme.saved'));
+  });
   for (const theme of THEMES) button(`theme-${theme}`, async () => {
+    if (theme === 'custom') {
+      recipeForm.hidden = false;
+      for (const card of body.querySelectorAll('.theme-card')) card.setAttribute('aria-pressed', String(card.id === 'theme-custom'));
+      applyTheme('custom', read());
+      return;
+    }
     await api('/me/theme', 'PUT', { theme });
-    state.session!.user.theme = theme;
-    applyTheme(theme);
-    appearancePage(content);
+    user.theme = theme;
+    applyTheme(theme, user.recipe);
+    interfacePage(content);
     message(t('theme.saved'));
   });
 }

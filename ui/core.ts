@@ -1,25 +1,48 @@
 // Shared pieces of the web application: session, API calls, notices, forms, the confirmation dialog and navigation.
 import { serverError, t } from './i18n.js';
 
-export interface User { id: string; username: string; role: 'admin' | 'user'; disabled: boolean; mustChangePassword: boolean; theme: string }
+/** A colour scheme built from a few choices: the main colour, how strongly it tints the pages, and the sidebar. */
+export interface Recipe { accent: string; tint: number; side: 'light' | 'dark' }
+export interface User { id: string; username: string; role: 'admin' | 'user'; disabled: boolean; mustChangePassword: boolean; theme: string; recipe: Recipe | null }
 export interface Session { user: User; csrf: string }
 
 export const state: { session?: Session } = {};
 
-/** Colour themes of the web pages; forest is the default. */
-export const THEMES = ['forest', 'sakura', 'lavender'] as const;
+/** Colour themes of the web pages; "custom" uses the account's own recipe. */
+export const THEMES = ['sakura', 'lavender', 'forest', 'custom'] as const;
 /** Accounts that have not chosen a theme, and the sign-in page before anyone has signed in here, use this one. */
 export const DEFAULT_THEME = 'sakura';
+/** The recipes of the built-in tinted themes, also the starting point of a custom one. */
+export const RECIPES: Record<'sakura' | 'lavender', Recipe> = {
+  sakura: { accent: '#d63c78', tint: 22, side: 'light' },
+  lavender: { accent: '#7653d9', tint: 20, side: 'light' },
+};
 const THEME_KEY = 'tabularium-theme';
-/** Applies a colour theme ('' for the default) and remembers it in this browser, so the next page load starts in it. */
-export function applyTheme(theme: string) {
-  const shown = theme || DEFAULT_THEME;
-  if (shown !== 'forest') document.documentElement.dataset.theme = shown; else delete document.documentElement.dataset.theme;
-  try { localStorage.setItem(THEME_KEY, theme); } catch { /* storage unavailable: the theme lasts for this page */ }
+/**
+ * Applies a colour theme ('' for the default) and remembers it in this browser, so the next page load starts in it.
+ * A custom theme passes its recipe to the style sheet as custom properties.
+ */
+export function applyTheme(theme: string, recipe?: Recipe | null) {
+  const root = document.documentElement;
+  const shown = theme === 'custom' && !recipe ? DEFAULT_THEME : theme || DEFAULT_THEME;
+  if (shown !== 'forest') root.dataset.theme = shown; else delete root.dataset.theme;
+  if (shown === 'custom' && recipe) {
+    root.style.setProperty('--recipe-accent', recipe.accent);
+    root.style.setProperty('--recipe-tint', `${recipe.tint}%`);
+    root.dataset.side = recipe.side;
+  } else {
+    root.style.removeProperty('--recipe-accent');
+    root.style.removeProperty('--recipe-tint');
+    delete root.dataset.side;
+  }
+  saved = { theme, recipe: recipe ?? null };
+  try { localStorage.setItem(THEME_KEY, JSON.stringify(saved)); } catch { /* storage unavailable: the theme lasts for this page */ }
 }
-let savedTheme = '';
-try { savedTheme = localStorage.getItem(THEME_KEY) ?? ''; } catch { /* storage unavailable */ }
-applyTheme(savedTheme);
+let saved: { theme: string; recipe: Recipe | null } = { theme: '', recipe: null };
+try { saved = JSON.parse(localStorage.getItem(THEME_KEY) ?? 'null') ?? saved; } catch { /* storage unavailable or an older plain value */ }
+applyTheme(saved.theme ?? '', saved.recipe);
+/** The theme this browser last used, for starting without the server. */
+export const storedTheme = () => saved;
 let expired = () => {};
 let route = () => {};
 /** The shell registers what happens when the session ends and how a path is drawn. */
@@ -40,13 +63,30 @@ export async function api<T>(path: string, method = 'GET', data?: unknown): Prom
   return result as T;
 }
 
-/** The notice under the page heading; it sticks to the top while scrolling. */
+/**
+ * Notices appear as toasts in the top-right corner of every page: confirmations close by themselves, errors stay
+ * longer and can be closed.
+ */
 export function message(text: string, error = false) {
-  const target = document.querySelector<HTMLDivElement>('#message');
-  if (!target) return;
-  target.className = error ? 'notice error' : 'notice'; target.textContent = text; target.hidden = false;
+  let stack = document.getElementById('toasts');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'toasts';
+    stack.className = 'toasts';
+    document.body.append(stack);
+  }
+  for (const old of stack.querySelectorAll<HTMLElement>('.toast')) if (old.dataset.text === text) old.remove();
+  const toast = document.createElement('div');
+  toast.className = error ? 'toast error' : 'toast';
+  toast.setAttribute('role', error ? 'alert' : 'status');
+  toast.dataset.text = text;
+  toast.innerHTML = `<span>${escape(text)}</span><button type="button" class="toast-close" aria-label="${escape(t('dialog.close'))}">×</button>`;
+  const remove = () => toast.remove();
+  toast.querySelector('button')!.addEventListener('click', remove);
+  stack.append(toast);
+  setTimeout(remove, error ? 10_000 : 4_000);
 }
-export function clearMessage() { const target = document.querySelector<HTMLDivElement>('#message'); if (target) target.hidden = true; }
+export function clearMessage() { document.getElementById('toasts')?.replaceChildren(); }
 
 export async function run(action: () => Promise<void>) {
   try { await action(); }
@@ -134,14 +174,14 @@ let drawnPage = '';
 export function page(content: HTMLElement, options: { title: string; subtitle?: string; tabs?: [string, string][]; actions?: string }) {
   const key = JSON.stringify([options.title, options.subtitle, options.tabs, options.actions, location.pathname, document.documentElement.lang]);
   const existing = content.querySelector<HTMLDivElement>('#body');
-  if (key === drawnPage && existing) { clearMessage(); return existing; }
+  if (key === drawnPage && existing) return existing;
   drawnPage = key;
   // The current tab is the one whose address is the longest prefix of the path, so detail pages keep their tab marked.
   const current = options.tabs?.map(([href]) => href).filter(href => location.pathname === href || location.pathname.startsWith(href.endsWith('/') ? href : `${href}/`) || location.pathname === href.replace(/\/$/, ''))
     .sort((a, b) => b.length - a.length)[0];
   const tabs = options.tabs ? `<nav class="tabs">${options.tabs.map(([href, label]) =>
     `<a href="${href}" data-route ${href === current ? 'aria-current="page"' : ''}>${escape(label)}</a>`).join('')}</nav>` : '';
-  content.innerHTML = `<div class="page"><header class="page-head"><div><h1>${escape(options.title)}</h1>${options.subtitle ? `<p>${escape(options.subtitle)}</p>` : ''}</div>${options.actions ?? ''}</header>${tabs}<div id="message" role="status" hidden></div><div id="body"></div></div>`;
+  content.innerHTML = `<div class="page"><header class="page-head"><div><h1>${escape(options.title)}</h1>${options.subtitle ? `<p>${escape(options.subtitle)}</p>` : ''}</div>${options.actions ?? ''}</header>${tabs}<div id="body"></div></div>`;
   window.scrollTo(0, 0);
   return content.querySelector<HTMLDivElement>('#body')!;
 }

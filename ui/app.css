@@ -64,6 +64,7 @@
     }
 }
 * { box-sizing: border-box; }
+:root { accent-color: var(--accent); }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 var(--font); }
 h1, h2, h3, p { margin-top: 0; }
@@ -135,7 +136,6 @@ td:last-child, th:last-child { padding-right: 0; }
 .notice.error { background: var(--danger-soft); color: var(--danger); }
 .notice.warn { background: var(--warn-soft); color: var(--warn); }
 .notice p { color: inherit; margin-bottom: 10px; }
-#message { position: sticky; top: 12px; z-index: 5; box-shadow: 0 4px 14px #14251a1f; }
 .secret { border-color: var(--accent); }
 .secret input { font-family: var(--mono); font-size: 13px; }
 details.inactive { margin-top: 16px; }
@@ -208,6 +208,8 @@ dialog.dialog {
 dialog.dialog::backdrop { background: #0c1a1366; }
 dialog.dialog h2 { margin-bottom: 10px; }
 dialog.dialog .buttons { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+dialog.dialog.share-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+select.compact { width: auto; padding: 5px 8px; font-size: 13px; }
 
 /* Home */
 .home-vault { display: grid; gap: 16px; }
@@ -259,33 +261,70 @@ a.badge { text-decoration: none; }
 h3.spaced { margin-top: 22px; }
 
 /* Colour themes, chosen per account under Account > Appearance. Forest is the default above. */
-:root[data-theme="sakura"] {
-    --bg: #fdf6f8; --panel: #ffffff; --panel-soft: #fdf0f4; --text: #3a2530; --muted: #8a6b78; --line: #f1dde5; --field: #e2bccb;
-    --accent: #d6457a; --accent-hover: #c13868; --on-accent: #ffffff; --accent-soft: #fde4ee; --focus: #f6bfd3;
-    --side: #fbe7ef; --side-text: #7a4a5f; --side-hover: #f6d6e3; --side-active: #f2c4d6; --side-line: #ecc6d5;
-    --side-strong: #4a2537; --side-muted: #a07b8b; --side-active-text: #4a2537; --mark-bg: #d6457a; --mark-text: #ffffff;
-    --gate: linear-gradient(135deg, #fde4ee, #fdf6f8 55%, #f1e8ff);
+/* Tinted themes are recipes: a main colour (--recipe-accent), how strongly it tints the pages (--recipe-tint) and a
+   light or dark sidebar. Sakura and lavender are built-in recipes; "custom" receives the account's recipe from the page. */
+:root[data-theme="sakura"] { --recipe-accent: #d63c78; --recipe-tint: 22%; }
+:root[data-theme="lavender"] { --recipe-accent: #7653d9; --recipe-tint: 20%; }
+:root[data-theme="sakura"], :root[data-theme="lavender"], :root[data-theme="custom"] {
+    --r: var(--recipe-accent, #d63c78); --t: var(--recipe-tint, 22%);
+    --bg: color-mix(in oklab, var(--r) calc(var(--t) * 0.42), #ffffff);
+    --panel: #ffffff;
+    --panel-soft: color-mix(in oklab, var(--r) calc(var(--t) * 0.32), #ffffff);
+    --text: color-mix(in oklab, var(--r) 18%, #1f1a1e);
+    --muted: color-mix(in oklab, var(--r) 30%, #6b6369);
+    --line: color-mix(in oklab, var(--r) calc(var(--t) * 0.9), #ece8ea);
+    --field: color-mix(in oklab, var(--r) 38%, #d8d2d6);
+    --accent: var(--r);
+    --accent-hover: color-mix(in oklab, var(--r) 86%, #000000);
+    --on-accent: #ffffff;
+    --accent-soft: color-mix(in oklab, var(--r) calc(var(--t) * 0.85), #ffffff);
+    --focus: color-mix(in oklab, var(--r) 40%, #ffffff);
+    --side: color-mix(in oklab, var(--r) calc(var(--t) * 1.15), #ffffff);
+    --side-text: color-mix(in oklab, var(--r) 45%, #3a2f36);
+    --side-hover: color-mix(in oklab, var(--r) calc(var(--t) * 1.6), #ffffff);
+    --side-active: color-mix(in oklab, var(--r) calc(var(--t) * 2.1), #ffffff);
+    --side-line: color-mix(in oklab, var(--r) calc(var(--t) * 1.8), #ffffff);
+    --side-strong: color-mix(in oklab, var(--r) 35%, #22181e);
+    --side-muted: color-mix(in oklab, var(--r) 40%, #85797f);
+    --side-active-text: color-mix(in oklab, var(--r) 45%, #1a1217);
+    --mark-bg: var(--r);
+    --mark-text: #ffffff;
+    --gate: linear-gradient(135deg, var(--accent-soft), var(--bg) 60%);
 }
-:root[data-theme="lavender"] {
-    --bg: #f8f6fd; --panel: #ffffff; --panel-soft: #f3f0fb; --text: #2d2640; --muted: #766c8f; --line: #e6e0f3; --field: #cbbfe6;
-    --accent: #7c5cd6; --accent-hover: #6a4bc4; --on-accent: #ffffff; --accent-soft: #ece6fb; --focus: #cfc2f5;
-    --side: #efeafb; --side-text: #5b4c86; --side-hover: #e3dbf7; --side-active: #d8ccf5; --side-line: #d9cff0;
-    --side-strong: #2d2640; --side-muted: #8e82ad; --side-active-text: #2d2640; --mark-bg: #7c5cd6; --mark-text: #ffffff;
-    --gate: linear-gradient(135deg, #ece6fb, #f8f6fd 55%, #fde4ee);
+:root[data-theme="custom"][data-side="dark"] {
+    --side: color-mix(in oklab, var(--r) 22%, #16121a);
+    --side-text: color-mix(in oklab, var(--r) 22%, #ddd5db);
+    --side-hover: color-mix(in oklab, var(--r) 30%, #211b25);
+    --side-active: color-mix(in oklab, var(--r) 48%, #2a2230);
+    --side-line: color-mix(in oklab, var(--r) 30%, #3a3340);
+    --side-strong: #ffffff;
+    --side-muted: color-mix(in oklab, var(--r) 30%, #a59ca3);
+    --side-active-text: #ffffff;
 }
 @media (prefers-color-scheme: dark) {
-    :root[data-theme="sakura"] {
-        --bg: #1c1418; --panel: #261b21; --panel-soft: #2d2027; --text: #f3e4ea; --muted: #b896a5; --line: #3a2a32; --field: #573f4b;
-        --accent: #f48fb6; --accent-hover: #f7a8c7; --on-accent: #2b0f1c; --accent-soft: #3d1f2d; --focus: #6b3350;
-        --side: #170f13; --side-text: #dcbfcc; --side-hover: #2a1b22; --side-active: #3a2430; --side-line: #3d2a33;
-        --side-strong: #fbe7ef; --side-muted: #a98b98; --side-active-text: #ffffff; --mark-bg: #f48fb6; --mark-text: #2b0f1c;
-        --gate: var(--bg);
-    }
-    :root[data-theme="lavender"] {
-        --bg: #16131f; --panel: #1f1b2b; --panel-soft: #262135; --text: #ebe6f8; --muted: #a69cc2; --line: #322c45; --field: #4b4266;
-        --accent: #b39dff; --accent-hover: #c4b3ff; --on-accent: #1c1336; --accent-soft: #2c2448; --focus: #4a3d7a;
-        --side: #120f1a; --side-text: #cbc1e8; --side-hover: #221c33; --side-active: #2f2747; --side-line: #2f2944;
-        --side-strong: #f1ecff; --side-muted: #9488b3; --side-active-text: #ffffff; --mark-bg: #b39dff; --mark-text: #1c1336;
+    :root[data-theme="sakura"], :root[data-theme="lavender"], :root[data-theme="custom"] {
+        --bg: color-mix(in oklab, var(--r) calc(var(--t) * 0.45), #121014);
+        --panel: color-mix(in oklab, var(--r) calc(var(--t) * 0.55), #1a171c);
+        --panel-soft: color-mix(in oklab, var(--r) calc(var(--t) * 0.75), #201c22);
+        --text: color-mix(in oklab, var(--r) 12%, #f2ecef);
+        --muted: color-mix(in oklab, var(--r) 28%, #a69ca3);
+        --line: color-mix(in oklab, var(--r) 20%, #2e2a30);
+        --field: color-mix(in oklab, var(--r) 28%, #4a434c);
+        --accent: color-mix(in oklab, var(--r) 72%, #ffffff);
+        --accent-hover: color-mix(in oklab, var(--r) 58%, #ffffff);
+        --on-accent: color-mix(in oklab, var(--r) 35%, #0d0a0c);
+        --accent-soft: color-mix(in oklab, var(--r) 30%, #1a171c);
+        --focus: color-mix(in oklab, var(--r) 45%, #1a171c);
+        --side: color-mix(in oklab, var(--r) calc(var(--t) * 0.6), #0f0d11);
+        --side-text: color-mix(in oklab, var(--r) 22%, #ddd5db);
+        --side-hover: color-mix(in oklab, var(--r) 22%, #1c1820);
+        --side-active: color-mix(in oklab, var(--r) 38%, #241e28);
+        --side-line: color-mix(in oklab, var(--r) 22%, #2f2a33);
+        --side-strong: #ffffff;
+        --side-muted: color-mix(in oklab, var(--r) 25%, #9b9298);
+        --side-active-text: #ffffff;
+        --mark-bg: color-mix(in oklab, var(--r) 72%, #ffffff);
+        --mark-text: color-mix(in oklab, var(--r) 35%, #0d0a0c);
         --gate: var(--bg);
     }
 }
@@ -301,8 +340,8 @@ h3.spaced { margin-top: 22px; }
 .swatches span { width: 26px; height: 26px; border-radius: 50%; border: 1px solid #00000014; }
 /* Swatches of each theme's light variant: accent, sidebar, soft background. */
 .swatches.forest span:nth-child(1) { background: #1d634b; } .swatches.forest span:nth-child(2) { background: #1c3028; } .swatches.forest span:nth-child(3) { background: #e9f2e9; }
-.swatches.sakura span:nth-child(1) { background: #d6457a; } .swatches.sakura span:nth-child(2) { background: #fbe7ef; } .swatches.sakura span:nth-child(3) { background: #fde4ee; }
-.swatches.lavender span:nth-child(1) { background: #7c5cd6; } .swatches.lavender span:nth-child(2) { background: #efeafb; } .swatches.lavender span:nth-child(3) { background: #ece6fb; }
+.swatches.sakura span:nth-child(1) { background: #d63c78; } .swatches.sakura span:nth-child(2) { background: #f6cadb; } .swatches.sakura span:nth-child(3) { background: #f9dbe6; }
+.swatches.lavender span:nth-child(1) { background: #7653d9; } .swatches.lavender span:nth-child(2) { background: #dcd1f6; } .swatches.lavender span:nth-child(3) { background: #e7defa; }
 .shell { background: linear-gradient(to right, var(--side) 224px, var(--bg) 224px); }
 @media (max-width: 860px) { .shell { background: var(--bg); } }
 .theme-card small { font-weight: 400; }
@@ -324,10 +363,35 @@ h3.spaced { margin-top: 22px; }
 .pane-foot button:hover { background: var(--panel-soft); }
 .pane-foot button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
 .assist-main { display: flex; flex-direction: column; padding: 28px 36px 20px; }
-.chat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
-.chat-head h1 { font-size: 22px; }
-.log { flex: 1; min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 10px 0 20px; }
-.turn { max-width: 860px; }
+.chat-top { display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 36px; }
+.chat-title { font-size: 17px; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-tools { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.sync-pill {
+    display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px;
+    background: var(--panel); color: var(--muted); font-size: 12px; white-space: nowrap; box-shadow: 0 1px 3px #14251a0d;
+}
+.sync-pill strong { color: var(--text); font-weight: 600; }
+.sync-pill .sep { width: 1px; height: 12px; background: var(--line); }
+.sync-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.sync-pill.busy .dot { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); animation: pulse 1.6s ease-in-out infinite; }
+.sync-pill.warn .dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.chat-start { flex: 1; display: grid; place-items: center; padding: 0 0 14vh; }
+.chat-start-inner { width: min(780px, 100%); display: grid; gap: 22px; }
+.chat-hello { margin: 0; text-align: center; font-size: 28px; font-weight: 600; letter-spacing: -0.4px; }
+.chat-bottom { padding-top: 12px; }
+.composer {
+    display: grid; gap: 6px; width: min(820px, 100%); margin: 0 auto; padding: 12px 12px 10px 18px; border: 1px solid var(--line);
+    border-radius: 20px; background: var(--panel); box-shadow: 0 8px 28px #14251a14;
+}
+.composer:focus-within { border-color: var(--accent); }
+.composer textarea { border: 0; padding: 4px 0; background: transparent; resize: none; min-height: 48px; max-height: 40vh; }
+.composer textarea:focus { outline: none; }
+.composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.composer .send { width: 36px; height: 36px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
+.composer .send svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.log { flex: 1; min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 16px max(0px, calc((100% - 820px) / 2)) 20px; }
+.turn { max-width: 820px; }
 .turn.user { justify-self: end; background: var(--accent-soft); border-radius: 12px; padding: 10px 16px; }
 .turn.user p { color: inherit; margin: 0; }
 .turn.assistant .answer p { color: inherit; }
@@ -339,8 +403,6 @@ h3.spaced { margin-top: 22px; }
 .read { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
 .read p { margin: 4px 0 0; }
 a.cite { overflow-wrap: anywhere; }
-.ask { display: flex; gap: 12px; align-items: flex-end; border-top: 1px solid var(--line); padding-top: 16px; }
-.ask button { min-height: 44px; }
 .proposal-link { padding: 0; border: 0; background: none; color: var(--accent); font-weight: 500; text-align: left; }
 .proposal .file { margin-bottom: 22px; }
 .proposal .file:last-child { margin-bottom: 0; }
@@ -358,6 +420,34 @@ a.cite { overflow-wrap: anywhere; }
 .approval pre { margin: 6px 0 10px; white-space: pre-wrap; }
 @media (max-width: 860px) {
     .assist-main { padding: 18px 16px; min-height: 70vh; }
-    .ask { display: grid; }
+    .chat-top { flex-wrap: wrap; }
+    .sync-pill > span:last-child { display: none; }
 }
 .eyebrow { font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--accent); margin-bottom: 8px; font-weight: 700; }
+
+/* Toasts: every notice of the application, in the top-right corner. */
+.toasts { position: fixed; top: 16px; right: 16px; z-index: 50; display: grid; gap: 10px; width: min(380px, calc(100vw - 32px)); }
+.toast {
+    display: flex; align-items: flex-start; gap: 10px; padding: 12px 12px 12px 16px; border-radius: 10px; background: var(--panel);
+    color: var(--text); border: 1px solid var(--line); border-left: 0; box-shadow: 0 10px 30px #1a10161f; font-size: 14px;
+    animation: toast-in 0.18s ease-out; overflow-wrap: anywhere;
+}
+.toast::before { content: ""; flex: none; width: 8px; height: 8px; margin-top: 7px; border-radius: 50%; background: var(--accent); }
+.toast.error::before { background: var(--danger); }
+.toast.error { color: var(--danger); }
+.toast span { flex: 1; }
+.toast-close { flex: none; padding: 0 4px; border: 0; background: none; color: var(--muted); font-size: 18px; line-height: 1; font-weight: 400; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } }
+
+/* Interface: language and the custom colour recipe. */
+.language-choice select { width: auto; min-width: 200px; }
+.recipe { display: grid; gap: 14px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+.recipe[hidden] { display: none; }
+.recipe h3 { margin: 0; }
+.recipe > button { justify-self: start; }
+.recipe-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 16px; align-items: start; }
+.recipe input[type="color"] { width: 64px; height: 38px; padding: 3px; }
+.recipe input[type="range"] { padding: 0; accent-color: var(--accent); }
+.recipe fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; }
+.recipe legend { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.swatches.custom span { background: var(--panel-soft); }

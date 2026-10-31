@@ -450,6 +450,110 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
         await sink.close();
       }
     });
+    await t.test('shares: owner and device routes, public access, password, expiry, revoke, administrator, switch', async () => {
+      // The upload format: name length, name, data length, data for each file.
+      const bundle = files => Buffer.concat(Object.entries(files).flatMap(([name, data]) => {
+        const head = Buffer.alloc(2); head.writeUInt16BE(name.length);
+        const size = Buffer.alloc(4); size.writeUInt32BE(data.length);
+        return [head, Buffer.from(name, 'latin1'), size, Buffer.from(data)];
+      }));
+      const put = (share, files, credentials = device) => fetch(`${url}/api/v1/shares/${share.id}/content`, { method: 'PUT',
+        headers: { authorization: basic(credentials), 'content-type': 'application/octet-stream' }, body: bundle(files) });
+      const visit = (path, extra = {}) => fetch(`${url}/api/v1/public/shares/${path}`, { headers: extra });
+      const encrypted = await api('/shares', 'POST', { vaultId: vault.id, slug: 'alice-note', mode: 'encrypted', sealed: 'sealed-by-client', expiresAt: null }, alice, 201);
+      assert.equal(encrypted.state, 'active'); assert.equal(encrypted.size, 0);
+      await api('/shares', 'POST', { vaultId: vault.id, slug: 'ALICE-NOTE', mode: 'encrypted', sealed: 'x' }, alice, 409);
+      await api('/shares', 'POST', { vaultId: vault.id, slug: 'a/b', mode: 'encrypted', sealed: 'x' }, alice, 400);
+      await api('/shares', 'POST', { vaultId: vault.id, mode: 'plain', sealed: 'x' }, alice, 400);
+      await api('/shares', 'POST', { vaultId: otherVault.id, mode: 'encrypted', sealed: 'x' }, alice, 404);
+      const random = await api('/shares', 'POST', { vaultId: vault.id, mode: 'encrypted', sealed: 'x' }, alice, 201);
+      assert.match(random.slug, /^[A-Za-z0-9]{10}$/);
+      // The device of the vault replaces the content and lists the vault's shares.
+      let response = await put(encrypted, { manifest: 'cipher-manifest', n1: 'cipher-note' });
+      assert.equal(response.status, 200); assert.equal((await response.json()).size, 'cipher-manifest'.length + 'cipher-note'.length);
+      response = await put(encrypted, { n1: 'no manifest' }); assert.equal(response.status, 400); await response.arrayBuffer();
+      const listed = await (await fetch(`${url}/api/v1/shares`, { headers: { authorization: basic(device) } })).json();
+      assert.deepEqual(listed.shares.map(share => share.slug).sort(), ['alice-note', random.slug].sort());
+      assert.equal(listed.maxBytes, 52_428_800);
+      // Another account sees nothing of it.
+      await api(`/shares/${encrypted.id}`, 'PATCH', { expiresAt: null }, bob, 404);
+      await api(`/shares/${encrypted.id}`, 'DELETE', undefined, bob, 404);
+      assert.deepEqual((await api('/shares', 'GET', undefined, bob)).shares, []);
+      const bobDevice = await enroll(otherVault, bob);
+      response = await put(encrypted, { manifest: 'x' }, bobDevice); assert.equal(response.status, 404); await response.arrayBuffer();
+      // Anyone with the address reads the ciphertext; the page and the API ask search engines not to index it.
+      response = await visit('alice-note');
+      assert.equal(response.status, 200); assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
+      const meta = await response.json();
+      assert.deepEqual({ ...meta, files: meta.files.sort() }, { mode: 'encrypted', password: false, updatedAt: meta.updatedAt, files: ['manifest', 'n1'] });
+      response = await visit('alice-note/files/n1');
+      assert.equal(await response.text(), 'cipher-note'); assert.equal(response.headers.get('content-type'), 'application/octet-stream');
+      assert.match(response.headers.get('content-security-policy'), /sandbox/);
+      response = await visit('missing'); assert.equal(response.status, 404); await response.arrayBuffer();
+      response = await fetch(`${url}/s/alice-note`);
+      assert.match(await response.text(), /share-viewer\.js/);
+      assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
+      assert.match(response.headers.get('content-security-policy'), /script-src 'self';.*form-action 'none'/);
+      assert.doesNotMatch(response.headers.get('content-security-policy'), /unsafe|wasm/);
+      assert.equal((await api('/shares', 'GET', undefined, alice)).shares.find(share => share.id === encrypted.id).views, 1);
+      // Size limit.
+      config.shares = { maxBytes: 10 };
+      response = await put(encrypted, { manifest: 'more than ten bytes' }); assert.equal(response.status, 413); await response.arrayBuffer();
+      delete config.shares;
+      // A public page with a password: the server checks it and hands out an access token for the files.
+      const page = await api('/shares', 'POST', { vaultId: vault.id, slug: '公开页', mode: 'public', sealed: 'x', password: 'open sesame', indexable: true }, alice, 201);
+      assert.equal(page.password, true);
+      assert.equal((await put(page, { manifest: '{"title":"plain"}' })).status, 200);
+      response = await visit(encodeURIComponent('公开页')); assert.equal(response.status, 401); await response.arrayBuffer();
+      response = await visit(encodeURIComponent('公开页'), { 'x-share-password': encodeURIComponent('wrong') }); assert.equal(response.status, 403); await response.arrayBuffer();
+      response = await visit(encodeURIComponent('公开页'), { 'x-share-password': encodeURIComponent('open sesame') });
+      assert.equal(response.status, 200); assert.equal(response.headers.get('x-robots-tag'), null);
+      const { access } = await response.json();
+      response = await visit(`${encodeURIComponent('公开页')}/files/manifest`); assert.equal(response.status, 401); await response.arrayBuffer();
+      response = await visit(`${encodeURIComponent('公开页')}/files/manifest`, { 'x-share-access': access });
+      assert.equal(await response.text(), '{"title":"plain"}');
+      assert.equal((await fetch(`${url}/s/${encodeURIComponent('公开页')}`)).headers.get('x-robots-tag'), null);
+      const database = new DatabaseSync(config.database);
+      assert.notEqual(database.prepare('SELECT password_hash FROM shares WHERE id=?').get(page.id).password_hash, 'open sesame');
+      // Expiry: the link answers 410 and the files are gone.
+      await api('/shares', 'POST', { vaultId: vault.id, mode: 'encrypted', sealed: 'x', expiresAt: Date.now() - 1 }, alice, 400);
+      const brief = await api('/shares', 'POST', { vaultId: vault.id, slug: 'brief', mode: 'encrypted', sealed: 'x', expiresAt: Date.now() + 1500 }, alice, 201);
+      assert.equal((await put(brief, { manifest: 'm' })).status, 200);
+      await sleep(1600);
+      response = await visit('brief'); assert.equal(response.status, 410); await response.arrayBuffer();
+      assert.equal(database.prepare('SELECT count(*) AS n FROM share_files WHERE share_id=?').get(brief.id).n, 0);
+      response = await put(brief, { manifest: 'm' }); assert.equal(response.status, 410); await response.arrayBuffer();
+      // Revocation by the owner; the address can then be taken again.
+      await api(`/shares/${encrypted.id}`, 'PATCH', { expiresAt: Date.now() + 86_400_000, sealed: 'resealed' }, alice);
+      await api(`/shares/${encrypted.id}`, 'DELETE', undefined, alice);
+      response = await visit('alice-note'); assert.equal(response.status, 410); await response.arrayBuffer();
+      assert.equal(database.prepare('SELECT count(*) AS n FROM share_files WHERE share_id=?').get(encrypted.id).n, 0);
+      const again = await api('/shares', 'POST', { vaultId: vault.id, slug: 'alice-note', mode: 'encrypted', sealed: 'x' }, alice, 201);
+      // The administrator lists metadata only and can revoke.
+      const all = await api('/admin/shares', 'GET', undefined, admin);
+      const row = all.find(share => share.id === again.id);
+      assert.equal(row.owner, 'alice'); assert.equal(row.vault, 'notes'); assert.equal(row.sealed, undefined);
+      await api('/admin/shares', 'GET', undefined, alice, 403);
+      await api(`/admin/shares/${again.id}`, 'DELETE', undefined, admin);
+      assert.equal((await api('/shares', 'GET', undefined, alice)).shares.find(share => share.id === again.id).state, 'revoked');
+      assert(database.prepare("SELECT count(*) AS n FROM audit_events WHERE action='share.revoke'").get().n >= 2);
+      database.close();
+      // Sharing turned off by the administrator's configuration.
+      config.shares = { enabled: false };
+      await api('/shares', 'GET', undefined, alice, 403);
+      response = await visit(random.slug); assert.equal(response.status, 403); await response.arrayBuffer();
+      delete config.shares;
+    });
+    await t.test('colour themes: built-in, custom recipe kept on the account', async () => {
+      await api('/me/theme', 'PUT', { theme: 'custom' }, alice, 400);
+      await api('/me/theme', 'PUT', { theme: 'custom', recipe: { accent: 'red', tint: 10, side: 'light' } }, alice, 400);
+      await api('/me/theme', 'PUT', { theme: 'custom', recipe: { accent: '#3366CC', tint: 50, side: 'light' } }, alice, 400);
+      await api('/me/theme', 'PUT', { theme: 'custom', recipe: { accent: '#3366CC', tint: 18, side: 'dark' } }, alice);
+      assert.deepEqual(await api('/me', 'GET', undefined, alice).then(me => [me.theme, me.recipe]), ['custom', { accent: '#3366cc', tint: 18, side: 'dark' }]);
+      await api('/me/theme', 'PUT', { theme: 'lavender' }, alice);
+      assert.deepEqual(await api('/me', 'GET', undefined, alice).then(me => [me.theme, me.recipe.accent]), ['lavender', '#3366cc']);
+      await api('/me/theme', 'PUT', { theme: 'neon' }, alice, 400);
+    });
     await t.test('limits and account disable cancel active replication', async () => {
       const limited = await enroll(vault); config.syncLimit = 1; await sync('', 'GET', undefined, limited); await sync('', 'GET', undefined, limited, 429); config.syncLimit = 2400;
       const connection = await stream();

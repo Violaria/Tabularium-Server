@@ -14,10 +14,15 @@ export async function verifyPassword(password: string, stored: string) {
   const [salt, hash] = stored.split(':');
   return timingSafeEqual(await derive(password, salt, 64) as Buffer, Buffer.from(hash, 'hex'));
 }
-export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number; kindle_address: string | null; theme: string | null }
+export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number; kindle_address: string | null; theme: string | null; theme_recipe: string | null }
 export interface Vault {
   id: string; owner_id: string; name: string; database_name: string; state: string;
   rebuild_device: string | null; rebuild_until: number | null; rebuild_started: number | null;
+}
+export interface Share {
+  id: string; slug: string; owner_id: string; vault_id: string; mode: 'encrypted' | 'public'; sealed: string;
+  expires_at: number | null; password: number; password_hash: string | null; indexable: number; views: number; size: number;
+  created_at: number; updated_at: number | null; revoked_at: number | null;
 }
 export interface Device { id: string; user_id: string; vault_id: string; secret_hash: string; name: string; revoked: number; expires_at: number; last_seen_at: number | null }
 
@@ -220,6 +225,31 @@ export function openStore(path: string) {
   `);
     version = 11;
   }
-  if (version !== 11) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 11) {
+    // Shared notes and folders. `sealed` is encrypted by the owner's clients with a key derived from the vault's E2EE
+    // passphrase (share key, target, authorised references); the server cannot read it. Files are ciphertext for
+    // encrypted links and plain text only for public pages. Expired and revoked shares keep their row (the link answers
+    // "no longer available") but lose their files.
+    db.exec(`
+    BEGIN;
+    ALTER TABLE users ADD COLUMN theme_recipe TEXT;
+    CREATE TABLE shares (
+      id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE COLLATE NOCASE, owner_id TEXT NOT NULL REFERENCES users(id),
+      vault_id TEXT NOT NULL REFERENCES vaults(id), mode TEXT NOT NULL CHECK (mode IN ('encrypted','public')),
+      sealed TEXT NOT NULL, expires_at INTEGER, password INTEGER NOT NULL DEFAULT 0, password_hash TEXT,
+      indexable INTEGER NOT NULL DEFAULT 0, views INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL, updated_at INTEGER, revoked_at INTEGER
+    ) STRICT;
+    CREATE INDEX shares_vault ON shares(vault_id);
+    CREATE TABLE share_files (
+      share_id TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE, name TEXT NOT NULL, data BLOB NOT NULL,
+      PRIMARY KEY (share_id, name)
+    ) STRICT;
+    PRAGMA user_version=12;
+    COMMIT;
+  `);
+    version = 12;
+  }
+  if (version !== 12) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

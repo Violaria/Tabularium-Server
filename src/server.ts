@@ -3,67 +3,36 @@ import { request as httpsRequest } from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { openStore, passwordHash, verifyPassword, token, digest, type User, type Vault, type Device } from './store.js';
-import { loadConsole } from './console-assets.js';
+import { loadConsole, loadViewer } from './console-assets.js';
 import { rejection } from './policy.js';
 import { sendMail, type SmtpConfig } from './smtp.js';
 import { Couch, basic, type CouchConfig } from './couch.js';
 import { createTabularius, MODES, type TabulariusConfig } from './tabularius/index.js';
+import { HttpError, body, fail, field, json, payload, raw } from './http.js';
+import { createShares, type SharesConfig } from './shares.js';
 
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
   origins: string[]; sessionMs?: number; deviceMs?: number; streamMs?: number;
   loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number; writeLimit?: number; auditDays?: number;
   smtp?: SmtpConfig; kindleDomains?: string[]; kindleDaily?: number; kindleMaxBytes?: number;
-  tabularius?: TabulariusConfig;
-}
-class HttpError extends Error {
-  readonly status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; }
-}
-const fail = (status: number, message: string): never => { throw new HttpError(status, message); };
-function json(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-  res.end(JSON.stringify(body));
-}
-async function body(req: IncomingMessage, limit = 16_384): Promise<Record<string, unknown>> {
-  let size = 0;
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > limit) fail(413, 'Request body too large');
-    chunks.push(chunk);
-  }
-  let parsed;
-  try { parsed = JSON.parse(Buffer.concat(chunks).toString()); } catch { fail(400, 'Invalid JSON'); }
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') fail(400, 'Expected JSON object');
-  return parsed;
-}
-async function raw(req: IncomingMessage, limit: number) {
-  let size = 0;
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > limit) fail(413, 'Request body too large');
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
-async function payload(req: IncomingMessage, limit: number) {
-  const data = await raw(req, limit);
-  try { return { data, parsed: JSON.parse(data.toString()) }; } catch { return fail(400, 'Invalid JSON'); }
+  tabularius?: TabulariusConfig; shares?: Partial<SharesConfig>;
 }
 // An EPUB starts with an uncompressed `mimetype` entry holding application/epub+zip (OCF 3.3 §4.3).
 const isEpub = (data: Buffer) => data.length > 58 && data.readUInt32LE(0) === 0x04034b50 && data.readUInt16LE(28) === 0 &&
   data.subarray(30, 38).toString() === 'mimetype' && data.subarray(38, 58).toString() === 'application/epub+zip';
 const forbidden = (id: unknown, reason: string) => ({ id, error: 'forbidden', reason });
-function field(data: Record<string, unknown>, key: string, max = 128, min = 1): string {
-  const value = data[key];
-  if (typeof value !== 'string' || value.length < min || value.length > max) fail(400, `Invalid ${key}`);
-  return value as string;
+const publicUser = (u: User) => ({ id: u.id, username: u.username, role: u.role, disabled: Boolean(u.disabled), mustChangePassword: Boolean(u.must_change_password),
+  theme: u.theme ?? '', recipe: u.theme_recipe ? JSON.parse(u.theme_recipe) as unknown : null });
+/** Colour themes of the web pages; '' is the default, "custom" is built from the account's recipe. */
+const THEMES = ['', 'forest', 'sakura', 'lavender', 'custom'];
+/** A custom theme's recipe: main colour, tint strength (6 to 40 percent) and a light or dark sidebar. */
+function recipe(value: unknown) {
+  const item = value as Record<string, unknown> | null;
+  if (!item || typeof item !== 'object' || typeof item.accent !== 'string' || !/^#[0-9a-f]{6}$/i.test(item.accent)
+    || !Number.isInteger(item.tint) || (item.tint as number) < 6 || (item.tint as number) > 40 || !['light', 'dark'].includes(item.side as string)) return fail(400, 'Invalid colour recipe');
+  return { accent: (item.accent as string).toLowerCase(), tint: item.tint as number, side: item.side as 'light' | 'dark' };
 }
-const publicUser = (u: User) => ({ id: u.id, username: u.username, role: u.role, disabled: Boolean(u.disabled), mustChangePassword: Boolean(u.must_change_password), theme: u.theme ?? '' });
-/** Colour themes of the web pages; '' is the default. */
-const THEMES = ['', 'forest', 'sakura', 'lavender'];
 const publicVault = (v: Vault) => ({ id: v.id, name: v.name, state: v.state, syncPath: `/sync/${v.id}`,
   rebuild: v.rebuild_device ? { deviceId: v.rebuild_device, until: v.rebuild_until, started: v.rebuild_started } : null });
 const MILESTONE = 'obsydian_livesync_milestone';
@@ -99,7 +68,12 @@ export async function createGateway(config: Config) {
   const active = new Map<ClientRequest, { device: string; user: string; vault: string; res: ServerResponse }>();
   const limits = new Map<string, { count: number; until: number }>();
   const stats = { requests: 0, proxyRequests: 0, statuses: {} as Record<string, number> };
+  const shares = createShares({ db, session, deviceAuth, audit, limit, viewer: await loadViewer(),
+    settings: () => ({ enabled: config.shares?.enabled ?? true, maxBytes: config.shares?.maxBytes ?? 52_428_800,
+      // Links use the configured share address, else the last public entrance (the internet-facing one is listed last).
+      url: config.shares?.url ?? (config.publicUrl ?? '').split(',').map(value => value.trim()).filter(Boolean).at(-1) }) });
   const prune = () => {
+    shares.prune();
     db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
     db.prepare('DELETE FROM audit_events WHERE occurred_at <= ?').run(Date.now() - (config.auditDays ?? 365) * 86_400_000);
     db.prepare('DELETE FROM kindle_deliveries WHERE occurred_at <= ?').run(Date.now() - (config.auditDays ?? 365) * 86_400_000);
@@ -476,9 +450,11 @@ export async function createGateway(config: Config) {
       json(res, ready ? 200 : 503, { ok: ready }); return;
     }
     if (parts[0] === 'sync') { await proxy(req, res, parts, query.length ? `?${query.join('?')}` : ''); return; }
+    if (parts[0] === 's' && parts.length === 2 && await shares.handle(req, res, path, [], req.method!)) return;
     if (parts[0] !== 'api' || parts[1] !== 'v1') fail(404, 'Route not found');
     const route = parts.slice(2);
     const method = req.method;
+    if (await shares.handle(req, res, path, route, method!)) return;
     if (['/api/v1/sessions', '/api/v1/web-session'].includes(path) && method === 'POST') {
       const web = path === '/api/v1/web-session';
       if (web && !isBrowserOrigin(req)) fail(403, 'Browser login requires same origin');
@@ -529,10 +505,14 @@ export async function createGateway(config: Config) {
       db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hash); setSessionCookie(res, '', 0); json(res, 200, { ok: true }); return;
     }
     if (path === '/api/v1/me/theme' && method === 'PUT') {
-      const theme = field({ theme: '', ...(await body(req)) }, 'theme', 32, 0);
+      const data = await body(req);
+      const theme = field({ theme: '', ...data }, 'theme', 32, 0);
       if (!THEMES.includes(theme)) fail(400, 'Unknown theme');
-      db.prepare('UPDATE users SET theme=? WHERE id=?').run(theme || null, user.id);
-      json(res, 200, { theme }); return;
+      // A custom theme needs its recipe; choosing another theme keeps the recipe for later.
+      const chosen = theme === 'custom' ? recipe(data.recipe) : undefined;
+      if (chosen) db.prepare('UPDATE users SET theme=?, theme_recipe=? WHERE id=?').run(theme, JSON.stringify(chosen), user.id);
+      else db.prepare('UPDATE users SET theme=? WHERE id=?').run(theme || null, user.id);
+      json(res, 200, { theme, recipe: chosen ?? null }); return;
     }
     if (path === '/api/v1/me/password' && method === 'PUT') {
       const data = await body(req);
@@ -687,6 +667,7 @@ export async function createGateway(config: Config) {
     }
     if (route[0] === 'admin') {
       if (user.role !== 'admin') fail(403, 'Administrator required');
+      if (route[1] === 'shares') { await shares.admin(res, user, route, method!); return; }
       if (path === '/api/v1/admin/audit' && method === 'GET') {
         json(res, 200, db.prepare(`SELECT a.id,a.occurred_at AS occurredAt,a.actor_id AS actorId,
           u.username AS actor,a.action,a.target_id AS targetId FROM audit_events a

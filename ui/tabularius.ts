@@ -113,7 +113,7 @@ function shell(content: string) {
   const list = conversations.map(c => `<button class="conversation" data-id="${escape(c.id)}" ${c.id === conversationId && view === 'chat' ? 'aria-current="page"' : ''}><span>${escape(c.title)}</span><small>${formatDate(c.updatedAt)}</small></button>`).join('');
   app.innerHTML = `<div class="pane assist"><aside><div class="pane-head">${overview!.vaults.length ? `<select id="vault" aria-label="${t('tabularius.vault')}">${options}</select>` : ''}${current?.enabled ? `<button id="new" class="primary">${t('tabularius.newChat')}</button>` : ''}</div>
     ${current?.enabled ? `<nav class="pane-list" aria-label="${t('tabularius.conversations')}">${list || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`}</nav><nav class="pane-foot"><button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="memories" ${view === 'memories' ? 'aria-current="page"' : ''}>${t('tabularius.memories')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button></nav>` : ''}</aside>
-    <section class="assist-main"><div id="message" role="status" hidden></div>${content}</section></div>`;
+    <section class="assist-main">${content}</section></div>`;
   document.getElementById('vault')?.addEventListener('change', event => { vaultId = (event.target as HTMLSelectElement).value; view = 'chat'; void run(openVault); });
   document.getElementById('new')?.addEventListener('click', () => { view = 'chat'; conversationId = undefined; entries = []; draw(); });
   document.getElementById('settings')?.addEventListener('click', () => { view = 'settings'; void run(async () => { await loadHosts(); await refresh(); }); });
@@ -156,6 +156,17 @@ function drawEnable(current: VaultStatus) {
     await refresh(); await openVault();
   });
 }
+
+/** The hosted client's state as a small indicator: a coloured dot, the state, and what is indexed. */
+function syncPill(current: VaultStatus) {
+  const [kind, label] = current.deviceRevoked ? ['warn', t('tabularius.revoked')]
+    : !current.running ? ['warn', t('tabularius.stopped')]
+      : current.indexError ? ['warn', t('tabularius.ready')]
+        : current.replicated ? ['ok', t('tabularius.ready')] : ['busy', t('tabularius.syncing')];
+  const counts = t('tabularius.counts', { notes: current.notes ?? 0, chunks: current.chunks ?? 0 });
+  return `<span class="sync-pill ${kind}" role="status" title="${escape(current.indexError ? t('tabularius.indexError', { error: current.indexError }) : counts)}"><span class="dot" aria-hidden="true"></span><strong>${escape(label)}</strong><span class="sep" aria-hidden="true"></span><span>${escape(counts)}</span></span>`;
+}
+const SEND_ICON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4M4.5 9.5 10 4l5.5 5.5"/></svg>';
 
 function statusText(current: VaultStatus) {
   if (current.deviceRevoked) return `<span class="badge warn">${t('tabularius.revoked')}</span>`;
@@ -318,10 +329,13 @@ function drawProposal(detail: ProposalDetail) {
 }
 
 function drawChat(current: VaultStatus) {
-  shell(`<header class="chat-head"><div><h1>${escape(conversations.find(c => c.id === conversationId)?.title ?? t('tabularius.newChat'))}</h1><p>${statusText(current)}</p></div>
-      ${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</header>
-    <section id="log" class="log" aria-live="polite">${entries.length ? entries.map(entryHtml).join('') : `<p class="muted">${t('tabularius.intro')}</p>`}</section>
-    <form id="ask" class="ask"><textarea name="message" rows="3" placeholder="${t('tabularius.ask')}" required ${busy ? 'disabled' : ''}></textarea><button class="primary" type="submit" ${busy ? 'disabled' : ''}>${t('tabularius.send')}</button></form>`);
+  const title = conversations.find(c => c.id === conversationId)?.title ?? (entries.length ? t('tabularius.newChat') : '');
+  const composer = `<form id="ask" class="composer"><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${t('tabularius.ask')}" aria-label="${t('tabularius.ask')}" required ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></form>`;
+  // A new conversation starts in the middle of the page; once it has messages the box moves below them.
+  shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
+    ${current.indexError ? `<p class="notice error">${t('tabularius.indexError', { error: escape(current.indexError) })}</p>` : ''}
+    ${entries.length ? `<section id="log" class="log" aria-live="polite">${entries.map(entryHtml).join('')}</section><div class="chat-bottom">${composer}</div>`
+    : `<div class="chat-start"><div class="chat-start-inner"><h2 class="chat-hello">Tabularius</h2>${composer}</div></div><div id="log" hidden></div>`}`);
   const log = document.getElementById('log')!;
   log.scrollTop = log.scrollHeight;
   document.getElementById('delete')?.addEventListener('click', () => void run(async () => {

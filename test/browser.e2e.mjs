@@ -56,7 +56,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     assert.equal((await fetch(`${url}/app/app.js`)).status, 200);
     report.scenarios.push('one-sign-in-page-for-every-path');
 
-    // Three interface languages: an English browser gets English; the only selector is in the sidebar after sign-in.
+    // Three interface languages: an English browser gets English; the only selector is in account settings, Interface.
     const la = (await import('../dist/public/messages.js')).catalogues.la;
     {
       const english = await browser.newContext({ locale: 'en-GB' });
@@ -70,7 +70,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await changePassword(page, password, 'admin-browser-password');
     await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
     await page.reload(); await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
-    await expect(page.getByLabel('语言')).toHaveCount(1);
+    await expect(page.getByLabel('语言')).toHaveCount(0);
     const cookies = await context.cookies();
     assert.equal(cookies.find(c => c.name === 'tabularium_session').httpOnly, true);
     assert.equal(cookies.find(c => c.name === 'tabularium_session').sameSite, 'Strict');
@@ -80,26 +80,46 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await page.screenshot({ path: join(results, 'overview.png'), fullPage: true });
     report.scenarios.push('login-change-password-refresh-and-httpOnly-session');
 
+    await page.getByRole('link', { name: /admin/ }).click();
+    await page.getByRole('link', { name: '界面', exact: true }).click();
+    await expect(page.getByLabel('语言')).toHaveCount(1);
     await page.getByLabel('语言').selectOption('la');
     await expect(page.getByRole('link', { name: la['nav.home'], exact: true })).toBeVisible();
-    await page.getByRole('link', { name: la['home.tabularius'] }).click();
+    await expect(page.getByRole('link', { name: la['account.interface'], exact: true })).toHaveAttribute('aria-current', 'page');
+    await page.getByRole('link', { name: la['nav.tabularius'] }).click();
     assert.equal(await page.evaluate(() => document.documentElement.lang), 'la');
-    await expect(page.getByLabel(la['language.label'])).toHaveCount(1);
     assert(!/\p{Extended_Pictographic}/u.test(await page.evaluate(() => document.body.innerText)), 'no emoji on the page');
+    await page.getByRole('link', { name: /admin/ }).click();
+    await page.getByRole('link', { name: la['account.interface'], exact: true }).click();
     await page.getByLabel(la['language.label']).selectOption('zh');
     await expect(page.getByRole('link', { name: '首页', exact: true })).toBeVisible();
-    report.scenarios.push('three-languages-one-selector-in-the-sidebar');
+    await expect(page.getByRole('link', { name: 'AI 管理员', exact: true })).toBeVisible();
+    report.scenarios.push('three-languages-one-selector-in-account-settings');
 
-    // Colour theme: sakura until the account chooses another, then kept on the account.
-    await page.getByRole('link', { name: /admin/ }).click();
-    await page.getByRole('link', { name: '外观', exact: true }).click();
+    // Colour theme: sakura until the account chooses another, then kept on the account; notices are toasts.
     await expect(page.getByRole('button', { name: /樱粉/ })).toHaveAttribute('aria-pressed', 'true');
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'sakura');
     await page.getByRole('button', { name: /森林/ }).click();
-    await expect(page.getByText('已切换配色。')).toBeVisible();
+    await expect(page.locator('.toasts .toast', { hasText: '已切换配色。' })).toBeVisible();
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), undefined);
     await page.reload(); await expect(page.getByRole('button', { name: /森林/ })).toHaveAttribute('aria-pressed', 'true');
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), undefined);
+    // A custom recipe: previewed while it is adjusted, kept after saving.
+    await page.getByRole('button', { name: /自定义/ }).click();
+    await page.getByLabel('主色').fill('#2a7fbf');
+    await page.getByLabel('深色').check();
+    assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'custom');
+    await page.getByRole('button', { name: '保存配色方案' }).click();
+    await expect(page.locator('.toasts .toast', { hasText: '已切换配色。' })).toBeVisible();
+    await page.reload(); await expect(page.getByRole('button', { name: /自定义/ })).toHaveAttribute('aria-pressed', 'true');
+    assert.deepEqual(await page.evaluate(() => [document.documentElement.dataset.theme, document.documentElement.dataset.side, getComputedStyle(document.documentElement).getPropertyValue('--recipe-accent').trim()]), ['custom', 'dark', '#2a7fbf']);
+    await page.screenshot({ path: join(results, 'custom-theme.png') });
+    await page.getByRole('button', { name: /薰衣草/ }).click();
+    await expect(page.getByRole('button', { name: /薰衣草/ })).toHaveAttribute('aria-pressed', 'true');
+    await page.screenshot({ path: join(results, 'lavender-theme.png') });
+    await page.getByRole('button', { name: /樱粉/ }).click();
+    await expect(page.getByRole('button', { name: /樱粉/ })).toHaveAttribute('aria-pressed', 'true');
+    await page.screenshot({ path: join(results, 'sakura-theme.png') });
     report.scenarios.push('theme-kept-on-the-account');
 
     await page.goto(url + '/admin/users');

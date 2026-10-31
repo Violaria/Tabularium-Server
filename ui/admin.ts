@@ -1,5 +1,6 @@
 // Administration, for administrators only: overview, accounts, every vault, and the audit log. The server refuses these
 // routes to other users; the shell does not offer the module to them.
+import { shareTable, type ShareRow } from './shares.js';
 import { formatDate, hasMessage, t } from './i18n.js';
 import { api, button, bytes, confirmAction, escape, form, input, message, page, state, type User } from './core.js';
 import { badge, deviceTable, type Device, type Vault } from './account.js';
@@ -9,7 +10,7 @@ interface Usage { diskBytes: number; activeBytes: number; documents: number; del
 interface Audit { id: number; occurredAt: number; actor: string; action: string; targetId: string }
 
 const date = formatDate;
-const tabs = (): [string, string][] => [['/admin/', t('nav.overview')], ['/admin/users', t('nav.users')], ['/admin/vaults', t('nav.vaults')], ['/admin/audit', t('nav.audit')]];
+const tabs = (): [string, string][] => [['/admin/', t('nav.overview')], ['/admin/users', t('nav.users')], ['/admin/vaults', t('nav.vaults')], ['/admin/shares', t('shares.all')], ['/admin/audit', t('nav.audit')]];
 const frame = (content: HTMLElement) => page(content, { title: t('nav.admin'), subtitle: t('admin.desc'), tabs: tabs() });
 
 export async function renderAdmin(content: HTMLElement, path: string) {
@@ -22,6 +23,7 @@ export async function renderAdmin(content: HTMLElement, path: string) {
   else if (path.startsWith('/admin/users')) await usersPage(content);
   else if (path.startsWith('/admin/vaults')) await vaultsPage(content);
   else if (path.startsWith('/admin/audit')) await auditPage(content);
+  else if (path.startsWith('/admin/shares')) await sharesPage(content);
   else await overviewPage(content);
 }
 
@@ -72,6 +74,11 @@ async function vaultPage(content: HTMLElement, id: string) {
 }
 
 const actionName = (action: string) => { const key = `action.${action}`; return hasMessage(key) ? t(key) : action; };
+async function sharesPage(content: HTMLElement) {
+  const body = frame(content);
+  const shares = await api<ShareRow[]>('/admin/shares');
+  shareTable(body, shares, share => share.vault ?? '', true, () => sharesPage(content));
+}
 async function auditPage(content: HTMLElement) {
   const body = frame(content);
   const events = await api<Audit[]>('/admin/audit');
