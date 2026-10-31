@@ -150,6 +150,21 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert(!ids.some(id => ['h:plain', 'h:unmarked', 'h:replicated-plain', 'h:only-plain', 'h:put-plain', 'h:attached'].includes(id)));
       config.writeLimit = 64; await sync('/h:large', 'PUT', chunk('x'.repeat(100)), device, 413); delete config.writeLimit;
     });
+    await t.test('home overview: own vaults, last synchronisation, no note names without Tabularius, server summary', async () => {
+      await sync('', 'GET');
+      const home = await api('/home', 'GET', undefined, alice);
+      const mine = home.vaults.find(v => v.id === vault.id);
+      assert(mine); assert(!home.vaults.some(v => v.id === otherVault.id));
+      assert.equal(mine.state, 'ready'); assert.equal(mine.locked, false); assert.equal(mine.tabularius, false);
+      assert.deepEqual(mine.recent, []); assert.equal(typeof mine.notes, 'number'); assert(mine.size > 0);
+      assert(mine.devices.find(d => d.name === 'desktop').lastSeenAt > Date.now() - 60_000);
+      assert.equal(home.server, null);
+      const listed = await api(`/vaults/${vault.id}/devices`, 'GET', undefined, alice);
+      assert(listed.find(d => d.id === device.id).lastSeenAt > 0);
+      const overview = await api('/home', 'GET', undefined, admin);
+      assert.equal(overview.server.storage, true); assert.equal(typeof overview.server.uptimeSeconds, 'number');
+      assert(!overview.vaults.some(v => v.id === vault.id));
+    });
     await t.test('route boundary, raw encoded paths, CORS', async () => {
       for (const path of ['/_security', '/_users', '/_design/escape', '/_config', '/_local/a/b']) await sync(path, 'GET', undefined, device, 403);
       await sync('', 'PUT', {}, device, 403); await sync('', 'DELETE', undefined, device, 403);
@@ -165,6 +180,31 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       await sync('', 'GET', undefined, device, 403, { origin: 'https://unknown.invalid' });
       response = await fetch(url + `/sync/${vault.id}`, { headers: { authorization: basic(device), origin: 'app://obsidian.md', cookie: 'AuthSession=fake' } });
       assert.equal(response.status, 200); assert.equal(response.headers.get('access-control-allow-origin'), 'app://obsidian.md'); assert.equal(response.headers.get('set-cookie'), null); await response.arrayBuffer();
+    });
+    await t.test('one application page for every module, its policy, caching and removed pages', async () => {
+      const page = await (await fetch(url + '/app/app.html')).text();
+      for (const path of ['/', '/home', '/notes/', '/notes/?vault=x&path=a.md', '/tabularius/', '/tabularius/vaults/x', '/admin/', '/admin/vaults/x', '/account/', '/account/kindle']) {
+        const response = await fetch(url + path);
+        assert.equal(response.status, 200, path);
+        assert.equal(await response.text(), page, path);
+        assert.match(response.headers.get('content-security-policy'), /script-src 'self' 'wasm-unsafe-eval'.*worker-src 'self' blob:/, path);
+        assert.equal(response.headers.get('cache-control'), 'no-store', path);
+      }
+      // The cached copy of the page used offline keeps the same policy.
+      assert.match((await fetch(url + '/app/app.html')).headers.get('content-security-policy'), /worker-src 'self' blob:/);
+      let response = await fetch(url + '/sw.js');
+      assert.equal(response.headers.get('cache-control'), 'no-cache'); assert.doesNotMatch(response.headers.get('content-security-policy'), /wasm/); await response.arrayBuffer();
+      const offline = await (await fetch(url + '/app/offline.json')).json();
+      assert(offline.includes('/notes/assets/notes-module.js') && offline.includes('/notes/assets/notes-module.css'));
+      response = await fetch(url + '/notes/assets/notes-module.js');
+      assert.equal(response.headers.get('cache-control'), 'no-cache'); assert.match(response.headers.get('content-type'), /javascript/); await response.arrayBuffer();
+      const hashed = offline.find(path => !path.includes('notes-module.'));
+      assert.equal((await fetch(url + hashed)).headers.get('cache-control'), 'public, max-age=31536000, immutable');
+      for (const path of ['/index.html', '/home.html', '/tabularius.html', '/admin.css', '/notes/assets/missing.js']) {
+        response = await fetch(url + path); await response.arrayBuffer();
+        assert.equal(response.status, 404, path);
+      }
+      assert.equal((await fetch(url + '/', { method: 'POST' })).status, 404);
     });
     const stream = async (credentials = device, feed = 'continuous') => {
       const controller = new AbortController();

@@ -14,12 +14,12 @@ export async function verifyPassword(password: string, stored: string) {
   const [salt, hash] = stored.split(':');
   return timingSafeEqual(await derive(password, salt, 64) as Buffer, Buffer.from(hash, 'hex'));
 }
-export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number; kindle_address: string | null }
+export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number; kindle_address: string | null; theme: string | null }
 export interface Vault {
   id: string; owner_id: string; name: string; database_name: string; state: string;
   rebuild_device: string | null; rebuild_until: number | null; rebuild_started: number | null;
 }
-export interface Device { id: string; user_id: string; vault_id: string; secret_hash: string; name: string; revoked: number; expires_at: number }
+export interface Device { id: string; user_id: string; vault_id: string; secret_hash: string; name: string; revoked: number; expires_at: number; last_seen_at: number | null }
 
 export function openStore(path: string) {
   const db = new DatabaseSync(path);
@@ -209,6 +209,17 @@ export function openStore(path: string) {
   `);
     version = 10;
   }
-  if (version !== 10) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 10) {
+    // When each device last synchronised (home page, device lists), and each user's colour theme for the web pages.
+    db.exec(`
+    BEGIN;
+    ALTER TABLE devices ADD COLUMN last_seen_at INTEGER;
+    ALTER TABLE users ADD COLUMN theme TEXT;
+    PRAGMA user_version=11;
+    COMMIT;
+  `);
+    version = 11;
+  }
+  if (version !== 11) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

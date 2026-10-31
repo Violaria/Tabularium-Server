@@ -61,7 +61,9 @@ function field(data: Record<string, unknown>, key: string, max = 128, min = 1): 
   if (typeof value !== 'string' || value.length < min || value.length > max) fail(400, `Invalid ${key}`);
   return value as string;
 }
-const publicUser = (u: User) => ({ id: u.id, username: u.username, role: u.role, disabled: Boolean(u.disabled), mustChangePassword: Boolean(u.must_change_password) });
+const publicUser = (u: User) => ({ id: u.id, username: u.username, role: u.role, disabled: Boolean(u.disabled), mustChangePassword: Boolean(u.must_change_password), theme: u.theme ?? '' });
+/** Colour themes of the web pages; '' is the default. */
+const THEMES = ['', 'forest', 'sakura', 'lavender'];
 const publicVault = (v: Vault) => ({ id: v.id, name: v.name, state: v.state, syncPath: `/sync/${v.id}`,
   rebuild: v.rebuild_device ? { deviceId: v.rebuild_device, until: v.rebuild_until, started: v.rebuild_started } : null });
 const MILESTONE = 'obsydian_livesync_milestone';
@@ -186,6 +188,12 @@ export async function createGateway(config: Config) {
       WHERE d.id=? AND d.secret_hash=? AND d.revoked=0 AND d.expires_at>? AND u.disabled=0 AND u.must_change_password=0`)
       .get(decoded.slice(0, split), digest(decoded.slice(split + 1)), Date.now()) as unknown as Device | undefined;
     if (!device) return fail(401, 'Device credentials expired or invalid');
+    // Last synchronisation time, written at most once a minute per device.
+    const now = Date.now();
+    if (!device.last_seen_at || now - device.last_seen_at > 60_000) {
+      db.prepare('UPDATE devices SET last_seen_at=? WHERE id=?').run(now, device.id);
+      device.last_seen_at = now;
+    }
     return device;
   }
   const clearRebuild = (vaultId: string) => db.prepare('UPDATE vaults SET rebuild_device=NULL, rebuild_until=NULL, rebuild_started=NULL WHERE id=?').run(vaultId);
@@ -280,6 +288,52 @@ export async function createGateway(config: Config) {
     });
     req.on('error', () => outgoing.destroy());
     if (write) outgoing.end(write.data); else req.pipe(outgoing);
+  }
+  // Notes per vault database: live file metadata documents, recounted only when the database has changed.
+  const noteCounts = new Map<string, { seq: string; count: number }>();
+  async function countNotes(database: string, seq: string) {
+    const cached = noteCounts.get(database);
+    if (cached?.seq === seq) return cached.count;
+    const range = `startkey=${encodeURIComponent('"f:"')}&endkey=${encodeURIComponent('"f:\ufff0"')}`;
+    const response = await couch.admin(`/${database}/_all_docs?include_docs=true&${range}`);
+    if (!response.ok) { await response.arrayBuffer(); fail(502, 'CouchDB unavailable'); }
+    const rows = ((await response.json()) as { rows: { doc?: { deleted?: boolean; _deleted?: boolean } }[] }).rows;
+    const count = rows.filter(row => row.doc && !row.doc.deleted && !row.doc._deleted).length;
+    noteCounts.set(database, { seq, count });
+    return count;
+  }
+  /** The signed-in user's own vaults at a glance, recent Tabularius conversations, and a server summary for administrators. */
+  async function home(user: User) {
+    const vaults = db.prepare('SELECT * FROM vaults WHERE owner_id=? ORDER BY name').all(user.id) as unknown as Vault[];
+    const result = [];
+    for (const vault of vaults) {
+      let size = 0, notes = 0, locked = false;
+      if (vault.state === 'ready') {
+        const response = await couch.admin(`/${vault.database_name}`);
+        if (!response.ok) { await response.arrayBuffer(); fail(502, 'CouchDB unavailable'); }
+        const info = await response.json() as { sizes: { file: number }; update_seq: string };
+        size = info.sizes.file;
+        notes = await countNotes(vault.database_name, String(info.update_seq));
+        locked = Boolean((await milestone(vault.database_name))?.locked);
+      }
+      const devices = db.prepare('SELECT name, last_seen_at AS lastSeenAt FROM devices WHERE vault_id=? AND revoked=0 AND expires_at>? ORDER BY last_seen_at DESC').all(vault.id, Date.now());
+      const assistant = tabularius?.status(vault);
+      // Note names only where the server already holds the plaintext (Tabularius enabled).
+      const recent = assistant?.enabled
+        ? db.prepare('SELECT path, mtime FROM tabularius_files WHERE vault_id=? ORDER BY mtime DESC LIMIT 5').all(vault.id) : [];
+      result.push({ id: vault.id, name: vault.name, state: vault.state, locked, rebuilding: Boolean(vault.rebuild_started),
+        size, notes: assistant?.enabled ? (assistant as { notes: number }).notes : notes, devices, tabularius: Boolean(assistant?.enabled), recent });
+    }
+    const conversations = tabularius ? db.prepare(`SELECT c.id, c.title, c.vault_id AS vaultId, v.name AS vault, c.updated_at AS updatedAt
+      FROM tabularius_conversations c JOIN vaults v ON v.id=c.vault_id WHERE c.user_id=? ORDER BY c.updated_at DESC LIMIT 5`).all(user.id) : [];
+    let server = null;
+    if (user.role === 'admin') {
+      let storage = false;
+      try { const up = await couch.admin('/_up'); storage = up.ok; await up.arrayBuffer(); } catch { /* Shown as not ready. */ }
+      server = { uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000), activeProxyConnections: active.size, storage,
+        provider: tabularius ? { name: tabularius.provider.name, model: tabularius.provider.model } : null };
+    }
+    return { vaults: result, conversations, server };
   }
   /** LiveSync's milestone document of a vault database: its lock, accepted devices and chunk parameters. */
   async function milestone(database: string) {
@@ -474,6 +528,12 @@ export async function createGateway(config: Config) {
     if (['/api/v1/sessions/current', '/api/v1/web-session'].includes(path) && method === 'DELETE') {
       db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hash); setSessionCookie(res, '', 0); json(res, 200, { ok: true }); return;
     }
+    if (path === '/api/v1/me/theme' && method === 'PUT') {
+      const theme = field({ theme: '', ...(await body(req)) }, 'theme', 32, 0);
+      if (!THEMES.includes(theme)) fail(400, 'Unknown theme');
+      db.prepare('UPDATE users SET theme=? WHERE id=?').run(theme || null, user.id);
+      json(res, 200, { theme }); return;
+    }
     if (path === '/api/v1/me/password' && method === 'PUT') {
       const data = await body(req);
       if (!await verifyPassword(field(data, 'currentPassword', 1024), user.password_hash)) fail(401, 'Invalid current password');
@@ -485,6 +545,7 @@ export async function createGateway(config: Config) {
       db.exec('COMMIT'); json(res, 200, { ok: true }); return;
     }
     if (user.must_change_password) fail(403, 'Change initial password first');
+    if (path === '/api/v1/home' && method === 'GET') { json(res, 200, await home(user)); return; }
     if (route[0] === 'me' && route[1] === 'kindle') {
       if (route.length === 2 && method === 'GET') {
         json(res, 200, { address: user.kindle_address, configured: Boolean(config.smtp), from: config.smtp?.from ?? null,
@@ -666,7 +727,7 @@ export async function createGateway(config: Config) {
           json(res, 200, { diskBytes: info.sizes.file, activeBytes: info.sizes.active, documentBytes: info.sizes.external, documents: info.doc_count, deletedDocuments: info.doc_del_count }); return;
         }
         if (route.length === 4 && route[3] === 'devices' && method === 'GET') {
-          json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt FROM devices WHERE vault_id=?').all(vault!.id)); return;
+          json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt,last_seen_at AS lastSeenAt FROM devices WHERE vault_id=?').all(vault!.id)); return;
         }
         if (route.length === 5 && route[3] === 'devices' && method === 'DELETE') {
           const result = db.prepare('UPDATE devices SET revoked=1 WHERE id=? AND vault_id=?').run(route[4], vault!.id);
@@ -724,7 +785,7 @@ export async function createGateway(config: Config) {
       if (route[2] === 'databases') { json(res, 200, await retired(vault, user, route.slice(3), method!)); return; }
       if (route[2] === 'devices') {
         if (route.length === 3 && method === 'GET') {
-          json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt FROM devices WHERE vault_id=?').all(vault.id)); return;
+          json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt,last_seen_at AS lastSeenAt FROM devices WHERE vault_id=?').all(vault.id)); return;
         }
         if (route.length === 3 && method === 'POST') {
           if (vault.state !== 'ready') fail(409, 'Vault is not ready');

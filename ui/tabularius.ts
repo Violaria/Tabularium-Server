@@ -1,7 +1,6 @@
 // Tabularius: enable the AI curator for a vault, set what it may send, and talk to it about the notes.
-import { formatDate, languageSelect, serverError, t } from './i18n.js';
-
-interface Session { user: { username: string; mustChangePassword: boolean }; csrf: string }
+import { formatDate, serverError, t } from './i18n.js';
+import { api, ApiError, confirmAction, escape, message, run, state } from './core.js';
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
   deviceRevoked?: boolean; knowledge?: boolean; web?: boolean; mode?: Mode; params?: string; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
@@ -21,8 +20,8 @@ interface Entry { role: 'user' | 'assistant'; text: string; tools?: ToolUse[]; r
 interface Host { id: string; name: string; address: string; port: number; username: string; policy: 'allowed' | 'authorize' | 'forbidden'; commands: string; fingerprint: string | null; publicKey: string }
 interface CommandRecord { id: string; host: string | null; user: string | null; command: string; mode: string; status: string; exitCode: number | null; reason: string | null; createdAt: number }
 
-const app = document.querySelector<HTMLDivElement>('#app')!;
-let session: Session | undefined;
+/** The content area of the shell this module draws into. */
+let app: HTMLElement;
 let overview: Overview | undefined;
 let vaultId = new URLSearchParams(location.search).get('vault') ?? '';
 let view: 'chat' | 'settings' | 'proposals' | 'proposal' | 'memories' = 'chat';
@@ -35,30 +34,8 @@ let conversationId: string | undefined;
 let entries: Entry[] = [];
 let busy = false;
 
-class ApiError extends Error { constructor(readonly status: number, message: string) { super(message); } }
-async function api<T>(path: string, method = 'GET', data?: unknown): Promise<T> {
-  const response = await fetch(`/api/v1${path}`, { method, credentials: 'same-origin',
-    headers: { 'content-type': 'application/json', ...(session ? { 'x-csrf-token': session.csrf } : {}) },
-    body: data === undefined ? undefined : JSON.stringify(data) });
-  const result = await response.json();
-  if (!response.ok) throw new ApiError(response.status, serverError(result.error));
-  return result as T;
-}
-const escape = (value: string | number) => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
 const vault = () => overview?.vaults.find(v => v.id === vaultId);
 
-function message(text: string, error = false) {
-  const target = document.querySelector<HTMLDivElement>('#message');
-  if (!target) return;
-  target.className = error ? 'notice error' : 'notice'; target.textContent = text; target.hidden = false;
-}
-async function run(action: () => Promise<void>) {
-  try { await action(); }
-  catch (error) {
-    if (error instanceof ApiError && error.status === 401) { session = undefined; login(); message(t('common.sessionExpired'), true); }
-    else message(error instanceof Error ? error.message : t('common.failed'), true);
-  }
-}
 function form(id: string, action: (data: FormData) => Promise<void>) {
   document.querySelector<HTMLFormElement>(`#${id}`)?.addEventListener('submit', event => {
     event.preventDefault();
@@ -70,7 +47,7 @@ function form(id: string, action: (data: FormData) => Promise<void>) {
 
 /** Answer text: paragraphs, fenced code, inline code, and [[note]] citations linked to the web notes page. */
 function render(text: string) {
-  const link = (path: string) => `<a class="cite" href="/notes/#${encodeURIComponent(vaultId)}/${path.split('/').map(encodeURIComponent).join('/')}" target="_blank" rel="noopener">${escape(path)}</a>`;
+  const link = (path: string) => `<a class="cite" href="/notes/?vault=${encodeURIComponent(vaultId)}&amp;path=${encodeURIComponent(path)}">${escape(path)}</a>`;
   const inline = (value: string) => escape(value)
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\[\[([^\]\n|]+?)(?:\|[^\]\n]*)?\]\]/g, (_, path: string) => link(path.replace(/&amp;/g, '&')));
@@ -115,14 +92,7 @@ function entryHtml(entry: Entry) {
   return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}${approvals}<div class="answer">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}${sources}</div>`;
 }
 
-function login() {
-  document.title = 'Tabularius';
-  app.innerHTML = `<div class="login-page"><div class="login-box"><div class="brand"><span class="brand-mark">T</span><div><strong>Tabularius</strong><small>${t('tabularius.subtitle')}</small></div></div><div class="card"><h1>${t('console.signInTitle')}</h1><div id="message" role="status" hidden></div><form id="login" class="stack"><label>${t('common.username')}<input name="username" autocomplete="username" required></label><label>${t('common.password')}<input name="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">${t('common.signIn')}</button></form></div></div></div>`;
-  form('login', async data => { session = await api<Session>('/web-session', 'POST', Object.fromEntries(data)); await load(); });
-}
-
 async function load() {
-  if (session!.user.mustChangePassword) { app.innerHTML = `<div class="login-page"><div class="login-box"><div class="card"><p>${t('tabularius.changePassword')}</p><a href="/admin/">${t('home.console')}</a></div></div></div>`; return; }
   overview = await api<Overview>('/tabularius');
   if (!overview.vaults.some(v => v.id === vaultId)) vaultId = overview.vaults.find(v => v.enabled)?.id ?? overview.vaults[0]?.id ?? '';
   await openVault();
@@ -140,24 +110,21 @@ async function refresh() {
 function shell(content: string) {
   const current = vault();
   const options = overview!.vaults.map(v => `<option value="${escape(v.id)}" ${v.id === vaultId ? 'selected' : ''}>${escape(v.name)}${v.enabled ? '' : ` (${t('tabularius.off')})`}</option>`).join('');
-  const list = conversations.map(c => `<button class="conversation" data-id="${escape(c.id)}" ${c.id === conversationId ? 'aria-current="page"' : ''}>${escape(c.title)}<small>${formatDate(c.updatedAt)}</small></button>`).join('');
-  app.innerHTML = `<aside class="sidebar"><div class="brand"><span class="brand-mark">T</span><div><strong>Tabularius</strong><small>${t('tabularius.subtitle')}</small></div></div>
-    <nav aria-label="${t('tabularius.conversations')}">${overview!.vaults.length ? `<select id="vault" aria-label="${t('tabularius.vault')}">${options}</select>` : ''}
-    ${current?.enabled ? `<button id="new" class="new">${t('tabularius.newChat')}</button>${list || `<small>${t('tabularius.noConversations')}</small>`}<button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="memories" ${view === 'memories' ? 'aria-current="page"' : ''}>${t('tabularius.memories')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button>` : ''}</nav>
-    <div class="account"><div><strong>${escape(session!.user.username)}</strong><br><a href="/admin/">${t('home.console')}</a> · <a href="/notes/">${t('home.notes')}</a></div><div id="language"></div><button id="logout">${t('common.signOut')}</button></div></aside>
-    <main class="main tabularius"><div id="message" role="status" hidden></div>${content}</main>`;
-  document.getElementById('language')!.replaceChildren(languageSelect(draw));
+  const list = conversations.map(c => `<button class="conversation" data-id="${escape(c.id)}" ${c.id === conversationId && view === 'chat' ? 'aria-current="page"' : ''}><span>${escape(c.title)}</span><small>${formatDate(c.updatedAt)}</small></button>`).join('');
+  app.innerHTML = `<div class="pane assist"><aside><div class="pane-head">${overview!.vaults.length ? `<select id="vault" aria-label="${t('tabularius.vault')}">${options}</select>` : ''}${current?.enabled ? `<button id="new" class="primary">${t('tabularius.newChat')}</button>` : ''}</div>
+    ${current?.enabled ? `<nav class="pane-list" aria-label="${t('tabularius.conversations')}">${list || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`}</nav><nav class="pane-foot"><button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="memories" ${view === 'memories' ? 'aria-current="page"' : ''}>${t('tabularius.memories')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button></nav>` : ''}</aside>
+    <section class="assist-main"><div id="message" role="status" hidden></div>${content}</section></div>`;
   document.getElementById('vault')?.addEventListener('change', event => { vaultId = (event.target as HTMLSelectElement).value; view = 'chat'; void run(openVault); });
   document.getElementById('new')?.addEventListener('click', () => { view = 'chat'; conversationId = undefined; entries = []; draw(); });
   document.getElementById('settings')?.addEventListener('click', () => { view = 'settings'; void run(async () => { await loadHosts(); await refresh(); }); });
   document.getElementById('proposals')?.addEventListener('click', () => void run(showProposals));
   document.getElementById('memories')?.addEventListener('click', () => void run(showMemories));
-  for (const item of document.querySelectorAll<HTMLButtonElement>('[data-proposal]')) item.addEventListener('click', () => void run(() => showProposal(item.dataset.proposal!)));
-  document.getElementById('logout')!.addEventListener('click', () => void run(async () => { await api('/web-session', 'DELETE'); session = undefined; login(); }));
-  for (const item of document.querySelectorAll<HTMLButtonElement>('.conversation')) item.addEventListener('click', () => void run(async () => {
-    const loaded = await api<{ id: string; messages: Entry[] }>(`/tabularius/conversations/${item.dataset.id}`);
-    view = 'chat'; conversationId = loaded.id; entries = loaded.messages; draw();
-  }));
+  for (const item of app.querySelectorAll<HTMLButtonElement>('[data-proposal]')) item.addEventListener('click', () => void run(() => showProposal(item.dataset.proposal!)));
+  for (const item of app.querySelectorAll<HTMLButtonElement>('.conversation')) item.addEventListener('click', () => void run(() => openConversation(item.dataset.id!)));
+}
+async function openConversation(id: string) {
+  const loaded = await api<{ id: string; messages: Entry[] }>(`/tabularius/conversations/${id}`);
+  view = 'chat'; conversationId = loaded.id; entries = loaded.messages; draw();
 }
 
 function draw() {
@@ -240,7 +207,7 @@ function drawSettings(current: VaultStatus) {
   document.getElementById('reload')!.addEventListener('click', () => void run(refresh));
   document.getElementById('mode')!.addEventListener('change', event => void run(async () => {
     const select = event.target as HTMLSelectElement;
-    if (select.value === 'full' && !confirm(t('tabularius.confirmFull'))) { select.value = current.mode ?? 'read-only'; return; }
+    if (select.value === 'full' && !await confirmAction({ title: t('tabularius.mode.full'), body: t('tabularius.confirmFull'), action: t('tabularius.mode.full'), danger: true })) { select.value = current.mode ?? 'read-only'; return; }
     await api(`/tabularius/vaults/${vaultId}/mode`, 'PUT', { mode: select.value });
     await refresh(); message(t('tabularius.saved'));
   }));
@@ -261,7 +228,7 @@ function drawSettings(current: VaultStatus) {
     });
     item.querySelector('[data-check]')!.addEventListener('click', () => void run(async () => { await api(`/tabularius/hosts/${id}/check`, 'POST'); await loadHosts(); draw(); message(t('tabularius.hostChecked')); }));
     item.querySelector('[data-remove]')!.addEventListener('click', () => void run(async () => {
-      if (!confirm(t('tabularius.confirmRemoveHost'))) return;
+      if (!await confirmAction({ title: t('tabularius.removeHost'), body: t('tabularius.confirmRemoveHost'), action: t('tabularius.removeHost'), danger: true })) return;
       await api(`/tabularius/hosts/${id}`, 'DELETE'); await loadHosts(); draw();
     }));
   }
@@ -278,7 +245,7 @@ function drawSettings(current: VaultStatus) {
     await refresh(); message(t('tabularius.saved'));
   });
   document.getElementById('disable')!.addEventListener('click', () => void run(async () => {
-    if (!confirm(t('tabularius.confirmDisable', { name: current.name }))) return;
+    if (!await confirmAction({ title: t('tabularius.disable'), body: t('tabularius.confirmDisable', { name: current.name }), action: t('tabularius.disable'), danger: true, confirmName: current.name })) return;
     await api(`/tabularius/vaults/${vaultId}`, 'DELETE');
     view = 'chat'; await refresh(); await openVault();
   }));
@@ -301,7 +268,7 @@ function drawMemories() {
       void run(async () => { await api(`/tabularius/memories/${item.dataset.id}`, 'PUT', { content: new FormData(item).get('content') }); await showMemories(); message(t('tabularius.saved')); });
     });
     item.querySelector('[data-delete]')!.addEventListener('click', () => void run(async () => {
-      if (!confirm(t('tabularius.confirmDeleteMemory'))) return;
+      if (!await confirmAction({ title: t('tabularius.deleteMemory'), body: t('tabularius.confirmDeleteMemory'), action: t('tabularius.deleteMemory'), danger: true })) return;
       await api(`/tabularius/memories/${item.dataset.id}`, 'DELETE'); await showMemories();
     }));
   }
@@ -344,7 +311,7 @@ function drawProposal(detail: ProposalDetail) {
     await showProposal(detail.id); message(t('tabularius.discardedMessage'));
   }));
   document.getElementById('apply')?.addEventListener('click', () => void run(async () => {
-    if (!confirm(t('tabularius.confirmApply', { count: detail.files.length }))) return;
+    if (!await confirmAction({ title: t('tabularius.apply'), body: t('tabularius.confirmApply', { count: detail.files.length }), action: t('tabularius.apply') })) return;
     try { await api(`/tabularius/proposals/${detail.id}/apply`, 'POST'); } catch (error) { await showProposal(detail.id); throw error; }
     await showProposal(detail.id); message(t('tabularius.appliedMessage'));
   }));
@@ -358,7 +325,7 @@ function drawChat(current: VaultStatus) {
   const log = document.getElementById('log')!;
   log.scrollTop = log.scrollHeight;
   document.getElementById('delete')?.addEventListener('click', () => void run(async () => {
-    if (!confirm(t('tabularius.confirmDeleteChat'))) return;
+    if (!await confirmAction({ title: t('tabularius.deleteChat'), body: t('tabularius.confirmDeleteChat'), action: t('tabularius.deleteChat'), danger: true })) return;
     await api(`/tabularius/conversations/${conversationId}`, 'DELETE');
     conversations = conversations.filter(c => c.id !== conversationId); conversationId = undefined; entries = []; draw();
   }));
@@ -385,7 +352,7 @@ async function ask(text: string) {
   update();
   try {
     const response = await fetch(conversationId ? `/api/v1/tabularius/conversations/${conversationId}/messages` : `/api/v1/tabularius/vaults/${vaultId}/conversations`, {
-      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': session!.csrf }, body: JSON.stringify({ message: text }),
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': state.session!.csrf }, body: JSON.stringify({ message: text }),
     });
     if (!response.ok) throw new ApiError(response.status, serverError((await response.json()).error));
     const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
@@ -431,10 +398,13 @@ document.addEventListener('click', event => {
   void run(() => api(`/tabularius/approvals/${id}`, 'POST', { approved: Boolean(button.dataset.approve) }));
 });
 
-void run(async () => {
-  try { session = await api<Session>('/web-session'); } catch (error) {
-    if (error instanceof ApiError && error.status === 401) { login(); return; }
-    throw error;
-  }
+/** Draws Tabularius into the shell's content area; `?vault=` and `?conversation=` select what opens. */
+export async function renderTabularius(content: HTMLElement) {
+  app = content;
+  const query = new URLSearchParams(location.search);
+  if (query.get('vault')) vaultId = query.get('vault')!;
+  view = 'chat';
   await load();
-});
+  const conversation = query.get('conversation');
+  if (conversation) await openConversation(conversation);
+}
