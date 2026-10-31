@@ -117,8 +117,7 @@ function entryHtml(entry: Entry) {
 
 function login() {
   document.title = 'Tabularius';
-  app.innerHTML = `<div class="login-page"><div class="login-box"><div class="brand"><span class="brand-mark">T</span><div><strong>Tabularius</strong><small>${t('tabularius.subtitle')}</small></div></div><div class="card"><h1>${t('console.signInTitle')}</h1><div id="message" role="status" hidden></div><form id="login" class="stack"><label>${t('common.username')}<input name="username" autocomplete="username" required></label><label>${t('common.password')}<input name="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">${t('common.signIn')}</button></form></div><div id="language"></div></div></div>`;
-  document.getElementById('language')!.replaceChildren(languageSelect(login));
+  app.innerHTML = `<div class="login-page"><div class="login-box"><div class="brand"><span class="brand-mark">T</span><div><strong>Tabularius</strong><small>${t('tabularius.subtitle')}</small></div></div><div class="card"><h1>${t('console.signInTitle')}</h1><div id="message" role="status" hidden></div><form id="login" class="stack"><label>${t('common.username')}<input name="username" autocomplete="username" required></label><label>${t('common.password')}<input name="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">${t('common.signIn')}</button></form></div></div></div>`;
   form('login', async data => { session = await api<Session>('/web-session', 'POST', Object.fromEntries(data)); await load(); });
 }
 

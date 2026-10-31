@@ -281,6 +281,21 @@ export async function createGateway(config: Config) {
     req.on('error', () => outgoing.destroy());
     if (write) outgoing.end(write.data); else req.pipe(outgoing);
   }
+  /** LiveSync's milestone document of a vault database: its lock, accepted devices and chunk parameters. */
+  async function milestone(database: string) {
+    let response;
+    try { response = await couch.admin(`/${database}/_local/${MILESTONE}`); } catch { fail(502, 'CouchDB unavailable'); }
+    if (response!.status === 404) { await response!.arrayBuffer(); return undefined; }
+    if (!response!.ok) { await response!.arrayBuffer(); fail(502, 'CouchDB unavailable'); }
+    return await response!.json() as Record<string, unknown>;
+  }
+  async function unlock(database: string) {
+    const current = await milestone(database);
+    if (!current) return;
+    const response = await couch.admin(`/${database}/_local/${MILESTONE}`, 'PUT', { ...current, locked: false });
+    await response.arrayBuffer();
+    if (!response.ok) fail(502, 'Could not unlock the database');
+  }
   async function rebuild(req: IncomingMessage, vault: Vault, user: User, rest: string[], method: string) {
     if (rest.length === 0 && method === 'POST') {
       const data = await body(req);
@@ -294,21 +309,20 @@ export async function createGateway(config: Config) {
     } else if (rest.length === 0 && method === 'DELETE') {
       clearRebuild(vault.id);
       audit(user.id, 'vault.rebuild-end', vault.id);
+    } else if (rest.length === 1 && rest[0] === 'lock' && method === 'GET') {
+      return { locked: Boolean((await milestone(vault.database_name))?.locked) };
+    } else if (rest.length === 1 && rest[0] === 'lock' && method === 'DELETE') {
+      // The owner lifts the lock a rebuild leaves once the other devices have fetched again, as the plug-in's unlock does.
+      if (vault.rebuild_started) fail(409, 'A rebuild is already in progress');
+      await unlock(vault.database_name);
+      audit(user.id, 'vault.unlock', vault.id);
     } else if (rest.length === 1 && rest[0] === 'revert' && method === 'POST') {
       if (field(await body(req), 'confirm') !== vault.name) fail(400, 'Confirmation does not match the vault name');
       const previous = db.prepare('SELECT database_name FROM retired_databases WHERE vault_id=? AND partial=0 ORDER BY retired_at DESC LIMIT 1').get(vault.id) as { database_name: string } | undefined;
       if (!previous) fail(409, 'No retired database to revert to');
       cancel(v => v.vault === vault.id);
       // Undo the lock the rebuilding client placed on the previous database before replacing it.
-      const path = `/${previous!.database_name}/_local/${MILESTONE}`;
-      let response;
-      try { response = await couch.admin(path); } catch { fail(502, 'CouchDB unavailable'); }
-      if (response!.ok) {
-        const milestone = await response!.json() as Record<string, unknown>;
-        response = await couch.admin(path, 'PUT', { ...milestone, locked: false });
-        if (!response.ok) fail(502, 'Could not unlock the previous database');
-      }
-      await response!.arrayBuffer();
+      await unlock(previous!.database_name);
       db.exec('BEGIN');
       db.prepare('DELETE FROM retired_databases WHERE database_name=?').run(previous!.database_name);
       db.prepare('INSERT INTO retired_databases VALUES(?,?,?,0)').run(vault.database_name, vault.id, Date.now());

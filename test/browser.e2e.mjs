@@ -158,6 +158,9 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await page.getByRole('button', { name: '团队笔记', exact: true }).click();
     await expect(page.getByRole('cell', { name: 'Alice 的电脑', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '撤销', exact: true }).click();
+    // Revoked devices leave the list and are folded away below it.
+    await expect(page.getByRole('button', { name: '撤销', exact: true })).toHaveCount(0);
+    await page.getByText('已撤销或已过期的设备（1）', { exact: true }).click();
     await expect(page.getByText('已撤销', { exact: true })).toBeVisible();
     const revoked = await fetch(`${url}/sync/${vaultId}`, { headers: { authorization: auth } });
     assert.equal(revoked.status, 401); await revoked.arrayBuffer();

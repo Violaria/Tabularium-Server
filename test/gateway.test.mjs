@@ -301,6 +301,7 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       await vs('/', 'DELETE', undefined, r1, 200);
       await ended;
       assert((await api(`/vaults/${rv.id}`, 'GET', undefined, alice)).rebuild.started > 0);
+      await api(`/vaults/${rv.id}/rebuild/lock`, 'DELETE', undefined, alice, 409);
       await vs('/', 'PUT', undefined, r1, 412);
       await vs('/h:doc', 'GET', undefined, r2, 409);
       await vs('/h:doc', 'GET', undefined, r1, 404);
@@ -312,6 +313,12 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       await vs('/h:doc2', 'PUT', chunk('2'), r1, 201);
       assert.equal((await vs(milestone, 'GET', undefined, r2)).locked, true);
       await vs('/h:doc2', 'GET', undefined, r2);
+      // The owner lifts the rebuild lock from the console once the other devices have fetched.
+      assert.equal((await api(`/vaults/${rv.id}/rebuild/lock`, 'GET', undefined, alice)).locked, true);
+      await api(`/vaults/${rv.id}/rebuild/lock`, 'GET', undefined, bob, 404);
+      await api(`/vaults/${rv.id}/rebuild/lock`, 'DELETE', undefined, alice);
+      assert.equal((await vs(milestone, 'GET', undefined, r2)).locked, false);
+      assert.equal((await api(`/vaults/${rv.id}/rebuild/lock`, 'GET', undefined, alice)).locked, false);
 
       let retired = await api(`/vaults/${rv.id}/databases`, 'GET', undefined, alice);
       assert.equal(retired.length, 2); assert.equal(retired[1].name, original); assert.deepEqual(retired.map(r => r.partial), [true, false]);

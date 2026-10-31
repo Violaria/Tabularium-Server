@@ -8,3 +8,8 @@ textarea{font:inherit;border:1px solid #b7c5ba;border-radius:6px;padding:10px 12
 .sources{margin:4px 0 0;padding-left:20px;font-size:13px}.sources a{color:var(--green);overflow-wrap:anywhere}
 .memory{padding:12px 0;border-bottom:1px solid var(--line)}.memory:last-child{border-bottom:0}.memory .actions{align-items:center}
 .host{padding:14px 0;border-bottom:1px solid var(--line)}.host h3,#add-host h3{font-size:15px;margin:0}.approval pre{margin:6px 0 10px;white-space:pre-wrap}
+#message{position:sticky;top:12px;z-index:5;box-shadow:0 4px 14px #14251a1f}
+.inactive{margin-top:18px}.inactive summary{cursor:pointer;color:var(--muted);font-size:13px;margin-bottom:12px}
+.notice.warn{background:#fff1da;color:#6b4a12}.notice.warn p{color:inherit;margin-bottom:10px}
+.sidebar nav{align-content:start}.sidebar nav a{display:block;color:#c6d3ca;text-decoration:none;border-radius:7px;padding:12px 14px;font-weight:500}.sidebar nav a:hover{background:#2b4438}.sidebar nav hr{border:0;border-top:1px solid #355344;margin:6px 0;width:100%}
+@media(max-width:850px){.sidebar nav a{padding:8px 10px}}

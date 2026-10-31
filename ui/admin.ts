@@ -54,21 +54,25 @@ function form(id: string, action: (data: FormData) => Promise<void>) {
 }
 const input = (label: string, name: string, type = 'text', extra = '') => `<label>${label}<input name="${name}" type="${type}" required ${extra}></label>`;
 function login() {
-  app.innerHTML = `<div class="login-page"><div class="login-box">${brand()}<div class="card"><p class="eyebrow">${t('console.eyebrow')}</p><h1>${t('console.signInTitle')}</h1><p>${t('console.signInDesc')}</p><div id="message" role="status" hidden></div><form id="login" class="stack">${input(t('common.username'), 'username', 'text', 'autocomplete="username"')}${input(t('common.password'), 'password', 'password', 'autocomplete="current-password"')}<button class="primary" type="submit">${t('common.signIn')}</button></form></div><small>${t('console.accountsHint')}</small><div id="language"></div></div></div>`;
-  mountLanguage(login);
+  app.innerHTML = `<div class="login-page"><div class="login-box">${brand()}<div class="card"><p class="eyebrow">${t('console.eyebrow')}</p><h1>${t('console.signInTitle')}</h1><p>${t('console.signInDesc')}</p><div id="message" role="status" hidden></div><form id="login" class="stack">${input(t('common.username'), 'username', 'text', 'autocomplete="username"')}${input(t('common.password'), 'password', 'password', 'autocomplete="current-password"')}<button class="primary" type="submit">${t('common.signIn')}</button></form></div><small>${t('console.accountsHint')}</small></div></div>`;
   form('login', async data => {
     session = await api<Session>('/web-session', 'POST', Object.fromEntries(data));
     section = session.user.mustChangePassword ? 'password' : session.user.role === 'admin' ? 'overview' : 'vaults';
     await render();
   });
 }
+// The page currently drawn; redrawing the same page after an action keeps the frame, so the scroll position stays.
+let drawn = '';
 function shell(title: string, subtitle: string) {
   const user = session!.user;
+  const page = `${section}|${title}|${subtitle}`;
+  if (page === drawn && document.getElementById('content')) { document.querySelector<HTMLDivElement>('#message')!.hidden = true; return; }
+  drawn = page;
   const items = user.mustChangePassword ? [['password', t('nav.changeInitialPassword')]] : [
     ...(user.role === 'admin' ? [['overview', t('nav.overview')]] : []), ['vaults', t('nav.vaults')], ['kindle', t('nav.kindle')],
     ...(user.role === 'admin' ? [['users', t('nav.users')], ['audit', t('nav.audit')]] : []), ['password', t('nav.password')],
   ];
-  app.innerHTML = `<aside class="sidebar">${brand()}<nav aria-label="${t('console.navLabel')}">${items.map(([key, label]) => `<button data-section="${key}" ${key === section ? 'aria-current="page"' : ''}>${label}</button>`).join('')}</nav><div class="account"><div><strong>${escape(user.username)}</strong><br><small>${user.role === 'admin' ? t('role.admin') : t('role.user')}</small></div><div id="language"></div><button id="logout">${t('common.signOut')}</button></div></aside><main class="main"><header class="page-head"><div><p class="eyebrow">${t('console.management')}</p><h1>${title}</h1><p>${subtitle}</p></div><button id="refresh">${t('common.refresh')}</button></header><div id="message" role="status" hidden></div><div id="content"></div></main>`;
+  app.innerHTML = `<aside class="sidebar">${brand()}<nav aria-label="${t('console.navLabel')}">${user.mustChangePassword ? '' : `<a href="/notes/">${t('home.notes')}</a><a href="/tabularius/">${t('home.tabularius')}</a><hr>`}${items.map(([key, label]) => `<button data-section="${key}" ${key === section ? 'aria-current="page"' : ''}>${label}</button>`).join('')}</nav><div class="account"><div><strong>${escape(user.username)}</strong><br><small>${user.role === 'admin' ? t('role.admin') : t('role.user')}</small></div><div id="language"></div><button id="logout">${t('common.signOut')}</button></div></aside><main class="main"><header class="page-head"><div><p class="eyebrow">${t('console.management')}</p><h1>${title}</h1><p>${subtitle}</p></div><button id="refresh">${t('common.refresh')}</button></header><div id="message" role="status" hidden></div><div id="content"></div></main>`;
   for (const nav of document.querySelectorAll<HTMLButtonElement>('[data-section]')) nav.addEventListener('click', () => {
     section = nav.dataset.section!; void run(render);
   });
@@ -137,6 +141,20 @@ async function vaultsPage() {
   form('create-vault', async data => { await api(admin ? '/admin/vaults' : '/vaults', 'POST', Object.fromEntries(data)); await vaultsPage(); message(t('vaults.created')); });
   for (const vault of vaults) for (const prefix of ['vault-', 'details-']) button(prefix + vault.id, () => vaultPage(vault));
 }
+/** Devices that can still synchronise, with their actions; revoked and expired ones are folded away below. */
+function deviceTable(devices: Device[]) {
+  const usable = (d: Device) => !d.revoked && d.expiresAt > Date.now();
+  const active = devices.filter(usable), inactive = devices.filter(d => !usable(d));
+  const head = (actions: boolean) => `<thead><tr><th>${t('vault.device')}</th><th>${t('common.status')}</th><th>${t('vault.expires')}</th>${actions ? `<th>${t('common.actions')}</th>` : ''}</tr></thead>`;
+  const status = (d: Device) => usable(d) ? `<span class="badge">${t('vault.active')}</span>` : `<span class="badge off">${d.revoked ? t('vault.revoked') : t('vault.expired')}</span>`;
+  const table = active.length
+    ? `<table>${head(true)}<tbody>${active.map(d => `<tr><td>${escape(d.name)}</td><td>${status(d)}</td><td>${date(d.expiresAt)}</td><td><button class="danger" id="revoke-${d.id}">${t('vault.revoke')}</button></td></tr>`).join('')}</tbody></table>`
+    : `<div class="empty">${t('vault.noDevices')}</div>`;
+  const folded = inactive.length
+    ? `<details class="inactive"><summary>${t('vault.inactiveDevices', { count: String(inactive.length) })}</summary><table>${head(false)}<tbody>${inactive.map(d => `<tr><td>${escape(d.name)}</td><td>${status(d)}</td><td>${date(d.expiresAt)}</td></tr>`).join('')}</tbody></table></details>`
+    : '';
+  return table + folded;
+}
 async function vaultPage(vault: Vault) {
   shell(escape(vault.name), t('vault.desc'));
   const admin = session!.user.role === 'admin';
@@ -144,7 +162,7 @@ async function vaultPage(vault: Vault) {
   const base = `${admin ? '/admin' : ''}/vaults/${vault.id}`;
   const devices = await api<Device[]>(`${base}/devices`);
   const rebuildCard = owner && vault.state === 'ready' ? await rebuildSection(vault.id, devices) : '';
-  content(`<div class="actions"><button id="back">${t('vault.back')}</button></div><br><section class="card"><h2>${t('vault.connection')}</h2><dl class="details"><dt>${t('vault.syncAddress')}</dt><dd>${escape(location.origin)}/sync</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl><p>${t('vault.clientHint')}</p>${vault.state !== 'ready' ? `<button id="retry">${t('vault.retry')}</button>` : ''}${admin ? `<button id="usage">${t('vault.usage')}</button><div id="usage-result"></div>` : ''}</section>${owner && vault.state === 'ready' ? `<section class="card"><h2>${t('vault.addDevice')}</h2><form id="issue-device" class="inline-form">${input(t('vault.deviceName'), 'name', 'text', `placeholder="${escape(t('vault.devicePlaceholder'))}" maxlength="128"`)}<button class="primary" type="submit">${t('vault.issue')}</button></form></section>` : `<p>${t('vault.ownerIssues')}</p>`}<div id="new-secret"></div><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${devices.length ? `<table><thead><tr><th>${t('vault.device')}</th><th>${t('common.status')}</th><th>${t('vault.expires')}</th><th>${t('common.actions')}</th></tr></thead><tbody>${devices.map(d => `<tr><td>${escape(d.name)}</td><td><span class="badge ${d.revoked || d.expiresAt <= Date.now() ? 'off' : ''}">${d.revoked ? t('vault.revoked') : d.expiresAt <= Date.now() ? t('vault.expired') : t('vault.active')}</span></td><td>${date(d.expiresAt)}</td><td>${d.revoked ? '—' : `<button class="danger" id="revoke-${d.id}">${t('vault.revoke')}</button>`}</td></tr>`).join('')}</tbody></table>` : `<div class="empty">${t('vault.noDevices')}</div>`}</section>${rebuildCard}`);
+  content(`<div class="actions"><button id="back">${t('vault.back')}</button></div><br><section class="card"><h2>${t('vault.connection')}</h2><dl class="details"><dt>${t('vault.syncAddress')}</dt><dd>${escape(location.origin)}/sync</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl><p>${t('vault.clientHint')}</p>${vault.state !== 'ready' ? `<button id="retry">${t('vault.retry')}</button>` : ''}${admin ? `<button id="usage">${t('vault.usage')}</button><div id="usage-result"></div>` : ''}</section>${owner && vault.state === 'ready' ? `<section class="card"><h2>${t('vault.addDevice')}</h2><form id="issue-device" class="inline-form">${input(t('vault.deviceName'), 'name', 'text', `placeholder="${escape(t('vault.devicePlaceholder'))}" maxlength="128"`)}<button class="primary" type="submit">${t('vault.issue')}</button></form></section>` : `<p>${t('vault.ownerIssues')}</p>`}<div id="new-secret"></div><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${deviceTable(devices)}</section>${rebuildCard}`);
   button('back', vaultsPage);
   if (rebuildCard) bindRebuild(vault, devices);
   if (vault.state !== 'ready') button('retry', async () => { await api(`${base}/provision`, 'POST', {}); await vaultsPage(); });
@@ -161,16 +179,18 @@ async function vaultPage(vault: Vault) {
     document.querySelector<HTMLInputElement>('#credential-password')!.value = credential.password;
     button('close-secret', async () => { target.replaceChildren(); });
   });
-  for (const device of devices.filter(d => !d.revoked)) button(`revoke-${device.id}`, async () => {
+  for (const device of devices.filter(d => !d.revoked && d.expiresAt > Date.now())) button(`revoke-${device.id}`, async () => {
     if (!confirm(t('vault.confirmRevoke', { name: device.name }))) return;
     await api(`${base}/devices/${device.id}`, 'DELETE'); await vaultPage(vault);
   });
 }
 let retired: Retired[] = [];
 let rebuild: Rebuild | null = null;
+let locked = false;
 async function rebuildSection(vaultId: string, devices: Device[]) {
   rebuild = (await api<Vault>(`/vaults/${vaultId}`)).rebuild;
   retired = await api<Retired[]>(`/vaults/${vaultId}/databases`);
+  locked = (await api<{ locked: boolean }>(`/vaults/${vaultId}/rebuild/lock`)).locked;
   const active = devices.filter(d => !d.revoked && d.expiresAt > Date.now());
   const deviceName = (id: string) => escape(devices.find(d => d.id === id)?.name ?? id);
   const status = rebuild
@@ -180,10 +200,15 @@ async function rebuildSection(vaultId: string, devices: Device[]) {
       : `<div class="empty">${t('rebuild.noDevices')}</div>`;
   const revertTarget = retired.find(r => !r.partial);
   const list = retired.length ? `<h3>${t('rebuild.retired')}</h3><table><thead><tr><th>${t('rebuild.retiredAt')}</th><th>${t('rebuild.size')}</th><th>${t('rebuild.content')}</th><th>${t('common.actions')}</th></tr></thead><tbody>${retired.map((r, i) => `<tr><td>${date(r.retiredAt)}</td><td>${bytes(r.diskBytes)}</td><td>${r.partial ? t('rebuild.partial') : t('rebuild.complete')}</td><td>${r === revertTarget ? `<button id="rebuild-revert">${t('rebuild.revert')}</button> ` : ''}<button class="danger" id="retired-${i}">${t('rebuild.delete')}</button></td></tr>`).join('')}</tbody></table>` : '';
-  return `<section class="card table-wrap"><h2>${t('rebuild.title')}</h2><p>${t('rebuild.desc')}</p>${status}${list}</section>`;
+  const lock = locked && !rebuild?.started ? `<div class="notice warn"><p>${t('rebuild.locked')}</p><button id="rebuild-unlock">${t('rebuild.unlock')}</button></div>` : '';
+  return `<section class="card table-wrap"><h2>${t('rebuild.title')}</h2><p>${t('rebuild.desc')}</p>${lock}${status}${list}</section>`;
 }
 function bindRebuild(vault: Vault, devices: Device[]) {
   const reload = () => vaultPage(vault);
+  if (locked && !rebuild?.started) button('rebuild-unlock', async () => {
+    if (!confirm(t('rebuild.confirmUnlock'))) return;
+    await api(`/vaults/${vault.id}/rebuild/lock`, 'DELETE'); await reload(); message(t('rebuild.unlocked'));
+  });
   if (rebuild) button('rebuild-end', async () => {
     if (rebuild!.started && !confirm(t('rebuild.confirmEnd'))) return;
     await api(`/vaults/${vault.id}/rebuild`, 'DELETE'); await reload(); message(t('rebuild.ended'));
