@@ -11,7 +11,8 @@ COPY apps/server/ui ./apps/server/ui
 COPY apps/server/notes-dist ./apps/server/notes-dist
 RUN npm run build --workspace @tabularium/server
 # Runtime packages only: the provider SDKs and the passphrase check for Tabularius. pdf.js only reads the text of PDF
-# attachments; its optional canvas package (for drawing pages as pictures) is not used and is left out.
+# attachments; its optional canvas package (for drawing pages as pictures) is not used and is left out. Without it pdf.js
+# logs three warnings ("Cannot load @napi-rs/canvas", DOMMatrix, Path2D) the first time it reads a PDF; they are expected.
 RUN rm -rf node_modules && npm ci --ignore-scripts --omit=dev --workspace @tabularium/server --include-workspace-root \
     && rm -rf node_modules/@napi-rs
 
