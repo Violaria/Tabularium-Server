@@ -23,15 +23,14 @@ export const MODES: Mode[] = ['read-only', 'restricted', 'full'];
 /** Web access: domain rules and limits, SearXNG for providers without their own search, and the intranet the restricted mode may reach. */
 export interface WebConfig { options: WebOptions; searxng?: string; intranet: string[] }
 export interface TabulariusConfig {
-  key: Buffer; root: string; cli: string; embedder?: Embedder; web?: WebConfig;
-  /** The highest permission mode a vault may use. */
-  modeLimit: Mode;
-  /** Providers, models, parameters and the knowledge base from the environment, taken the first time; then the web settings apply. */
+  key: Buffer; root: string; cli: string;
+  /**
+   * Settings from the environment, taken the first time (providers, models, parameters, knowledge base, embedding, web
+   * lookup, limits); then the web settings apply.
+   */
   initial?: InitialSettings;
-  /** Seconds a command may run over SSH. */
-  sshTimeout?: number;
-  /** The sandbox service, its token and the images it runs. */
-  sandbox?: { url: string; token: string; images: string[] };
+  /** Where the sandbox service runs and its token: wiring between containers, set in the environment. */
+  sandbox?: { url: string; token: string };
 }
 /** What one answer has used so far: notes read, cited pages, and client-side web calls against the limits. */
 // `found`: search results the model saw; those its answer links to are listed as sources with the pages it fetched.
@@ -119,7 +118,7 @@ const KNOWLEDGE_TOOL: Tool = { name: 'search_knowledge_base',
  * The AI curator. `fail` raises the gateway's HTTP errors; `cancel` drops proxied sync connections of a revoked device.
  * Every vault row has a running CLI daemon while the server is up.
  */
-export function createTabularius(db: DatabaseSync, couch: Couch, config: TabulariusConfig, deviceMs: number,
+export function createTabularius(db: DatabaseSync, couch: Couch, config: TabulariusConfig, deviceMs: () => number,
   fail: (status: number, message: string) => never, cancel: (deviceId: string) => void) {
   let syncUrl = '';
   const clients = createClients(config.root, config.cli, () => syncUrl);
@@ -142,7 +141,13 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     return [conversation.model, vaultModel, settings.defaultModel()].find(id => id && settings.available(id)) ?? '';
   };
   const filterOf = (r: Row) => createFilter(r.excluded, r.masks);
-  const memories = createMemories(db, config.embedder);
+  const memories = createMemories(db, () => settings.embedder());
+  /** Web lookup as configured now, or undefined while it is off. */
+  const webConfig = (): WebConfig | undefined => {
+    const w = settings.web();
+    return w.enabled ? { options: { allowed: w.allowed, blocked: w.blocked, maxUses: w.maxUses }, searxng: w.searxng || undefined, intranet: w.intranet } : undefined;
+  };
+  const sandbox = () => config.sandbox ? { ...config.sandbox, images: settings.limits().sandboxImages } : undefined;
   const approvals = new Map<string, (decision: { approved: boolean; by: string }) => void>();
   const hostByName = (name: string) => db.prepare('SELECT * FROM tabularius_hosts WHERE name=?').get(name) as unknown as Host | undefined;
   const target = (host: Host): Target => ({ address: host.address, port: host.port, username: host.username, privateKey: open(config.key, host.private_key) });
@@ -155,12 +160,13 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       const current = row(vaultId);
       if (!current) return;
       // Vectors of different models are not comparable: a new model rebuilds the vault's index.
-      const model = config.embedder?.model ?? null;
+      const embedder = settings.embedder();
+      const model = embedder?.model ?? null;
       if (current.embedding_model !== model) {
         forget(db, vaultId);
         db.prepare('UPDATE tabularius_vaults SET embedding_model=? WHERE vault_id=?').run(model, vaultId);
       }
-      try { await update(db, vaultId, clients.working(vaultId), filterOf(current), config.embedder); indexErrors.delete(vaultId); }
+      try { await update(db, vaultId, clients.working(vaultId), filterOf(current), embedder); indexErrors.delete(vaultId); }
       catch (error) { indexErrors.set(vaultId, (error as Error).message.slice(0, 300)); }
     });
     indexing.set(vaultId, next);
@@ -168,7 +174,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   }
   function renew() {
     const soon = Date.now() + RENEW_BEFORE_MS;
-    db.prepare(`UPDATE devices SET expires_at=? WHERE revoked=0 AND expires_at<? AND id IN (SELECT device_id FROM tabularius_vaults)`).run(Date.now() + deviceMs, soon);
+    db.prepare(`UPDATE devices SET expires_at=? WHERE revoked=0 AND expires_at<? AND id IN (SELECT device_id FROM tabularius_vaults)`).run(Date.now() + deviceMs(), soon);
   }
   const timer = setInterval(() => {
     renew();
@@ -190,7 +196,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     }
     const deviceId = randomUUID(); const secret = token();
     db.exec('BEGIN');
-    db.prepare('INSERT INTO devices(id,user_id,vault_id,name,secret_hash,expires_at) VALUES(?,?,?,?,?,?)').run(deviceId, user.id, vault.id, 'Tabularius', digest(secret), Date.now() + deviceMs);
+    db.prepare('INSERT INTO devices(id,user_id,vault_id,name,secret_hash,expires_at) VALUES(?,?,?,?,?,?)').run(deviceId, user.id, vault.id, 'Tabularius', digest(secret), Date.now() + deviceMs());
     db.prepare('INSERT INTO tabularius_vaults(vault_id,device_id,device_secret,passphrase,tweaks,enabled_at,excluded,masks) VALUES(?,?,?,?,?,?,?,?)')
       .run(vault.id, deviceId, seal(config.key, secret), seal(config.key, passphrase), JSON.stringify(tweaks), Date.now(), excluded, masks);
     db.exec('COMMIT');
@@ -234,7 +240,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     db.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now(), actorId, action, targetId);
   }
   const hasHosts = () => Boolean(db.prepare('SELECT 1 FROM tabularius_hosts LIMIT 1').get());
-  const webOn = (vaultId: string, provider: Provider) => Boolean(config.web && row(vaultId)?.web && (provider.nativeWeb || config.web.searxng));
+  const webOn = (vaultId: string, provider: Provider) => { const web = webConfig(); return Boolean(web && row(vaultId)?.web && (provider.nativeWeb || web.searxng)); };
   /** URLs the user or a tool result has shown in this conversation; outside the full mode only these can be fetched. */
   function seenUrls(conversationId: string) {
     const seen = new Set<string>();
@@ -248,7 +254,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     send: (event: string, data: unknown) => void): Promise<string> {
     const vaultId = conversation.vault_id;
     const root = clients.working(vaultId);
-    const web = config.web;
+    const web = webConfig();
     if ((call.name === 'web_search' || call.name === 'fetch_url') && web?.searxng && !provider.nativeWeb && webOn(vaultId, provider)) {
       audit(conversation.user_id, 'tabularius.web', conversation.id);
       if (call.name === 'web_search') {
@@ -316,14 +322,15 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         approvedBy = decision.by;
       }
       let result;
-      try { result = await runSsh(target(host), host.fingerprint, command, (config.sshTimeout ?? 60) * 1000); } catch (error) {
+      try { result = await runSsh(target(host), host.fingerprint, command, settings.limits().sshTimeout * 1000); } catch (error) {
         record('failed', { reason: (error as Error).message.slice(0, 300), approved_by: approvedBy });
         return `Error: ${(error as Error).message.slice(0, 300)}`;
       }
       record('done', { exit_code: result.code, approved_by: approvedBy });
       return filter.mask(`Exit code: ${result.code}\n${result.stdout ? `\nstdout:\n${result.stdout}` : ''}${result.stderr ? `\nstderr:\n${result.stderr}` : ''}`);
     }
-    if (call.name === 'run_sandbox' && config.sandbox) {
+    const box = sandbox();
+    if (call.name === 'run_sandbox' && box) {
       const mode = row(vaultId)!.mode;
       const id = randomUUID();
       const command = typeof call.input.command === 'string' ? call.input.command : '';
@@ -333,8 +340,8 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         audit(conversation.user_id, 'tabularius.sandbox', conversation.id);
       };
       if (call.input.network === true && mode !== 'full') { record('refused', null, 'network outside full mode'); return 'Error: refused: the sandbox can use the network only in full permission mode.'; }
-      const response = await fetch(`${config.sandbox.url.replace(/\/+$/, '')}/run`, {
-        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${config.sandbox.token}` },
+      const response = await fetch(`${box.url.replace(/\/+$/, '')}/run`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${box.token}` },
         body: JSON.stringify({ image: call.input.image, command, files: call.input.files, network: call.input.network === true, timeout: call.input.timeout }),
         signal: AbortSignal.timeout(320_000),
       });
@@ -393,7 +400,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     if (call.name === 'search_notes') {
       if (typeof call.input.query !== 'string' || !call.input.query.trim()) return 'Error: query must be a non-empty string.';
       await reindex(vaultId);
-      const hits = (await search(db, vaultId, call.input.query, config.embedder)).filter(hit => !filter.excluded(hit.path));
+      const hits = (await search(db, vaultId, call.input.query, settings.embedder())).filter(hit => !filter.excluded(hit.path));
       if (!hits.length) return 'No matching notes.';
       return filter.mask(hits.map(hit => `[[${hit.path}]]${hit.heading ? ` > ${hit.heading}` : ''}\n${hit.snippet}`).join('\n\n---\n\n'));
     }
@@ -465,10 +472,10 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         // The last round answers without tools, so a model that keeps searching still gives an answer.
         const final = round >= MAX_TOOL_ROUNDS;
         const web = webOn(conversation.vault_id, provider);
-        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() ? SSH_TOOLS : []), ...(config.sandbox ? [sandboxTool(config.sandbox.images)] : []), ...(settings.knowledgeConfigured() && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
+        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() ? SSH_TOOLS : []), ...(sandbox() ? [sandboxTool(sandbox()!.images)] : []), ...(settings.knowledgeConfigured() && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
           ...(web && !provider.nativeWeb ? WEB_TOOLS : [])];
         const turn = await provider.turn(system, tools, loadMessages(conversation.id), delta => send('text', { text: delta }), {
-          web: web && provider.nativeWeb ? config.web!.options : undefined, params, answerOnly: final,
+          web: web && provider.nativeWeb ? webConfig()!.options : undefined, params, answerOnly: final,
         });
         append(conversation.id, { role: 'assistant', ...turn });
         for (const part of turn.parts) {
@@ -548,9 +555,15 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     overview() {
       return { models: settings.models(), defaultModel: settings.defaultModel(), rules: PARAMS,
         serverParams: Object.fromEntries(PROVIDERS.map(name => [name, settings.params(name)])),
-        embeddings: Boolean(config.embedder), knowledge: settings.knowledgeConfigured(), web: Boolean(config.web), webSearch: Boolean(config.web?.searxng) };
+        embeddings: Boolean(settings.embedder()), knowledge: settings.knowledgeConfigured(), web: Boolean(webConfig()), webSearch: Boolean(webConfig()?.searxng) };
     },
-    modeLimit: config.modeLimit,
+    modeLimit: () => settings.limits().modeLimit,
+    async embeddingModels() {
+      try { return await settings.embeddingModels(); } catch (error) {
+        if (error instanceof SettingsError) return fail(400, error.message);
+        return fail(502, `Embedding: ${(error as Error).message.slice(0, 300)}`);
+      }
+    },
     settings: () => settings.view(),
     async updateSettings(data: Record<string, unknown>) {
       try { await settings.update(data); } catch (error) {
@@ -717,14 +730,14 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       return settingsOf(conversationFor(id, user));
     },
     setWeb(vaultId: string, enabled: boolean) {
-      if (!config.web) fail(409, 'Web access is not configured');
+      if (!webConfig()) fail(409, 'Web access is not configured');
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
       db.prepare('UPDATE tabularius_vaults SET web=? WHERE vault_id=?').run(Number(enabled), vaultId);
     },
     /** Restricted and full modes hand the AI operational power, so they are for administrators' vaults, up to the server's limit. */
     setMode(vaultId: string, user: User, mode: unknown) {
       if (!MODES.includes(mode as Mode)) fail(400, 'Invalid mode');
-      if (MODES.indexOf(mode as Mode) > MODES.indexOf(config.modeLimit)) fail(400, 'Mode above the server limit');
+      if (MODES.indexOf(mode as Mode) > MODES.indexOf(settings.limits().modeLimit)) fail(400, 'Mode above the server limit');
       if (mode !== 'read-only' && user.role !== 'admin') fail(403, 'Administrator required');
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
       db.prepare('UPDATE tabularius_vaults SET mode=? WHERE vault_id=?').run(mode as Mode, vaultId);

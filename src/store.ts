@@ -267,6 +267,16 @@ export function openStore(path: string) {
   `);
     version = 13;
   }
-  if (version !== 13) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 13) {
+    // The server's running settings edited on the web (mail, Kindle, sharing, access), imported once from the configuration.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE server_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+    PRAGMA user_version=14;
+    COMMIT;
+  `);
+    version = 14;
+  }
+  if (version !== 14) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

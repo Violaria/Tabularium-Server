@@ -10,6 +10,7 @@ import { Couch, basic, type CouchConfig } from './couch.js';
 import { createTabularius, MODES, type TabulariusConfig } from './tabularius/index.js';
 import { HttpError, body, fail, field, json, payload, raw } from './http.js';
 import { createShares, type SharesConfig } from './shares.js';
+import { createServerSettings, ServerSettingsError } from './server-settings.js';
 
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
@@ -17,6 +18,8 @@ export interface Config {
   loginLimit?: number; syncLimit?: number; publicUrl?: string; rebuildMs?: number; writeLimit?: number; auditDays?: number;
   smtp?: SmtpConfig; kindleDomains?: string[]; kindleDaily?: number; kindleMaxBytes?: number;
   tabularius?: TabulariusConfig; shares?: Partial<SharesConfig>;
+  /** Seals the passwords kept in the settings (TABULARIUS_SECRET_KEY). */
+  secret?: Buffer;
 }
 // An EPUB starts with an uncompressed `mimetype` entry holding application/epub+zip (OCF 3.3 §4.3).
 const isEpub = (data: Buffer) => data.length > 58 && data.readUInt32LE(0) === 0x04034b50 && data.readUInt16LE(28) === 0 &&
@@ -64,23 +67,28 @@ export async function createGateway(config: Config) {
   const serveConsole = await loadConsole();
   const startedAt = Date.now();
   const db = openStore(config.database);
+  // Running settings: the configuration is imported on the first start, then the web settings apply.
+  const settings = createServerSettings(db, config.secret ?? config.tabularius?.key, {
+    smtp: config.smtp, kindleDomains: config.kindleDomains, kindleDaily: config.kindleDaily, kindleMaxBytes: config.kindleMaxBytes,
+    shares: { ...config.shares, url: config.shares?.url ?? (config.publicUrl ?? '').split(',').map(value => value.trim()).filter(Boolean).at(-1) },
+    sessionMs: config.sessionMs, deviceMs: config.deviceMs, rebuildMs: config.rebuildMs, loginLimit: config.loginLimit, syncLimit: config.syncLimit,
+    auditDays: config.auditDays, streamMs: config.streamMs, writeLimit: config.writeLimit,
+  });
   const couch = new Couch(config.couch);
   const active = new Map<ClientRequest, { device: string; user: string; vault: string; res: ServerResponse }>();
   const limits = new Map<string, { count: number; until: number }>();
   const stats = { requests: 0, proxyRequests: 0, statuses: {} as Record<string, number> };
   const shares = createShares({ db, session, deviceAuth, audit, limit, viewer: await loadViewer(),
-    settings: () => ({ enabled: config.shares?.enabled ?? true, maxBytes: config.shares?.maxBytes ?? 52_428_800,
-      // Links use the configured share address, else the last public entrance (the internet-facing one is listed last).
-      url: config.shares?.url ?? (config.publicUrl ?? '').split(',').map(value => value.trim()).filter(Boolean).at(-1) }) });
+    settings: () => settings.shares() });
   const prune = () => {
     shares.prune();
     db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
-    db.prepare('DELETE FROM audit_events WHERE occurred_at <= ?').run(Date.now() - (config.auditDays ?? 365) * 86_400_000);
-    db.prepare('DELETE FROM kindle_deliveries WHERE occurred_at <= ?').run(Date.now() - (config.auditDays ?? 365) * 86_400_000);
+    db.prepare('DELETE FROM audit_events WHERE occurred_at <= ?').run(Date.now() - settings.auditDays() * 86_400_000);
+    db.prepare('DELETE FROM kindle_deliveries WHERE occurred_at <= ?').run(Date.now() - settings.auditDays() * 86_400_000);
   };
   prune();
   const tabularius = config.tabularius
-    ? createTabularius(db, couch, config.tabularius, config.deviceMs ?? 2_592_000_000, fail, device => cancel(v => v.device === device)) : undefined;
+    ? createTabularius(db, couch, config.tabularius, () => settings.deviceMs(), fail, device => cancel(v => v.device === device)) : undefined;
   const cleanup = setInterval(() => {
     for (const [key, value] of limits) if (value.until <= Date.now()) limits.delete(key);
     prune();
@@ -185,7 +193,7 @@ export async function createGateway(config: Config) {
   }
   async function proxy(req: IncomingMessage, res: ServerResponse, parts: string[], query: string) {
     const device = deviceAuth(req);
-    limit(`device:${device.id}`, config.syncLimit ?? 2400, res);
+    limit(`device:${device.id}`, settings.syncLimit(), res);
     let targetPath = '/';
     let completesRebuild = false;
     let write: { data: Buffer; rejected: { index: number; entry: ReturnType<typeof forbidden> }[]; newEdits: boolean } | undefined;
@@ -208,7 +216,7 @@ export async function createGateway(config: Config) {
       if (!replicationAllowed(req.method!, rest)) fail(403, 'Replication route not allowed');
       completesRebuild = rebuilder && Boolean(vault.rebuild_started) && req.method === 'PUT' && rest[0] === '_local' && rest[1] === MILESTONE;
       // Document writes are read in full and checked against the encrypted document policy before CouchDB sees them.
-      const limit = config.writeLimit ?? 67_108_864;
+      const limit = settings.writeLimit();
       if (req.method === 'PUT' && rest.length === 1) {
         const { data, parsed } = await payload(req, limit);
         const reason = rejection({ ...parsed, _id: rest[0] });
@@ -253,7 +261,7 @@ export async function createGateway(config: Config) {
     });
     stats.proxyRequests++;
     active.set(outgoing, { device: device.id, user: device.user_id, vault: device.vault_id, res });
-    const timer = setTimeout(() => { outgoing.destroy(); res.destroy(); }, Math.min(config.streamMs ?? 300_000, device.expires_at - Date.now()));
+    const timer = setTimeout(() => { outgoing.destroy(); res.destroy(); }, Math.min(settings.streamMs(), device.expires_at - Date.now()));
     timer.unref();
     res.once('close', () => { clearTimeout(timer); active.delete(outgoing); outgoing.destroy(); });
     outgoing.on('error', () => {
@@ -332,7 +340,7 @@ export async function createGateway(config: Config) {
       if (vault.state !== 'ready') fail(409, 'Vault is not ready');
       if (vault.rebuild_started) fail(409, 'A rebuild is already in progress');
       if (!db.prepare('SELECT id FROM devices WHERE id=? AND vault_id=? AND revoked=0 AND expires_at>?').get(deviceId, vault.id, Date.now())) fail(404, 'Active device not found');
-      db.prepare('UPDATE vaults SET rebuild_device=?, rebuild_until=? WHERE id=?').run(deviceId, Date.now() + (config.rebuildMs ?? 900_000), vault.id);
+      db.prepare('UPDATE vaults SET rebuild_device=?, rebuild_until=? WHERE id=?').run(deviceId, Date.now() + settings.rebuildMs(), vault.id);
       audit(user.id, 'vault.rebuild-arm', vault.id);
     } else if (rest.length === 0 && method === 'DELETE') {
       clearRebuild(vault.id);
@@ -384,13 +392,13 @@ export async function createGateway(config: Config) {
     }
     return fail(404, 'Route not found');
   }
-  const kindleDomains = () => config.kindleDomains ?? ['kindle.com', 'free.kindle.com'];
-  const kindleDaily = () => config.kindleDaily ?? 30;
+  const kindleDomains = () => settings.kindleDomains();
+  const kindleDaily = () => settings.kindleDaily();
   const sentToday = (userId: string) => (db.prepare("SELECT count(*) AS n FROM kindle_deliveries WHERE user_id=? AND status='sent' AND occurred_at>?")
     .get(userId, Date.now() - 86_400_000) as { n: number }).n;
   const ownerOf = (device: Device) => db.prepare('SELECT * FROM users WHERE id=?').get(device.user_id) as unknown as User;
   function kindleReady(user: User) {
-    if (!config.smtp) fail(503, 'Mail delivery is not configured');
+    if (!settings.smtp()) fail(503, 'Mail delivery is not configured');
     if (!user.kindle_address) fail(409, 'Kindle address not set');
     if (sentToday(user.id) >= kindleDaily()) fail(429, 'Daily Kindle delivery limit reached');
   }
@@ -400,7 +408,7 @@ export async function createGateway(config: Config) {
       'INSERT INTO kindle_deliveries(user_id,device_id,occurred_at,file_name,size,status,error) VALUES(?,?,?,?,?,?,?)',
     ).run(user.id, deviceId, Date.now(), attachment.name, attachment.data.length, status, error);
     try {
-      await sendMail(config.smtp!, { to: user.kindle_address!, subject: attachment.name.replace(/\.[^.]+$/, '').slice(0, 60), text: 'Sent by Tabularium.\n', attachment });
+      await sendMail(settings.smtp()!, { to: user.kindle_address!, subject: attachment.name.replace(/\.[^.]+$/, '').slice(0, 60), text: 'Sent by Tabularium.\n', attachment });
     } catch (error) {
       const reason = (error as Error).message.slice(0, 300);
       record('failed', reason);
@@ -458,12 +466,12 @@ export async function createGateway(config: Config) {
     if (['/api/v1/sessions', '/api/v1/web-session'].includes(path) && method === 'POST') {
       const web = path === '/api/v1/web-session';
       if (web && !isBrowserOrigin(req)) fail(403, 'Browser login requires same origin');
-      limit(`login:${req.socket.remoteAddress}`, config.loginLimit ?? 20, res);
+      limit(`login:${req.socket.remoteAddress}`, settings.loginLimit(), res);
       const data = await body(req);
       const username = field(data, 'username'); const password = field(data, 'password', 1024);
       const user = db.prepare('SELECT * FROM users WHERE username=?').get(username) as unknown as User | undefined;
       if (!user || user.disabled || !await verifyPassword(password, user.password_hash)) fail(401, 'Invalid username or password');
-      const accessToken = token(); const expiresAt = Date.now() + (config.sessionMs ?? 43_200_000);
+      const accessToken = token(); const expiresAt = Date.now() + settings.sessionMs();
       db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(digest(accessToken), user!.id, expiresAt);
       if (web) {
         setSessionCookie(res, accessToken, Math.ceil((expiresAt - Date.now()) / 1000));
@@ -475,7 +483,7 @@ export async function createGateway(config: Config) {
     if (path === '/api/v1/devices/current/renew' && method === 'POST') {
       const device = deviceAuth(req);
       limit(`renew:${device.id}`, 10, res);
-      const expiresAt = Date.now() + (config.deviceMs ?? 2_592_000_000);
+      const expiresAt = Date.now() + settings.deviceMs();
       db.prepare('UPDATE devices SET expires_at=? WHERE id=?').run(expiresAt, device.id);
       audit(device.user_id, 'device.renew', device.id);
       json(res, 200, { expiresAt });
@@ -484,7 +492,7 @@ export async function createGateway(config: Config) {
     // Kindle delivery from the plug-in authenticates with the device's sync credentials.
     if (path === '/api/v1/kindle/status' && method === 'GET') {
       const owner = ownerOf(deviceAuth(req));
-      json(res, 200, { configured: Boolean(config.smtp), address: owner.kindle_address, dailyLimit: kindleDaily(), remaining: Math.max(0, kindleDaily() - sentToday(owner.id)) });
+      json(res, 200, { configured: Boolean(settings.smtp()), address: owner.kindle_address, dailyLimit: kindleDaily(), remaining: Math.max(0, kindleDaily() - sentToday(owner.id)) });
       return;
     }
     if (path === '/api/v1/kindle/send' && method === 'POST') {
@@ -493,7 +501,7 @@ export async function createGateway(config: Config) {
       const owner = ownerOf(device);
       kindleReady(owner);
       const name = epubName(req.headers['x-tabularium-filename']);
-      const data = await raw(req, config.kindleMaxBytes ?? 52_428_800);
+      const data = await raw(req, settings.kindleMaxBytes());
       if (!isEpub(data)) fail(400, 'Body is not an EPUB');
       await deliver(owner, device.id, { name, type: 'application/epub+zip', data });
       json(res, 200, { ok: true }); return;
@@ -528,7 +536,7 @@ export async function createGateway(config: Config) {
     if (path === '/api/v1/home' && method === 'GET') { json(res, 200, await home(user)); return; }
     if (route[0] === 'me' && route[1] === 'kindle') {
       if (route.length === 2 && method === 'GET') {
-        json(res, 200, { address: user.kindle_address, configured: Boolean(config.smtp), from: config.smtp?.from ?? null,
+        json(res, 200, { address: user.kindle_address, configured: Boolean(settings.smtp()), from: settings.smtp()?.from ?? null,
           domains: kindleDomains(), dailyLimit: kindleDaily(), sentToday: sentToday(user.id) });
         return;
       }
@@ -557,7 +565,7 @@ export async function createGateway(config: Config) {
         const vaults = db.prepare('SELECT * FROM vaults WHERE owner_id=?').all(user.id) as unknown as Vault[];
         const overview = t.overview();
         json(res, 200, { ...overview, knowledge: overview.knowledge && user.role === 'admin', admin: user.role === 'admin',
-          modes: user.role === 'admin' ? MODES.slice(0, MODES.indexOf(t.modeLimit) + 1) : ['read-only'], vaults: vaults.map(t.status) }); return;
+          modes: user.role === 'admin' ? MODES.slice(0, MODES.indexOf(t.modeLimit()) + 1) : ['read-only'], vaults: vaults.map(t.status) }); return;
       }
       // AI settings: providers and keys, models, the default prompt and parameters, the knowledge base. Administrators only.
       if (route[1] === 'settings') {
@@ -570,6 +578,7 @@ export async function createGateway(config: Config) {
         }
         if (route.length === 3 && route[2] === 'test' && method === 'POST') { json(res, 200, await t.testModel(field(await body(req), 'model', 200))); return; }
         if (route.length === 4 && route[2] === 'models' && method === 'GET') { json(res, 200, await t.providerModels(route[3])); return; }
+        if (route.length === 3 && route[2] === 'embedding-models' && method === 'GET') { json(res, 200, await t.embeddingModels()); return; }
         if (route.length === 3 && route[2] === 'datasets' && method === 'POST') { json(res, 200, await t.datasets(field(await body(req), 'url', 500))); return; }
         if (route.length === 3 && route[2] === 'knowledge' && method === 'POST') { json(res, 200, await t.testKnowledge(field(await body(req), 'question', 500))); return; }
         fail(404, 'Route not found');
@@ -696,6 +705,28 @@ export async function createGateway(config: Config) {
     if (route[0] === 'admin') {
       if (user.role !== 'admin') fail(403, 'Administrator required');
       if (route[1] === 'shares') { await shares.admin(res, user, route, method!); return; }
+      // Running settings: mail and Kindle, sharing, access. Changes apply to the next request.
+      if (route[1] === 'settings') {
+        if (route.length === 2 && method === 'GET') { json(res, 200, settings.view()); return; }
+        if (route.length === 2 && method === 'PUT') {
+          try { settings.update(await body(req, 65_536)); } catch (error) {
+            if (error instanceof ServerSettingsError) fail(400, error.message);
+            throw error;
+          }
+          audit(user.id, 'server.settings', user.id);
+          json(res, 200, settings.view()); return;
+        }
+        if (route.length === 3 && route[2] === 'mail-test' && method === 'POST') {
+          const smtp = settings.smtp();
+          if (!smtp) fail(409, 'Mail delivery is not configured');
+          const to = field(await body(req), 'to', 254);
+          if (!/^[^\s@]+@[^\s@]+$/.test(to)) fail(400, 'Invalid address');
+          try { await sendMail(smtp!, { to, subject: 'Tabularium', text: '这是一封来自 Tabularium 的测试邮件。\nThis is a test message from Tabularium.\n',
+            attachment: { name: 'Tabularium test.txt', type: 'text/plain; charset=UTF-8', data: Buffer.from('Tabularium mail test\n') } }); }
+          catch (error) { fail(502, `Mail delivery failed: ${(error as Error).message.slice(0, 300)}`); }
+          json(res, 200, { ok: true }); return;
+        }
+      }
       if (path === '/api/v1/admin/audit' && method === 'GET') {
         json(res, 200, db.prepare(`SELECT a.id,a.occurred_at AS occurredAt,a.actor_id AS actorId,
           u.username AS actor,a.action,a.target_id AS targetId FROM audit_events a
@@ -799,7 +830,7 @@ export async function createGateway(config: Config) {
         if (route.length === 3 && method === 'POST') {
           if (vault.state !== 'ready') fail(409, 'Vault is not ready');
           const name = field(await body(req), 'name'); const id = randomUUID(); const secret = token();
-          const expiresAt = Date.now() + (config.deviceMs ?? 2_592_000_000);
+          const expiresAt = Date.now() + settings.deviceMs();
           db.prepare('INSERT INTO devices(id,user_id,vault_id,name,secret_hash,expires_at) VALUES(?,?,?,?,?,?)')
             .run(id, user.id, vault.id, name, digest(secret), expiresAt);
           audit(user.id, 'device.issue', id);

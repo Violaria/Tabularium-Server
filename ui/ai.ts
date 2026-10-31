@@ -10,6 +10,9 @@ interface Knowledge { url: string; datasets: string[]; limit: number; threshold:
 interface SettingsView {
   prompt: string; defaultPrompt: string; defaultModel: string; params: Partial<Record<ProviderName, Params>>;
   providers: Record<ProviderName, ProviderView>; knowledge: Knowledge;
+  embedding: { url: string; keySet: boolean; hint: string; model: string; batch: number };
+  web: { enabled: boolean; searxng: string; allowed: string[]; blocked: string[]; maxUses: number; intranet: string[] };
+  limits: { modeLimit: 'read-only' | 'restricted' | 'full'; sshTimeout: number; sandboxImages: string[] };
 }
 interface Overview { models: ModelOption[]; rules: Record<ProviderName, Record<string, Rule>> }
 const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
@@ -60,7 +63,27 @@ export async function renderAiSettings(body: HTMLElement) {
         <label class="check"><input type="checkbox" name="keyword" ${k.keyword ? 'checked' : ''}> ${t('ai.kKeyword')}</label>
       </div>
       <div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form>
-      <form id="knowledge-test" class="inline-form"><label>${t('ai.kTest')}<input name="question" required></label><button type="submit">${t('ai.kTestRun')}</button></form><div id="knowledge-results"></div></section>`;
+      <form id="knowledge-test" class="inline-form"><label>${t('ai.kTest')}<input name="question" required></label><button type="submit">${t('ai.kTestRun')}</button></form><div id="knowledge-results"></div></section>
+    <section class="card"><h2>${t('ai.embeddingTitle')}${tip(t('ai.embeddingDesc'))}</h2><form id="embedding" class="stack"><div class="recipe-fields">
+        <label><span>${t('ai.embeddingUrl')}${tip(t('ai.embeddingUrlHint'))}</span><input name="url" value="${escape(view.embedding.url)}" placeholder="http://infinity:7997/v1"></label>
+        <label>${t('ai.key')}<input type="password" name="key" autocomplete="off" placeholder="${view.embedding.keySet ? escape(t('ai.keySet', { hint: view.embedding.hint })) : ''}"></label>
+        <label><span>${t('ai.embeddingModel')}${tip(t('ai.embeddingModelHint'))}</span><select name="model" id="embedding-model"><option value="">${t('ai.embeddingNone')}</option>${view.embedding.model ? `<option value="${escape(view.embedding.model)}" selected>${escape(view.embedding.model)}</option>` : ''}</select></label>
+        <label>${t('ai.embeddingBatch')}<input name="batch" type="number" min="1" max="2048" value="${view.embedding.batch}"></label>
+      </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="embedding-refresh">${t('ai.refreshModels')}</button></div></form></section>
+    <section class="card"><h2>${t('ai.webTitle')}${tip(t('ai.webDesc'))}</h2><form id="web" class="stack">
+      <label class="check"><input type="checkbox" name="enabled" ${view.web.enabled ? 'checked' : ''}> ${t('ai.webEnabled')}</label>
+      <div class="recipe-fields">
+        <label><span>SearXNG${tip(t('ai.searxngHint'))}</span><input name="searxng" value="${escape(view.web.searxng)}" placeholder="http://searxng:8080"></label>
+        <label>${t('ai.webMaxUses')}<input name="maxUses" type="number" min="1" max="50" value="${view.web.maxUses}"></label>
+        <label><span>${t('ai.webAllowed')}${tip(t('ai.webDomainsHint'))}</span><textarea name="allowed" rows="3" spellcheck="false">${escape(view.web.allowed.join('\n'))}</textarea></label>
+        <label><span>${t('ai.webBlocked')}${tip(t('ai.webDomainsHint'))}</span><textarea name="blocked" rows="3" spellcheck="false">${escape(view.web.blocked.join('\n'))}</textarea></label>
+        <label><span>${t('ai.webIntranet')}${tip(t('ai.webIntranetHint'))}</span><textarea name="intranet" rows="3" spellcheck="false">${escape(view.web.intranet.join('\n'))}</textarea></label>
+      </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form></section>
+    <section class="card"><h2>${t('ai.limitsTitle')}</h2><form id="limits" class="stack"><div class="recipe-fields">
+        <label><span>${t('ai.modeLimit')}${tip(t('ai.modeLimitHint'))}</span><select name="modeLimit">${(['read-only', 'restricted', 'full'] as const).map(mode => `<option value="${mode}" ${mode === view.limits.modeLimit ? 'selected' : ''}>${t(`tabularius.mode.${mode}`)}</option>`).join('')}</select></label>
+        <label>${t('ai.sshTimeout')}<input name="sshTimeout" type="number" min="5" max="3600" value="${view.limits.sshTimeout}"></label>
+        <label><span>${t('ai.sandboxImages')}${tip(t('ai.sandboxImagesHint'))}</span><textarea name="sandboxImages" rows="3" spellcheck="false">${escape(view.limits.sandboxImages.join('\n'))}</textarea></label>
+      </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form></section>`;
 
   window.scrollTo(0, scrolled);
   const run = (action: () => Promise<void>) => action().catch(error => message(error instanceof Error ? error.message : String(error), true));
@@ -124,6 +147,36 @@ export async function renderAiSettings(body: HTMLElement) {
     const url = String(data.get('url')).trim();
     void run(() => save({ knowledge: url ? { url, datasets: data.getAll('dataset').map(String), limit: Number(data.get('limit')), threshold: Number(data.get('threshold')),
       weight: Number(data.get('weight')), topK: Number(data.get('topK')), rerank: String(data.get('rerank')).trim(), keyword: data.get('keyword') === 'on' } : null }));
+  });
+  const lines = (value: FormDataEntryValue | null) => String(value ?? '').split('\n').map(line => line.trim()).filter(Boolean);
+  const embedding = document.getElementById('embedding') as HTMLFormElement;
+  const embeddingModels = async () => {
+    const select = document.getElementById('embedding-model') as HTMLSelectElement;
+    const models = await api<{ id: string; name: string }[]>('/tabularius/settings/embedding-models');
+    const chosen = select.value;
+    select.innerHTML = `<option value="">${t('ai.embeddingNone')}</option>` + [...(chosen && !models.some(m => m.id === chosen) ? [{ id: chosen, name: chosen }] : []), ...models]
+      .map(m => `<option value="${escape(m.id)}" ${m.id === chosen ? 'selected' : ''}>${escape(m.name)}</option>`).join('');
+  };
+  if (view.embedding.url || view.embedding.keySet) void run(embeddingModels);
+  document.getElementById('embedding-refresh')!.addEventListener('click', () => void run(embeddingModels));
+  embedding.addEventListener('submit', event => {
+    event.preventDefault();
+    const data = new FormData(embedding);
+    const key = String(data.get('key') ?? '');
+    void run(async () => { await save({ embedding: { url: String(data.get('url')).trim(), model: String(data.get('model') ?? ''), batch: Number(data.get('batch')), ...(key ? { key } : {}) } }); await renderAiSettings(body); message(t('ai.saved')); });
+  });
+  const webForm = document.getElementById('web') as HTMLFormElement;
+  webForm.addEventListener('submit', event => {
+    event.preventDefault();
+    const data = new FormData(webForm);
+    void run(() => save({ web: { enabled: data.get('enabled') === 'on', searxng: String(data.get('searxng')).trim(), maxUses: Number(data.get('maxUses')),
+      allowed: lines(data.get('allowed')), blocked: lines(data.get('blocked')), intranet: lines(data.get('intranet')) } }));
+  });
+  const limitsForm = document.getElementById('limits') as HTMLFormElement;
+  limitsForm.addEventListener('submit', event => {
+    event.preventDefault();
+    const data = new FormData(limitsForm);
+    void run(() => save({ limits: { modeLimit: data.get('modeLimit'), sshTimeout: Number(data.get('sshTimeout')), sandboxImages: lines(data.get('sandboxImages')) } }));
   });
   const test = document.getElementById('knowledge-test') as HTMLFormElement;
   test.addEventListener('submit', event => {

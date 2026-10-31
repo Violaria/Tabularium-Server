@@ -2,7 +2,6 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createGateway } from './server.js';
 import type { SmtpConfig } from './smtp.js';
-import { embedder } from './tabularius/providers.js';
 import { MODES, type Mode } from './tabularius/index.js';
 import { checkParams, type ProviderName } from './tabularius/params.js';
 import type { InitialSettings } from './tabularius/settings.js';
@@ -45,27 +44,20 @@ if (process.env.TABULARIUS_SECRET_KEY || provider) {
     defaultModel: provider ? `${provider}/${model}` : undefined,
     params: provider ? { [provider]: checkParams(provider, process.env.TABULARIUS_MODEL_PARAMS ?? '') } : undefined,
     knowledge: process.env.TABULARIUS_RAGFLOW_MCP_URL ? { url: process.env.TABULARIUS_RAGFLOW_MCP_URL, datasets: list('TABULARIUS_RAGFLOW_DATASETS') } : undefined,
+    embedding: process.env.TABULARIUS_EMBEDDING_MODEL ? { model: process.env.TABULARIUS_EMBEDDING_MODEL, url: process.env.TABULARIUS_EMBEDDING_URL || undefined,
+      key: process.env.TABULARIUS_EMBEDDING_KEY || (process.env.TABULARIUS_EMBEDDING_URL ? undefined : process.env.OPENAI_API_KEY) || undefined,
+      batch: Number(process.env.TABULARIUS_EMBEDDING_BATCH || 64) } : undefined,
+    web: { enabled: process.env.TABULARIUS_WEB === 'on', searxng: process.env.TABULARIUS_SEARXNG_URL || '', allowed: list('TABULARIUS_WEB_ALLOWED_DOMAINS'),
+      blocked: list('TABULARIUS_WEB_BLOCKED_DOMAINS'), maxUses: Number(process.env.TABULARIUS_WEB_MAX_USES || 5), intranet: list('TABULARIUS_INTRANET') },
+    limits: { modeLimit: (process.env.TABULARIUS_MODE_LIMIT || 'read-only') as Mode, sshTimeout: Number(process.env.TABULARIUS_SSH_TIMEOUT || 60),
+      sandboxImages: (process.env.TABULARIUS_SANDBOX_IMAGES || 'python:3.13-slim,node:24-slim,alpine:3').split(',').map(image => image.trim()).filter(Boolean) },
   };
   tabularius = {
     key, root: resolve(dirname(database), 'tabularius'), initial,
     cli: resolve(process.env.TABULARIUS_CLI || new URL('../cli/index.cjs', import.meta.url).pathname),
-    embedder: process.env.TABULARIUS_EMBEDDING_MODEL
-      ? embedder(process.env.TABULARIUS_EMBEDDING_MODEL, process.env.TABULARIUS_EMBEDDING_URL || undefined, process.env.TABULARIUS_EMBEDDING_KEY || undefined,
-        Number(process.env.TABULARIUS_EMBEDDING_BATCH || 64)) : undefined,
-    web: process.env.TABULARIUS_WEB === 'on' ? {
-      options: { allowed: list('TABULARIUS_WEB_ALLOWED_DOMAINS'), blocked: list('TABULARIUS_WEB_BLOCKED_DOMAINS'), maxUses: Number(process.env.TABULARIUS_WEB_MAX_USES || 5) },
-      searxng: process.env.TABULARIUS_SEARXNG_URL || undefined, intranet: list('TABULARIUS_INTRANET'),
-    } : undefined,
-    modeLimit: (process.env.TABULARIUS_MODE_LIMIT || 'read-only') as Mode,
-    sshTimeout: Number(process.env.TABULARIUS_SSH_TIMEOUT || 60),
-    sandbox: process.env.TABULARIUS_SANDBOX_URL ? {
-      url: process.env.TABULARIUS_SANDBOX_URL, token: required('TABULARIUM_SANDBOX_TOKEN'),
-      images: (process.env.TABULARIUS_SANDBOX_IMAGES || 'python:3.13-slim,node:24-slim,alpine:3').split(',').map(image => image.trim()).filter(Boolean),
-    } : undefined,
+    sandbox: process.env.TABULARIUS_SANDBOX_URL ? { url: process.env.TABULARIUS_SANDBOX_URL, token: required('TABULARIUM_SANDBOX_TOKEN') } : undefined,
   };
-  if (!MODES.includes(tabularius.modeLimit)) throw new Error('TABULARIUS_MODE_LIMIT must be read-only, restricted or full');
-  const web = tabularius.web;
-  if (web?.options.allowed.length && web.options.blocked.length) throw new Error('Set TABULARIUS_WEB_ALLOWED_DOMAINS or TABULARIUS_WEB_BLOCKED_DOMAINS, not both');
+  if (!MODES.includes(initial.limits!.modeLimit!)) throw new Error('TABULARIUS_MODE_LIMIT must be read-only, restricted or full');
 }
 const gateway = await createGateway({
   database,

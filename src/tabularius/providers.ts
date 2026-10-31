@@ -273,7 +273,7 @@ export function fit(messages: Message[], budget: number): Message[] {
 
 /** Embeddings through the OpenAI embeddings API shape: OpenAI itself, or a local service (Infinity, vLLM) at TABULARIUS_EMBEDDING_URL. */
 export function embedder(model: string, url?: string, key?: string, batch = 64): Embedder {
-  const client = new OpenAI({ ...(url ? { baseURL: url } : {}), apiKey: key || process.env.OPENAI_API_KEY || 'none' });
+  const client = new OpenAI({ ...(url ? { baseURL: url } : {}), apiKey: key || 'none' });
   return {
     model,
     async embed(texts) {

@@ -9,6 +9,9 @@ import OpenAI from 'openai';
 import { anthropic, openai, vllm, type Provider } from './providers.js';
 import { checkParams, ParamsError, type Params, type ProviderName } from './params.js';
 import { DEFAULT_PROMPT } from './prompt.js';
+import { embedder as createEmbedder } from './providers.js';
+import type { Embedder } from './search.js';
+import type { Mode } from './index.js';
 import { KNOWLEDGE_DEFAULTS, listDatasets, ragflow, type KnowledgeBase, type KnowledgeSettings } from './knowledge.js';
 
 export const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
@@ -21,7 +24,15 @@ export interface InitialSettings {
   defaultModel?: string;
   params?: Partial<Record<ProviderName, Params>>;
   knowledge?: { url: string; datasets: string[] };
+  embedding?: { url?: string; key?: string; model: string; batch?: number };
+  web?: WebSettings;
+  limits?: Partial<Limits>;
 }
+/** Web lookup: Claude and OpenAI search themselves; other models use SearXNG and the server's fetch. */
+export interface WebSettings { enabled: boolean; searxng: string; allowed: string[]; blocked: string[]; maxUses: number; intranet: string[] }
+/** The highest permission mode, how long a command may run over SSH, and the images the sandbox may run. */
+export interface Limits { modeLimit: Mode; sshTimeout: number; sandboxImages: string[] }
+interface StoredEmbedding { url: string; key: string | null; hint: string; model: string; batch: number }
 export class SettingsError extends Error {}
 
 const blank = (): StoredProvider => ({ key: null, hint: '', models: [], url: '', context: 32_768 });
@@ -59,6 +70,14 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
     db.prepare('INSERT INTO tabularius_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(name, JSON.stringify(value));
   const sealKey = (key: string) => seal(secret, key).toString('base64');
   const hintOf = (key: string) => key.length > 8 ? key.slice(-4) : '';
+  // Settings added after the first start are imported on their own first start.
+  const missing = (name: string) => !db.prepare('SELECT 1 FROM tabularius_settings WHERE key=?').get(name);
+  if (missing('embedding')) write('embedding', initial.embedding
+    ? { url: initial.embedding.url ?? '', key: initial.embedding.key ? sealKey(initial.embedding.key) : null, hint: initial.embedding.key ? hintOf(initial.embedding.key) : '',
+      model: initial.embedding.model, batch: initial.embedding.batch ?? 64 } satisfies StoredEmbedding : null);
+  if (missing('web')) write('web', initial.web ?? { enabled: false, searxng: '', allowed: [], blocked: [], maxUses: 5, intranet: [] });
+  if (missing('limits')) write('limits', { modeLimit: 'read-only', sshTimeout: 60, sandboxImages: ['python:3.13-slim', 'node:24-slim', 'alpine:3'], ...initial.limits } satisfies Limits);
+  let embedderCache: { key: string; embedder: Embedder } | undefined;
 
   // The first start with these settings takes the environment's configuration.
   if (!db.prepare("SELECT 1 FROM tabularius_settings WHERE key='providers'").get()) {
@@ -126,6 +145,30 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
       return knowledgeBase;
     },
     knowledgeConfigured: () => Boolean(knowledgeSettings()?.url),
+    /** The embedding service for semantic search, or undefined for full-text search only. */
+    embedder(): Embedder | undefined {
+      const e = read<StoredEmbedding | null>('embedding', null);
+      if (!e?.model) return undefined;
+      const cacheKey = JSON.stringify(e);
+      if (embedderCache?.key !== cacheKey) {
+        const key = e.key ? open(secret, Buffer.from(e.key, 'base64')) : undefined;
+        embedderCache = { key: cacheKey, embedder: createEmbedder(e.model, e.url || undefined, key, e.batch) };
+      }
+      return embedderCache.embedder;
+    },
+    web: () => read<WebSettings>('web', { enabled: false, searxng: '', allowed: [], blocked: [], maxUses: 5, intranet: [] }),
+    limits: () => read<Limits>('limits', { modeLimit: 'read-only', sshTimeout: 60, sandboxImages: [] }),
+    /** Embedding models offered by the configured service (OpenAI, or the OpenAI-compatible address). */
+    async embeddingModels(): Promise<ModelEntry[]> {
+      const e = read<StoredEmbedding | null>('embedding', null);
+      const key = e?.key ? open(secret, Buffer.from(e.key, 'base64')) : undefined;
+      if (!e?.url && !key) throw new SettingsError('Save the key first');
+      const list: ModelEntry[] = [];
+      for await (const model of new OpenAI({ apiKey: key || 'none', ...(e?.url ? { baseURL: e.url } : {}) }).models.list()) {
+        if (e?.url || /embedding/.test(model.id)) list.push({ id: model.id, name: e?.url ? model.id : displayName('openai', model.id) });
+      }
+      return list;
+    },
     /** The models a provider offers, asked from its API with the saved key (and address). */
     async available_models(name: ProviderName): Promise<ModelEntry[]> {
       const item = stored()[name];
@@ -159,6 +202,9 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
         providers: Object.fromEntries(PROVIDERS.map(name => [name, { configured: usable(name, all[name]), keySet: Boolean(all[name].key), keyHint: all[name].hint,
           models: all[name].models, url: all[name].url }])),
         knowledge: knowledgeSettings() ?? { url: '', datasets: [], ...KNOWLEDGE_DEFAULTS },
+        embedding: (({ key, ...rest }) => ({ ...rest, keySet: Boolean(key) }))(read<StoredEmbedding>('embedding', null as never) ?? { url: '', key: null, hint: '', model: '', batch: 64 }),
+        web: read<WebSettings>('web', { enabled: false, searxng: '', allowed: [], blocked: [], maxUses: 5, intranet: [] }),
+        limits: read<Limits>('limits', { modeLimit: 'read-only', sshTimeout: 60, sandboxImages: [] }),
       };
     },
     /** Saves what the page sent. A key is replaced only when one is given; an empty key removes it. */
@@ -221,12 +267,43 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
         }
       }
       if (data.defaultModel !== undefined && typeof data.defaultModel !== 'string') throw new SettingsError('Invalid default model');
+      let embedding: StoredEmbedding | undefined;
+      if (data.embedding !== undefined) {
+        const e = data.embedding as Record<string, unknown>;
+        const previous = read<StoredEmbedding | null>('embedding', null) ?? { url: '', key: null, hint: '', model: '', batch: 64 };
+        if (typeof e.url !== 'string' || (e.url && !/^https?:\/\/\S+$/.test(e.url)) || typeof e.model !== 'string' || e.model.length > 128
+          || !Number.isInteger(e.batch) || (e.batch as number) < 1 || (e.batch as number) > 2048) throw new SettingsError('Invalid embedding settings');
+        embedding = { url: e.url.replace(/\/$/, ''), key: previous.key, hint: previous.hint, model: e.model, batch: e.batch as number };
+        if (e.key !== undefined) {
+          if (typeof e.key !== 'string' || e.key.length > 512) throw new SettingsError('Invalid key');
+          embedding.key = e.key ? sealKey(e.key.trim()) : null; embedding.hint = e.key ? hintOf(e.key.trim()) : '';
+        }
+      }
+      let web: WebSettings | undefined;
+      if (data.web !== undefined) {
+        const w = data.web as Record<string, unknown>;
+        const list = (value: unknown) => Array.isArray(value) && value.length <= 200 && value.every(item => typeof item === 'string' && item.length > 0 && item.length <= 255);
+        if (typeof w.enabled !== 'boolean' || typeof w.searxng !== 'string' || (w.searxng && !/^https?:\/\/\S+$/.test(w.searxng)) || !list(w.allowed) || !list(w.blocked)
+          || !list(w.intranet) || !Number.isInteger(w.maxUses) || (w.maxUses as number) < 1 || (w.maxUses as number) > 50) throw new SettingsError('Invalid web settings');
+        if ((w.allowed as string[]).length && (w.blocked as string[]).length) throw new SettingsError('Set allowed or blocked domains, not both');
+        web = { enabled: w.enabled, searxng: w.searxng.replace(/\/$/, ''), allowed: w.allowed as string[], blocked: w.blocked as string[], maxUses: w.maxUses as number, intranet: w.intranet as string[] };
+      }
+      let limits: Limits | undefined;
+      if (data.limits !== undefined) {
+        const l = data.limits as Record<string, unknown>;
+        if (!['read-only', 'restricted', 'full'].includes(l.modeLimit as string) || !Number.isInteger(l.sshTimeout) || (l.sshTimeout as number) < 5 || (l.sshTimeout as number) > 3600
+          || !Array.isArray(l.sandboxImages) || !l.sandboxImages.every(image => typeof image === 'string' && /^[\w./:@-]{1,200}$/.test(image))) throw new SettingsError('Invalid limits');
+        limits = { modeLimit: l.modeLimit as Mode, sshTimeout: l.sshTimeout as number, sandboxImages: l.sandboxImages as string[] };
+      }
       db.exec('BEGIN');
       write('providers', all);
       if (data.prompt !== undefined) write('prompt', data.prompt);
       if (params) write('params', params);
       if (knowledge !== undefined) write('knowledge', knowledge);
       if (data.defaultModel !== undefined) write('default_model', data.defaultModel);
+      if (embedding) write('embedding', embedding);
+      if (web) write('web', web);
+      if (limits) write('limits', limits);
       db.exec('COMMIT');
       if (data.defaultModel && !models().some(item => item.id === data.defaultModel)) write('default_model', '');
       // Later requests use the new settings.

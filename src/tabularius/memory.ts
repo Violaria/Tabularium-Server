@@ -12,10 +12,10 @@ const vector = (blob: Uint8Array) => new Float32Array(blob.buffer, blob.byteOffs
 export class MemoryError extends Error {}
 
 /** A user's memories: facts and preferences Tabularius keeps across conversations and vaults. */
-export function createMemories(db: DatabaseSync, embedder?: Embedder) {
+export function createMemories(db: DatabaseSync, embedderOf: () => Embedder | undefined) {
   const rows = (userId: string) => db.prepare('SELECT * FROM tabularius_memories WHERE user_id=? ORDER BY updated_at DESC').all(userId) as unknown as Row[];
   const get = (userId: string, id: string) => db.prepare('SELECT * FROM tabularius_memories WHERE id=? AND user_id=?').get(id, userId) as unknown as Row | undefined;
-  const embed = async (content: string) => embedder ? new Uint8Array((await embedder.embed([content]))[0].buffer) : null;
+  const embed = async (content: string) => { const embedder = embedderOf(); return embedder ? new Uint8Array((await embedder.embed([content]))[0].buffer) : null; };
   function check(content: unknown) {
     if (typeof content !== 'string' || !content.trim()) throw new MemoryError('content must be a non-empty string');
     if (content.length > MAX_LENGTH) throw new MemoryError(`a memory holds at most ${MAX_LENGTH} characters`);
@@ -41,6 +41,7 @@ export function createMemories(db: DatabaseSync, embedder?: Embedder) {
     /** The memories most related to a text: by embedding when there is one, otherwise the most recently updated. */
     async relevant(userId: string, text: string, limit: number) {
       const all = rows(userId);
+      const embedder = embedderOf();
       if (!embedder || !text.trim() || all.length <= limit) return all.slice(0, embedder ? limit : limit * 2).map(view);
       const [target] = await embedder.embed([text]);
       return all.filter(row => row.embedding && row.embedding.byteLength === target.length * 4)
