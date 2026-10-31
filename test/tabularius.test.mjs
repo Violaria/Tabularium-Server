@@ -325,3 +325,16 @@ test('deleting a conversation deletes its attachments', async () => {
     assert.deepEqual(db.prepare('SELECT id FROM tabularius_attachments').all().map(row => row.id), ['unsent']);
   } finally { db.close(); await rm(dir, { recursive: true }); }
 });
+
+test('user masks run in linear time and RE2-incompatible ones are refused', async () => {
+  const { checkMasks } = await import('../dist/tabularius/filter.js');
+  const filter = createFilter('', 'ZETA-\\d+\n(a|aa)*b');
+  assert.equal(filter.mask('密码 ZETA-42 和 ZETA-7'), `密码 ${REDACTED} 和 ${REDACTED}`);
+  const started = Date.now();
+  filter.mask('a'.repeat(100_000));
+  assert(Date.now() - started < 2000, 'an alternation under a star does not take exponential time');
+  checkMasks('ZETA-\\d+\n(a|aa)*b');
+  assert.throws(() => checkMasks('(a)\\1'));
+  assert.throws(() => checkMasks('(?<=x)y'));
+  assert.throws(() => checkMasks('x'.repeat(301)), /too long/);
+});

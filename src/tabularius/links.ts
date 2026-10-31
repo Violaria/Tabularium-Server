@@ -1,4 +1,24 @@
-import { posix } from 'node:path';
+// Shared by the server (Tabularius proposals) and web notes (renames), so it uses no Node module: vault paths are always
+// relative, with "/" between folders.
+const dirname = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf('/')));
+const basename = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+/** Joins and resolves "." and "..", as path.posix.normalize(path.posix.join(...)) does for relative paths. */
+function resolvePath(folder: string, path: string) {
+  const parts: string[] = [];
+  for (const part of `${folder}/${path}`.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') { if (parts.length && parts.at(-1) !== '..') parts.pop(); else parts.push('..'); } else parts.push(part);
+  }
+  return parts.join('/');
+}
+/** The path from folder `from` to `to`, as path.posix.relative does. */
+function relativePath(from: string, to: string) {
+  const a = from ? from.split('/') : [];
+  const b = to.split('/');
+  let common = 0;
+  while (common < a.length && common < b.length && a[common] === b[common]) common++;
+  return [...a.slice(common).map(() => '..'), ...b.slice(common)].join('/');
+}
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const MARKDOWN = /(\]\()(<[^>\n]*>|[^()\s]+)(\))/g;
@@ -28,11 +48,11 @@ export function repairLinks(text: string, from: string, to: string, moves: Map<s
     if (SCHEME.test(value) || value.startsWith('#') || value.startsWith('/')) return whole;
     const hash = value.indexOf('#');
     const [path, fragment] = hash < 0 ? [value, ''] : [value.slice(0, hash), value.slice(hash)];
-    const target = posix.normalize(posix.join(posix.dirname(from), decode(path)));
+    const target = resolvePath(dirname(from), decode(path));
     if (!before.has(target)) return whole;
     const destination = moves.get(target) ?? target;
     if (!moved && destination === target) return whole;
-    const relative = posix.relative(posix.dirname(to), destination);
+    const relative = relativePath(dirname(to), destination);
     return `${open}${bracketed ? `<${relative}${fragment}>` : `${encode(relative)}${fragment}`}${close}`;
   });
   return markdown.replace(WIKI, (whole, target: string, heading = '', alias = '') => {
@@ -41,8 +61,8 @@ export function repairLinks(text: string, from: string, to: string, moves: Map<s
     if (!destination) return whole;
     const extension = target.trim().endsWith('.md') ? '' : '.md';
     const bare = (path: string) => extension ? path.replace(/\.md$/, '') : path;
-    const basename = posix.basename(destination);
-    const unique = [...after].filter(path => posix.basename(path) === basename).length === 1;
-    return `[[${!target.includes('/') && unique ? bare(basename) : bare(destination)}${heading}${alias}]]`;
+    const name = basename(destination);
+    const unique = [...after].filter(path => basename(path) === name).length === 1;
+    return `[[${!target.includes('/') && unique ? bare(name) : bare(destination)}${heading}${alias}]]`;
   });
 }

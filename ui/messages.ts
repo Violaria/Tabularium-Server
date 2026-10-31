@@ -948,6 +948,7 @@ const en = {
   'kindle.notConfigured': 'Kindle delivery is not set up on the server; ask the administrator.',
   'settings.clearPasswordTitle': 'Clear the mail password?',
   'settings.clearPasswordBody': 'Until a new password is saved, delivery signs in without one, which most servers refuse.',
+  'share.withdrawnDeleted': 'The share {address} was withdrawn: its note or folder was deleted.',
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1899,6 +1900,7 @@ const zh: Catalogue = {
   'kindle.notConfigured': '服务器尚未配置推送，请联系管理员。',
   'settings.clearPasswordTitle': '清除推送账户的密码？',
   'settings.clearPasswordBody': '保存新密码之前，推送时不登录，多数邮件服务器会拒绝。',
+  'share.withdrawnDeleted': '分享 {address} 已撤回：它的笔记或文件夹已被删除。',
 };
 
 const la: Catalogue = {
@@ -2847,6 +2849,7 @@ const la: Catalogue = {
   "kindle.notConfigured": "Missio ad Kindle in ministratore nondum parata est; administratorem roga.",
   "settings.clearPasswordTitle": "Tesseram arcanam epistularem delere?",
   "settings.clearPasswordBody": "Donec nova tessera servetur, missio sine ea intrat, quod plerique ministratores recusant.",
+  "share.withdrawnDeleted": "Communicatio {address} revocata est: eius commentarius aut capsa deleta est.",
 };
 
 export const catalogues = { en, zh, la } as const;

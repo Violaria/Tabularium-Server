@@ -1,4 +1,5 @@
 import { matchesGlob } from 'node:path';
+import { RE2JS } from 're2js';
 
 // Values that look like credentials: key prefixes of common services, PEM private keys, and `password: value` style assignments.
 const BUILT_IN = [
@@ -16,15 +17,23 @@ export interface Span { start: number; end: number; at: number }
 export interface Redaction { text: string; spans: Span[] }
 export interface Filter { excluded(path: string): boolean; mask(text: string): string; redact(text: string): Redaction }
 
-/** `excluded`: one glob per line; `masks`: one regular expression per line, added to the built-in rules. */
+/**
+ * `excluded`: one glob per line; `masks`: one regular expression per line, added to the built-in rules. The user's rules
+ * run on RE2 (re2js), whose time grows linearly with the text whatever the pattern, since they run on the server's
+ * main thread over every note.
+ */
 export function createFilter(excluded: string, masks: string): Filter {
   const globs = lines(excluded);
-  const extra = lines(masks).map(source => new RegExp(source, 'g'));
+  const extra = lines(masks).map(source => RE2JS.compile(source));
   // All matches are found on the original text and merged, so a masked text maps back to the original exactly.
   function redact(text: string): Redaction {
     const ranges: [number, number][] = [];
-    for (const pattern of [...BUILT_IN, ...extra])
+    for (const pattern of BUILT_IN)
       for (const match of text.matchAll(pattern)) if (match[0]) ranges.push([match.index, match.index + match[0].length]);
+    for (const pattern of extra) {
+      const matcher = pattern.matcher(text);
+      while (matcher.find()) if (matcher.end() > matcher.start()) ranges.push([matcher.start(), matcher.end()]);
+    }
     for (const match of text.matchAll(ASSIGNMENT)) ranges.push(match.indices![1]);
     ranges.sort((a, b) => a[0] - b[0]);
     const merged: [number, number][] = [];
@@ -51,15 +60,11 @@ export function createFilter(excluded: string, masks: string): Filter {
 
 const lines = (value: string) => value.split('\n').map(line => line.trim()).filter(Boolean);
 
-/** Rejects a rule list that would fail later: every mask must compile. */
-/**
- * Mask patterns run on the server's main thread over every note, so patterns that can take exponential time are refused:
- * a quantified group that itself contains a quantifier (such as `(a+)+`), and back-references.
- */
+/** Rejects a rule list that would fail later: every mask compiles on RE2 (no back-references or look-around) and is short. */
 export function checkMasks(masks: string) {
   for (const source of lines(masks)) {
-    if (source.length > 300 || /\\[1-9]|\\k</.test(source) || /\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*(?:[+*{]|\?(?!:))/.test(source)) throw new Error('Unsafe mask pattern');
-    new RegExp(source, 'g');
+    if (source.length > 300) throw new Error('Mask pattern too long');
+    RE2JS.compile(source);
   }
 }
 

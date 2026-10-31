@@ -1,6 +1,6 @@
 {
   "name": "@tabularium/server",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,6 +21,7 @@
     "octagonal-wheels": "0.1.55",
     "openai": "7.45.1",
     "pdfjs-dist": "6.4.299",
+    "re2js": "2.8.6",
     "ssh2": "1.17.0"
   }
 }
