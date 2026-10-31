@@ -48,7 +48,7 @@ export function paramForm(root: HTMLElement, provider: ProviderName, rules: Reco
     root.innerHTML = `<div class="params">${Object.entries(rules).map(([name, rule]) => {
       const set = values[name] !== undefined;
       const title = hint(name);
-      return `<div class="param" data-param="${escape(name)}"><div class="param-head"><span class="param-name"${title ? ` title="${escape(title)}" tabindex="0"` : ''}>${escape(label(name))}${englishName(name) ? ` <span class="param-en">${escape(englishName(name))}</span>` : ''}</span>`
+      return `<div class="param" data-param="${escape(name)}"><div class="param-head"><span class="param-name">${escape(label(name))}${englishName(name) ? ` <span class="param-en">${escape(englishName(name))}</span>` : ''}${title ? tip(title) : ''}</span>`
         + `<button type="button" class="param-toggle${set ? ' custom' : ''}" data-toggle aria-pressed="${set}">${set && rule.kind === 'boolean' ? shown(rule, values[name])
           : set ? t('param.custom') : `${t('param.default')}${defaults[name] !== undefined ? ` · ${escape(shown(rule, defaults[name]))}` : ''}`}</button></div>`
         + (set && rule.kind !== 'boolean' ? `<div class="param-control">${control(name, rule, values[name])}</div>` : '') + '</div>';

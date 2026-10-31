@@ -3,16 +3,17 @@
 import { shareTable, type ShareRow } from './shares.js';
 import { renderAiSettings } from './ai.js';
 import { renderServerSettings } from './server-settings.js';
+import { renderBackups } from './backups.js';
 import { formatDate, hasMessage, t } from './i18n.js';
 import { api, button, bytes, confirmAction, escape, form, input, message, page, state, tip, type User } from './core.js';
 import { badge, deviceTable, type Device, type Vault } from './account.js';
 
-interface Overview { users: number; activeUsers: number; vaults: number; devices: number; requests: number; proxyRequests: number; activeProxyConnections: number; uptimeSeconds: number }
+interface Overview { users: number; activeUsers: number; vaults: number; devices: number; requests: number; proxyRequests: number; activeProxyConnections: number; uptimeSeconds: number; backupFailure: { at: number; error: string } | null }
 interface Usage { diskBytes: number; activeBytes: number; documents: number; deletedDocuments: number }
 interface Audit { id: number; occurredAt: number; actor: string; action: string; targetId: string }
 
 const date = formatDate;
-const tabs = (): [string, string][] => [['/admin/', t('nav.overview')], ['/admin/users', t('nav.users')], ['/admin/vaults', t('nav.vaults')], ['/admin/shares', t('shares.all')], ['/admin/ai', t('nav.ai')], ['/admin/settings', t('nav.serverSettings')], ['/admin/audit', t('nav.audit')]];
+const tabs = (): [string, string][] => [['/admin/', t('nav.overview')], ['/admin/users', t('nav.users')], ['/admin/vaults', t('nav.vaults')], ['/admin/shares', t('shares.all')], ['/admin/ai', t('nav.ai')], ['/admin/settings', t('nav.serverSettings')], ['/admin/backups', t('nav.backups')], ['/admin/audit', t('nav.audit')]];
 const frame = (content: HTMLElement) => page(content, { title: t('nav.admin'), subtitle: t('admin.desc'), tabs: tabs() });
 
 export async function renderAdmin(content: HTMLElement, path: string) {
@@ -28,6 +29,7 @@ export async function renderAdmin(content: HTMLElement, path: string) {
   else if (path.startsWith('/admin/shares')) await sharesPage(content);
   else if (path.startsWith('/admin/ai')) await renderAiSettings(frame(content));
   else if (path.startsWith('/admin/settings')) await renderServerSettings(frame(content));
+  else if (path.startsWith('/admin/backups')) await renderBackups(frame(content));
   else await overviewPage(content);
 }
 
@@ -35,7 +37,8 @@ async function overviewPage(content: HTMLElement) {
   const body = frame(content);
   const metrics = await api<Overview>('/admin/overview');
   const health = await fetch('/health/ready');
-  body.innerHTML = `<div class="stats">${[[t('overview.accounts'), metrics.users], [t('overview.vaults'), metrics.vaults], [t('overview.devices'), metrics.devices], [t('overview.connections'), metrics.activeProxyConnections]].map(([name, value]) => `<div class="card stat"><span>${name}</span><strong>${value}</strong></div>`).join('')}</div><div class="split"><section class="card"><h2>${t('overview.service')}</h2><dl class="details"><dt>${t('overview.storage')}</dt><dd><span class="badge ${health.ok ? '' : 'warn'}">${health.ok ? t('overview.ok') : t('overview.down')}</span></dd><dt>${t('overview.uptime')}</dt><dd>${t('overview.minutes', { minutes: Math.floor(metrics.uptimeSeconds / 60) })}</dd><dt>${t('overview.activeUsers')}</dt><dd>${metrics.activeUsers}</dd></dl></section><section class="card"><h2>${t('overview.run')}${tip(t('overview.countersHint'))}</h2><dl class="details"><dt>${t('overview.requests')}</dt><dd>${metrics.requests}</dd><dt>${t('overview.proxyRequests')}</dt><dd>${metrics.proxyRequests}</dd></dl><br></section></div>`;
+  body.innerHTML = (metrics.backupFailure ? `<p class="notice error">${t('overview.backupFailed', { date: date(metrics.backupFailure.at), error: escape(metrics.backupFailure.error) })} <a href="/admin/backups" data-route>${t('nav.backups')}</a></p>` : '')
+    + `<div class="stats">${[[t('overview.accounts'), metrics.users], [t('overview.vaults'), metrics.vaults], [t('overview.devices'), metrics.devices], [t('overview.connections'), metrics.activeProxyConnections]].map(([name, value]) => `<div class="card stat"><span>${name}</span><strong>${value}</strong></div>`).join('')}</div><div class="split"><section class="card"><h2>${t('overview.service')}</h2><dl class="details"><dt>${t('overview.storage')}</dt><dd><span class="badge ${health.ok ? '' : 'warn'}">${health.ok ? t('overview.ok') : t('overview.down')}</span></dd><dt>${t('overview.uptime')}</dt><dd>${t('overview.minutes', { minutes: Math.floor(metrics.uptimeSeconds / 60) })}</dd><dt>${t('overview.activeUsers')}</dt><dd>${metrics.activeUsers}</dd></dl></section><section class="card"><h2>${t('overview.run')}${tip(t('overview.countersHint'))}</h2><dl class="details"><dt>${t('overview.requests')}</dt><dd>${metrics.requests}</dd><dt>${t('overview.proxyRequests')}</dt><dd>${metrics.proxyRequests}</dd></dl><br></section></div>`;
 }
 
 async function usersPage(content: HTMLElement) {

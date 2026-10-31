@@ -17,6 +17,23 @@ export const RECIPES: Record<'sakura' | 'lavender', Recipe> = {
   sakura: { accent: '#d63c78', tint: 22, side: 'light' },
   lavender: { accent: '#7653d9', tint: 20, side: 'light' },
 };
+/** The Tabularium mark: the arcade of the Roman record office, drawn in `fill` (the current colour when not given). */
+export const markShapes = (fill = 'currentColor') => `<g fill="${fill}"><rect x="10" y="12" width="44" height="7" rx="1.5"/>`
+  + '<path fill-rule="evenodd" d="M12 22h40v24H12zM16 46V31a4 4 0 0 1 8 0v15zM28 46V31a4 4 0 0 1 8 0v15zM40 46V31a4 4 0 0 1 8 0v15z"/>'
+  + '<rect x="8" y="48" width="48" height="5" rx="1.5"/></g>';
+/** The browser tab's icon in the colours of the theme in use, as the mark in the sidebar shows them. */
+function paintIcon() {
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;color:var(--mark-bg);background-color:var(--mark-text)';
+  document.documentElement.append(probe);
+  const { color: background, backgroundColor: foreground } = getComputedStyle(probe);
+  probe.remove();
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="${background}"/>${markShapes(foreground)}</svg>`;
+  let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+  if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.append(link); }
+  link.type = 'image/svg+xml';
+  link.href = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
 const THEME_KEY = 'tabularium-theme';
 /**
  * Applies a colour theme ('' for the default) and remembers it in this browser, so the next page load starts in it.
@@ -35,6 +52,7 @@ export function applyTheme(theme: string, recipe?: Recipe | null) {
     root.style.removeProperty('--recipe-tint');
     delete root.dataset.side;
   }
+  paintIcon();
   saved = { theme, recipe: recipe ?? null };
   try { localStorage.setItem(THEME_KEY, JSON.stringify(saved)); } catch { /* storage unavailable: the theme lasts for this page */ }
 }
@@ -61,8 +79,9 @@ export async function api<T>(path: string, method = 'GET', data?: unknown): Prom
     headers: { 'content-type': 'application/json', ...(state.session ? { 'x-csrf-token': state.session.csrf } : {}) },
     body: data === undefined ? undefined : JSON.stringify(data),
   });
-  const result = await response.json();
-  if (!response.ok) throw new ApiError(response.status, serverError(result.error));
+  // A reverse proxy's own error page is HTML: the status is reported instead of a parse error.
+  const result = /json/.test(response.headers.get('content-type') ?? '') ? await response.json() : undefined;
+  if (!response.ok) throw new ApiError(response.status, result?.error ? serverError(result.error) : `HTTP ${response.status}`);
   return result as T;
 }
 
@@ -138,6 +157,22 @@ export function confirmAction(options: { title: string; body: string; action: st
     document.body.append(dialog);
     dialog.showModal();
     (typed ?? confirmButton).focus();
+  });
+}
+
+/** A dialog with several actions; resolves to the chosen value, or null when it is cancelled. */
+export function chooseAction(options: { title: string; body: string; choices: { value: string; label: string; danger?: boolean }[] }): Promise<string | null> {
+  return new Promise(resolve => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'dialog';
+    dialog.innerHTML = `<h2>${escape(options.title)}</h2><p>${escape(options.body)}</p><div class="buttons"><button type="button" data-cancel>${escape(t('dialog.cancel'))}</button>${options.choices.map(choice =>
+      `<button type="button" data-value="${escape(choice.value)}" class="${choice.danger ? 'danger solid' : 'primary'}">${escape(choice.label)}</button>`).join('')}</div>`;
+    const close = (answer: string | null) => { dialog.close(); dialog.remove(); resolve(answer); };
+    dialog.addEventListener('cancel', () => close(null));
+    dialog.querySelector('[data-cancel]')!.addEventListener('click', () => close(null));
+    for (const button of dialog.querySelectorAll<HTMLButtonElement>('[data-value]')) button.addEventListener('click', () => close(button.dataset.value!));
+    document.body.append(dialog);
+    dialog.showModal();
   });
 }
 

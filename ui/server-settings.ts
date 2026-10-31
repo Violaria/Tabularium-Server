@@ -1,7 +1,7 @@
 // Server settings, for administrators: mail and Kindle, sharing, and accounts and access. Everything the server used to
 // read from its environment at start is changed here and applies to the next request.
 import { t } from './i18n.js';
-import { api, escape, form, message, tip } from './core.js';
+import { api, confirmAction, escape, form, message, run, tip } from './core.js';
 
 interface Mail { host: string; port: number; security: 'tls' | 'starttls' | 'none'; user: string; from: string; passwordSet: boolean; passwordHint: string }
 interface View {
@@ -31,8 +31,7 @@ export async function renderServerSettings(body: HTMLElement) {
         ${field(t('settings.mailPassword'), `<input name="password" type="password" autocomplete="new-password" ${view.secretKey ? '' : 'disabled'} placeholder="${mail.passwordSet ? escape(t('ai.keySet', { hint: mail.passwordHint })) : ''}">`, view.secretKey ? undefined : t('settings.needSecret'))}
         ${field(t('settings.mailFrom'), `<input name="from" type="email" value="${escape(mail.from)}">`, t('settings.mailFromHint'))}
       </div>
-      ${mail.passwordSet ? `<label class="check"><input type="checkbox" name="clear"> ${t('settings.clearPassword')}</label>` : ''}
-      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form>
+      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button>${mail.passwordSet ? `<button type="button" id="clear-password">${t('settings.clearPassword')}</button>` : ''}</div></form>
       ${view.mail ? `<form id="mail-test" class="inline-form">${field(t('settings.mailTestTo'), '<input name="to" type="email" required>')}<button type="submit">${t('settings.mailTest')}</button></form>` : ''}</section>
     <section class="card"><h2>Kindle${tip(t('settings.kindleDesc'))}</h2><form id="kindle" class="stack"><div class="recipe-fields">
         ${field(t('settings.kindleDomains'), `<textarea name="domains" rows="2" spellcheck="false">${escape(view.kindle.domains.join('\n'))}</textarea>`, t('settings.oneLine'))}
@@ -54,9 +53,13 @@ export async function renderServerSettings(body: HTMLElement) {
     const host = String(data.get('host')).trim();
     const password = String(data.get('password') ?? '');
     await save({ mail: host ? { host, port: Number(data.get('port')), security: data.get('security'), user: String(data.get('user')).trim(), from: String(data.get('from')).trim(),
-      ...(data.get('clear') ? { password: '' } : password ? { password } : {}) } : null });
+      ...(password ? { password } : {}) } : null });
   });
-  form('mail-test', async data => { await api('/admin/settings/mail-test', 'POST', { to: data.get('to') }); message(t('settings.mailSent')); });
+  document.getElementById('clear-password')?.addEventListener('click', () => void run(async () => {
+    if (!await confirmAction({ title: t('settings.clearPasswordTitle'), body: t('settings.clearPasswordBody'), action: t('settings.clearPassword'), danger: true })) return;
+    await save({ mail: { host: mail.host, port: mail.port, security: mail.security, user: mail.user, from: mail.from, password: '' } });
+  }));
+  if (view.mail) form('mail-test', async data => { await api('/admin/settings/mail-test', 'POST', { to: data.get('to') }); message(t('settings.mailSent')); });
   form('kindle', async data => save({ kindle: { domains: lines(data.get('domains')), daily: Number(data.get('daily')), maxMegabytes: Number(data.get('maxMegabytes')) } }));
   form('shares', async data => save({ shares: { enabled: data.get('enabled') === 'on', url: String(data.get('url')).trim(), maxMegabytes: Number(data.get('maxMegabytes')) } }));
   form('access', async data => save({ access: Object.fromEntries(ACCESS.map(([name]) => [name, Number(data.get(name))])) }));

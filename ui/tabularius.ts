@@ -1,5 +1,5 @@
 // Tabularius: enable the AI curator for a vault, set what it may send, and talk to it about the notes.
-import { formatDate, serverError, t } from './i18n.js';
+import { formatDate, hasMessage, serverError, t } from './i18n.js';
 import { api, ApiError, confirmAction, escape, message, run, state, tip } from './core.js';
 import { FormError, paramForm, paramLabel, PROVIDER_NAMES, type Params, type ProviderName, type Rule } from './params.js';
 interface VaultStatus {
@@ -63,9 +63,12 @@ function form(id: string, action: (data: FormData) => Promise<void>) {
 /** Answer text: paragraphs, fenced code, inline code, and [[note]] citations linked to the web notes page. */
 function render(text: string) {
   const link = (path: string) => `<a class="cite" href="/notes/?vault=${encodeURIComponent(vaultId)}&amp;path=${encodeURIComponent(path)}">${escape(path)}</a>`;
+  // Citations are found in the escaped text; their paths are turned back into the text as written.
+  const entities: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+  const unescape = (value: string) => value.replace(/&(?:amp|lt|gt|quot|#39);/g, entity => entities[entity]);
   const inline = (value: string) => escape(value)
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-    .replace(/\[\[([^\]\n|]+?)(?:\|[^\]\n]*)?\]\]/g, (_, path: string) => link(path.replace(/&amp;/g, '&')));
+    .replace(/\[\[([^\]\n|]+?)(?:\|[^\]\n]*)?\]\]/g, (_, path: string) => link(unescape(path)));
   return text.split(/(```[^\n]*\n[\s\S]*?(?:```|$))/).map(block => {
     const fence = /^```[^\n]*\n([\s\S]*?)(?:```)?$/.exec(block);
     if (fence) return `<pre><code>${escape(fence[1])}</code></pre>`;
@@ -93,7 +96,11 @@ function toolLabel(tool: ToolUse) {
     : t('tabularius.toolProposeFailed');
   return escape(tool.name);
 }
-const statusBadge = (status: string) => `<span class="badge${status === 'pending' ? ' warn' : status === 'discarded' ? ' off' : ''}">${t(`tabularius.status.${status as 'pending' | 'applied' | 'discarded'}`)}</span>`;
+/** A status or problem name from the server: its text when the catalogue has one, else the name as sent. */
+const named = (key: string, value: string) => hasMessage(key) ? t(key as 'tabularius.status.pending') : escape(value);
+const statusBadge = (status: string) => `<span class="badge${status === 'pending' ? ' warn' : status === 'discarded' ? ' off' : ''}">${named(`tabularius.status.${status}`, status)}</span>`;
+/** Approvals already answered in this page: a redraw of the streaming answer keeps their buttons off. */
+const answered = new Set<string>();
 function entryHtml(entry: Entry) {
   if (entry.role === 'user') return `<div class="turn user"><p>${escape(entry.text).replace(/\n/g, '<br>')}</p></div>`;
   const tools = (entry.tools ?? []).map(tool => `<li>${toolLabel(tool)}</li>`).join('');
@@ -102,7 +109,7 @@ function entryHtml(entry: Entry) {
   const sources = web.length ? `<div class="read"><small>${t('tabularius.sources')}</small><ol class="sources">${web.map(source =>
     `<li><a href="${escape(source.url)}" target="_blank" rel="noopener noreferrer">${escape(source.title || source.url)}</a></li>`).join('')}</ol></div>` : '';
   const approvals = (entry.approvals ?? []).map(a => `<div class="notice approval"><p>${t('tabularius.approvalAsk', { host: escape(a.host) })}</p><pre class="mono">${escape(a.command)}</pre>
-    ${a.approved === undefined ? `<div class="actions"><button class="primary" data-approve="${escape(a.id)}">${t('tabularius.approve')}</button><button data-deny="${escape(a.id)}">${t('tabularius.deny')}</button></div>`
+    ${a.approved === undefined ? `<div class="actions"><button class="primary" data-approve="${escape(a.id)}" ${answered.has(a.id) ? 'disabled' : ''}>${t('tabularius.approve')}</button><button data-deny="${escape(a.id)}" ${answered.has(a.id) ? 'disabled' : ''}>${t('tabularius.deny')}</button></div>`
       : `<span class="badge${a.approved ? '' : ' warn'}">${a.approved ? t('tabularius.approved') : t('tabularius.denied')}</span>`}</div>`).join('');
   return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}${approvals}<div class="answer">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}${sources}</div>`;
 }
@@ -114,7 +121,7 @@ async function load() {
 }
 async function openVault() {
   conversationId = undefined; entries = []; newChat();
-  conversations = vault()?.enabled ? await api<Summary[]>(`/tabularius/vaults/${vaultId}/conversations`) : [];
+  conversations = vault()?.enabled ? await api<Summary[]>(`/tabularius/vaults/${encodeURIComponent(vaultId)}/conversations`) : [];
   draw();
 }
 async function refresh() {
@@ -129,7 +136,7 @@ function shell(content: string) {
   const kept = key === drawnView ? { main: app.querySelector('.assist-main')?.scrollTop ?? 0, list: app.querySelector('.pane-list')?.scrollTop ?? 0, page: window.scrollY } : undefined;
   drawnView = key;
   const current = vault();
-  const options = overview!.vaults.map(v => `<option value="${escape(v.id)}" ${v.id === vaultId ? 'selected' : ''}>${escape(v.name)}${v.enabled ? '' : ` (${t('tabularius.off')})`}</option>`).join('');
+  const options = overview!.vaults.map(v => `<option value="${escape(v.id)}" ${v.id === vaultId ? 'selected' : ''}>${v.enabled ? escape(v.name) : t('tabularius.vaultOff', { name: escape(v.name) })}</option>`).join('');
   const list = conversations.map(c => `<button class="conversation" data-id="${escape(c.id)}" ${c.id === conversationId && view === 'chat' ? 'aria-current="page"' : ''}><span>${escape(c.title)}</span><small>${formatDate(c.updatedAt)}</small></button>`).join('');
   app.innerHTML = `<div class="pane assist"><aside><div class="pane-head">${overview!.vaults.length ? `<select id="vault" aria-label="${t('tabularius.vault')}">${options}</select>` : ''}${current?.enabled ? `<button id="new" class="primary">${t('tabularius.newChat')}</button>` : ''}</div>
     ${current?.enabled ? `<nav class="pane-list" aria-label="${t('tabularius.conversations')}">${list || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`}</nav><nav class="pane-foot"><button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="memories" ${view === 'memories' ? 'aria-current="page"' : ''}>${t('tabularius.memories')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button></nav>` : ''}</aside>
@@ -149,7 +156,7 @@ function shell(content: string) {
   for (const item of app.querySelectorAll<HTMLButtonElement>('.conversation')) item.addEventListener('click', () => void run(() => openConversation(item.dataset.id!)));
 }
 async function openConversation(id: string) {
-  const loaded = await api<{ id: string; messages: Entry[] } & ChatSettings>(`/tabularius/conversations/${id}`);
+  const loaded = await api<{ id: string; messages: Entry[] } & ChatSettings>(`/tabularius/conversations/${encodeURIComponent(id)}`);
   view = 'chat'; conversationId = loaded.id; entries = loaded.messages; chat = { recipe: loaded.recipe, prompt: loaded.prompt, params: loaded.params ?? {} }; draw();
 }
 /** Saves the conversation's settings, or keeps them for the first message of a new conversation. */
@@ -157,7 +164,7 @@ async function saveChat(next: Partial<ChatSettings>) {
   const before = recipeOf(chat.recipe);
   chat = { ...chat, ...next };
   if (conversationId) {
-    const saved = await api<ChatSettings>(`/tabularius/conversations/${conversationId}`, 'PATCH', next);
+    const saved = await api<ChatSettings>(`/tabularius/conversations/${encodeURIComponent(conversationId)}`, 'PATCH', next);
     chat = { recipe: saved.recipe, prompt: saved.prompt, params: saved.params ?? {} };
   }
   // Adjustments made for another provider do not travel with a switch of recipe.
@@ -218,7 +225,7 @@ function drawEnable(current: VaultStatus) {
     <button class="primary" type="submit">${t('tabularius.enable')}</button></form></div>`);
   form('enable', async data => {
     message(t('tabularius.enabling'));
-    await api(`/tabularius/vaults/${vaultId}`, 'POST', { passphrase: data.get('passphrase'), confirm: data.get('confirm') === 'on', excluded: data.get('excluded'), masks: data.get('masks') });
+    await api(`/tabularius/vaults/${encodeURIComponent(vaultId)}`, 'POST', { passphrase: data.get('passphrase'), confirm: data.get('confirm') === 'on', excluded: data.get('excluded'), masks: data.get('masks') });
     await refresh(); await openVault();
   });
 }
@@ -288,11 +295,11 @@ function drawSettings(current: VaultStatus) {
   document.getElementById('mode')!.addEventListener('change', event => void run(async () => {
     const select = event.target as HTMLSelectElement;
     if (select.value === 'full' && !await confirmAction({ title: t('tabularius.mode.full'), body: t('tabularius.confirmFull'), action: t('tabularius.mode.full'), danger: true })) { select.value = current.mode ?? 'read-only'; return; }
-    await api(`/tabularius/vaults/${vaultId}/mode`, 'PUT', { mode: select.value });
+    await api(`/tabularius/vaults/${encodeURIComponent(vaultId)}/mode`, 'PUT', { mode: select.value });
     await refresh(); message(t('tabularius.saved'));
   }));
   document.getElementById('web')?.addEventListener('change', event => void run(async () => {
-    await api(`/tabularius/vaults/${vaultId}/web`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
+    await api(`/tabularius/vaults/${encodeURIComponent(vaultId)}/web`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
     await refresh(); message(t('tabularius.saved'));
   }));
   form('add-host', async data => {
@@ -304,45 +311,45 @@ function drawSettings(current: VaultStatus) {
     item.addEventListener('submit', event => {
       event.preventDefault();
       const data = new FormData(item);
-      void run(async () => { await api(`/tabularius/hosts/${id}`, 'PUT', { policy: data.get('policy'), commands: data.get('commands') }); await loadHosts(); draw(); message(t('tabularius.saved')); });
+      void run(async () => { await api(`/tabularius/hosts/${encodeURIComponent(id)}`, 'PUT', { policy: data.get('policy'), commands: data.get('commands') }); await loadHosts(); draw(); message(t('tabularius.saved')); });
     });
-    item.querySelector('[data-check]')!.addEventListener('click', () => void run(async () => { await api(`/tabularius/hosts/${id}/check`, 'POST'); await loadHosts(); draw(); message(t('tabularius.hostChecked')); }));
+    item.querySelector('[data-check]')!.addEventListener('click', () => void run(async () => { await api(`/tabularius/hosts/${encodeURIComponent(id)}/check`, 'POST'); await loadHosts(); draw(); message(t('tabularius.hostChecked')); }));
     item.querySelector('[data-remove]')!.addEventListener('click', () => void run(async () => {
       if (!await confirmAction({ title: t('tabularius.removeHost'), body: t('tabularius.confirmRemoveHost'), action: t('tabularius.removeHost'), danger: true })) return;
-      await api(`/tabularius/hosts/${id}`, 'DELETE'); await loadHosts(); draw();
+      await api(`/tabularius/hosts/${encodeURIComponent(id)}`, 'DELETE'); await loadHosts(); draw();
     }));
   }
   form('vault-prompt', async data => {
-    await api(`/tabularius/vaults/${vaultId}/prompt`, 'PUT', { prompt: data.get('prompt') });
+    await api(`/tabularius/vaults/${encodeURIComponent(vaultId)}/prompt`, 'PUT', { prompt: data.get('prompt') });
     await refresh(); message(t('tabularius.promptSaved'));
   });
   document.getElementById('import-prompt')!.addEventListener('click', () => void run(async () => {
-    const { prompt } = await api<{ prompt: string }>(`/tabularius/vaults/${vaultId}/prompt/import`, 'POST', {});
+    const { prompt } = await api<{ prompt: string }>(`/tabularius/vaults/${encodeURIComponent(vaultId)}/prompt/import`, 'POST', {});
     document.querySelector<HTMLTextAreaElement>('#vault-prompt textarea')!.value = prompt;
     message(t('tabularius.imported'));
   }));
   document.getElementById('preview')!.addEventListener('toggle', event => void run(async () => {
     if (!(event.target as HTMLDetailsElement).open) return;
-    const preview = await api<{ fixed: string; server: string; vault: string; recipe: string }>(`/tabularius/vaults/${vaultId}/prompt`);
+    const preview = await api<{ fixed: string; server: string; vault: string; recipe: string }>(`/tabularius/vaults/${encodeURIComponent(vaultId)}/prompt`);
     document.querySelector('#preview .preview-body')!.innerHTML = [[t('tabularius.previewServer'), preview.server], [t('tabularius.previewFixed'), preview.fixed], [t('tabularius.previewVault'), preview.vault], [t('tabularius.previewRecipe'), preview.recipe]]
       .map(([title, text]) => `<h4>${escape(title)}</h4><pre class="prompt-text">${escape(text || '—')}</pre>`).join('');
   }));
   document.getElementById('vault-recipe')!.addEventListener('change', event => void run(async () => {
     const value = (event.target as HTMLSelectElement).value;
-    await api(`/tabularius/vaults/${vaultId}/recipe`, 'PUT', { recipe: value || null });
+    await api(`/tabularius/vaults/${encodeURIComponent(vaultId)}/recipe`, 'PUT', { recipe: value || null });
     await refresh(); message(t('tabularius.saved'));
   }));
   document.getElementById('knowledge')?.addEventListener('change', event => void run(async () => {
-    await api(`/tabularius/vaults/${vaultId}/knowledge`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
+    await api(`/tabularius/vaults/${encodeURIComponent(vaultId)}/knowledge`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
     await refresh(); message(t('tabularius.saved'));
   }));
   form('rules', async data => {
-    await api(`/tabularius/vaults/${vaultId}/rules`, 'PUT', { excluded: data.get('excluded'), masks: data.get('masks') });
+    await api(`/tabularius/vaults/${encodeURIComponent(vaultId)}/rules`, 'PUT', { excluded: data.get('excluded'), masks: data.get('masks') });
     await refresh(); message(t('tabularius.saved'));
   });
   document.getElementById('disable')!.addEventListener('click', () => void run(async () => {
     if (!await confirmAction({ title: t('tabularius.disable'), body: t('tabularius.confirmDisable', { name: current.name }), action: t('tabularius.disable'), danger: true, confirmName: current.name })) return;
-    await api(`/tabularius/vaults/${vaultId}`, 'DELETE');
+    await api(`/tabularius/vaults/${encodeURIComponent(vaultId)}`, 'DELETE');
     view = 'chat'; await refresh(); await openVault();
   }));
 }
@@ -361,20 +368,20 @@ function drawMemories() {
   for (const item of document.querySelectorAll<HTMLFormElement>('form.memory')) {
     item.addEventListener('submit', event => {
       event.preventDefault();
-      void run(async () => { await api(`/tabularius/memories/${item.dataset.id}`, 'PUT', { content: new FormData(item).get('content') }); await showMemories(); message(t('tabularius.saved')); });
+      void run(async () => { await api(`/tabularius/memories/${encodeURIComponent(item.dataset.id!)}`, 'PUT', { content: new FormData(item).get('content') }); await showMemories(); message(t('tabularius.saved')); });
     });
     item.querySelector('[data-delete]')!.addEventListener('click', () => void run(async () => {
       if (!await confirmAction({ title: t('tabularius.deleteMemory'), body: t('tabularius.confirmDeleteMemory'), action: t('tabularius.deleteMemory'), danger: true })) return;
-      await api(`/tabularius/memories/${item.dataset.id}`, 'DELETE'); await showMemories();
+      await api(`/tabularius/memories/${encodeURIComponent(item.dataset.id!)}`, 'DELETE'); await showMemories();
     }));
   }
 }
 async function showProposals() {
-  proposals = await api<ProposalSummary[]>(`/tabularius/vaults/${vaultId}/proposals`);
+  proposals = await api<ProposalSummary[]>(`/tabularius/vaults/${encodeURIComponent(vaultId)}/proposals`);
   view = 'proposals'; draw();
 }
 async function showProposal(id: string) {
-  proposal = await api<ProposalDetail>(`/tabularius/proposals/${id}`);
+  proposal = await api<ProposalDetail>(`/tabularius/proposals/${encodeURIComponent(id)}`);
   view = 'proposal'; draw();
 }
 function drawProposals() {
@@ -395,27 +402,27 @@ function drawProposal(detail: ProposalDetail) {
   shell(`<header class="page-head"><div><p class="eyebrow">${t('tabularius.proposal')} ${statusBadge(detail.status)}</p><h1>${escape(detail.title)}</h1>
       <p>${escape(detail.summary)}</p><small>${t('tabularius.fileCount', { count: detail.files.length })} · ${formatDate(detail.createdAt)}</small></div>
       <div class="actions"><button id="chat">${t('tabularius.backToChat')}</button>${pending ? `<button id="discard">${t('tabularius.discard')}</button><button id="apply" class="primary">${t('tabularius.apply')}</button>` : ''}</div></header>
-    ${detail.error && pending ? `<div class="notice error">${t('tabularius.applyFailed')}<ul>${detail.error.split('\n').map(line => { const [kind, path] = line.split('\t'); return `<li>${path === undefined ? escape(kind) : t(`tabularius.problem.${kind as 'missing' | 'changed' | 'exists'}`, { path: escape(path) })}</li>`; }).join('')}</ul></div>` : ''}
+    ${detail.error && pending ? `<div class="notice error">${t('tabularius.applyFailed')}<ul>${detail.error.split('\n').map(line => { const [kind, path] = line.split('\t'); return `<li>${path === undefined ? escape(kind) : (hasMessage(`tabularius.problem.${kind}`) ? t(`tabularius.problem.${kind as 'missing'}`, { path: escape(path) }) : `${escape(kind)}: ${escape(path)}`)}</li>`; }).join('')}</ul></div>` : ''}
     ${pending && detail.files.length > 1 ? `<p class="notice">${t('tabularius.pauseEditing')}</p>` : ''}
     <div class="card proposal">${detail.files.map(fileHtml).join('')}</div>`);
   document.getElementById('chat')!.addEventListener('click', () => void run(async () => {
-    const loaded = await api<{ id: string; messages: Entry[] }>(`/tabularius/conversations/${detail.conversationId}`);
+    const loaded = await api<{ id: string; messages: Entry[] }>(`/tabularius/conversations/${encodeURIComponent(detail.conversationId)}`);
     view = 'chat'; conversationId = loaded.id; entries = loaded.messages; draw();
   }));
   document.getElementById('discard')?.addEventListener('click', () => void run(async () => {
-    await api(`/tabularius/proposals/${detail.id}/discard`, 'POST');
+    await api(`/tabularius/proposals/${encodeURIComponent(detail.id)}/discard`, 'POST');
     await showProposal(detail.id); message(t('tabularius.discardedMessage'));
   }));
   document.getElementById('apply')?.addEventListener('click', () => void run(async () => {
     if (!await confirmAction({ title: t('tabularius.apply'), body: t('tabularius.confirmApply', { count: detail.files.length }), action: t('tabularius.apply') })) return;
-    try { await api(`/tabularius/proposals/${detail.id}/apply`, 'POST'); } catch (error) { await showProposal(detail.id); throw error; }
+    try { await api(`/tabularius/proposals/${encodeURIComponent(detail.id)}/apply`, 'POST'); } catch (error) { await showProposal(detail.id); throw error; }
     await showProposal(detail.id); message(t('tabularius.appliedMessage'));
   }));
 }
 
 function drawChat(current: VaultStatus) {
   const title = conversations.find(c => c.id === conversationId)?.title ?? (entries.length ? t('tabularius.newChat') : '');
-  const composer = `<form id="ask" class="composer"><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${t('tabularius.ask')}" aria-label="${t('tabularius.ask')}" required ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></form>`;
+  const composer = `<form id="ask" class="composer"><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${escape(t('tabularius.ask'))}" aria-label="${escape(t('tabularius.ask'))}" title="${escape(t('tabularius.askHint'))}" required ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></form>`;
   // A new conversation starts in the middle of the page; once it has messages the box moves below them.
   const picker = overview!.recipes.length ? `<select id="chat-recipe" class="compact" aria-label="${t('tabularius.recipe')}" title="${escape(recipeOf(chat.recipe)?.modelName ?? '')}">${recipeOptions(chat.recipe, chat.recipe ? undefined : t('tabularius.noModel'))}</select><button id="chat-settings" type="button">${t('tabularius.chatSettings')}</button>` : '';
   shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${picker}${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
@@ -428,12 +435,13 @@ function drawChat(current: VaultStatus) {
   document.getElementById('chat-settings')?.addEventListener('click', chatSettings);
   document.getElementById('delete')?.addEventListener('click', () => void run(async () => {
     if (!await confirmAction({ title: t('tabularius.deleteChat'), body: t('tabularius.confirmDeleteChat'), action: t('tabularius.deleteChat'), danger: true })) return;
-    await api(`/tabularius/conversations/${conversationId}`, 'DELETE');
+    await api(`/tabularius/conversations/${encodeURIComponent(conversationId!)}`, 'DELETE');
     conversations = conversations.filter(c => c.id !== conversationId); conversationId = undefined; entries = []; newChat(); draw();
   }));
   const textarea = document.querySelector<HTMLTextAreaElement>('#ask textarea')!;
   textarea.addEventListener('keydown', event => {
-    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); (textarea.form as HTMLFormElement).requestSubmit(); }
+    // Enter sends and Shift+Enter starts a new line; Enter that confirms an input method's composition does neither.
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); (textarea.form as HTMLFormElement).requestSubmit(); }
   });
   document.getElementById('ask')!.addEventListener('submit', event => {
     event.preventDefault();
@@ -453,7 +461,7 @@ async function ask(text: string) {
   const update = () => { const node = target(); if (node) node.outerHTML = entryHtml({ ...answer, text: answer.text || t('tabularius.working') }); const log = document.getElementById('log'); if (log) log.scrollTop = log.scrollHeight; };
   update();
   try {
-    const response = await fetch(conversationId ? `/api/v1/tabularius/conversations/${conversationId}/messages` : `/api/v1/tabularius/vaults/${vaultId}/conversations`, {
+    const response = await fetch(conversationId ? `/api/v1/tabularius/conversations/${encodeURIComponent(conversationId)}/messages` : `/api/v1/tabularius/vaults/${encodeURIComponent(vaultId)}/conversations`, {
       method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': state.session!.csrf }, body: JSON.stringify(conversationId ? { message: text } : { message: text, recipe: chat.recipe || undefined, prompt: chat.prompt, params: chat.params }),
     });
     if (!response.ok) throw new ApiError(response.status, serverError((await response.json()).error));
@@ -496,8 +504,10 @@ document.addEventListener('click', event => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-approve],[data-deny]');
   if (!button) return;
   const id = button.dataset.approve ?? button.dataset.deny!;
-  button.disabled = true;
-  void run(() => api(`/tabularius/approvals/${id}`, 'POST', { approved: Boolean(button.dataset.approve) }));
+  if (answered.has(id)) return;
+  answered.add(id);
+  for (const other of document.querySelectorAll<HTMLButtonElement>(`[data-approve="${CSS.escape(id)}"],[data-deny="${CSS.escape(id)}"]`)) other.disabled = true;
+  void run(() => api(`/tabularius/approvals/${encodeURIComponent(id)}`, 'POST', { approved: Boolean(button.dataset.approve) }));
 });
 
 /** Draws Tabularius into the shell's content area; `?vault=` and `?conversation=` select what opens. */
@@ -507,6 +517,7 @@ export async function renderTabularius(content: HTMLElement) {
   if (query.get('vault')) vaultId = query.get('vault')!;
   view = 'chat';
   await load();
+  // Only a conversation of this vault that the server listed for this user opens from the address.
   const conversation = query.get('conversation');
-  if (conversation) await openConversation(conversation);
+  if (conversation && conversations.some(c => c.id === conversation)) await openConversation(conversation);
 }

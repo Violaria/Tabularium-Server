@@ -151,6 +151,15 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       conversations.forEach((c, i) => db.prepare('UPDATE tabularius_conversations SET recipe=? WHERE id=?').run(ids[vaults.length + i], c.id));
     }
   }
+  /** A vault's mode, never above the server's current limit (the limit may have been lowered since the mode was chosen). */
+  const modeOf = (vaultId: string): Mode => {
+    const mode = row(vaultId)!.mode;
+    const limit = settings.limits().modeLimit;
+    return MODES.indexOf(mode) > MODES.indexOf(limit) ? limit : mode;
+  };
+  /** SSH reaches the administrators' own machines, so only vaults owned by an administrator get it. */
+  const adminVault = (vaultId: string) =>
+    Boolean(db.prepare("SELECT 1 FROM vaults v JOIN users u ON u.id=v.owner_id WHERE v.id=? AND u.role='admin' AND u.disabled=0").get(vaultId));
   /** The recipe a conversation answers with: its own, else the vault's, else the server's default. */
   const recipeFor = (conversation: Pick<Conversation, 'recipe' | 'vault_id'>) =>
     settings.usableRecipe(conversation.recipe) ?? settings.usableRecipe(row(conversation.vault_id)?.recipe) ?? settings.usableRecipe(settings.defaultRecipe());
@@ -241,7 +250,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     const counts = db.prepare('SELECT (SELECT count(*) FROM tabularius_files WHERE vault_id=?) AS notes, (SELECT count(*) FROM tabularius_chunks WHERE vault_id=?) AS chunks').get(vault.id, vault.id) as { notes: number; chunks: number };
     return { id: vault.id, name: vault.name, enabled: true, enabledAt: current.enabled_at, excluded: current.excluded, masks: current.masks,
       running: Boolean(client?.running), replicated: Boolean(client?.replicated), restarts: client?.restarts ?? 0, deviceRevoked: Boolean(device.revoked),
-      knowledge: Boolean(current.knowledge), web: Boolean(current.web), mode: current.mode, prompt: current.prompt, recipe: current.recipe, indexError: indexErrors.get(vault.id) ?? null, log: client?.log.slice(-8) ?? [], ...counts };
+      knowledge: Boolean(current.knowledge), web: Boolean(current.web), mode: modeOf(vault.id), prompt: current.prompt, recipe: current.recipe, indexError: indexErrors.get(vault.id) ?? null, log: client?.log.slice(-8) ?? [], ...counts };
   }
 
   // Tools: read-only access to the working copy, filtered and masked before anything leaves the server.
@@ -280,7 +289,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       }
       if (typeof call.input.url !== 'string') return 'Error: url must be a string.';
       if (++answer.fetches > web.options.maxUses * 2) return 'Error: the fetch limit for this answer is reached.';
-      const mode = row(vaultId)!.mode;
+      const mode = modeOf(vaultId);
       let url;
       try { url = new URL(call.input.url); url.hash = ''; } catch { return 'Error: invalid URL.'; }
       if (mode !== 'full' && !seenUrls(conversation.id).has(url.href)) return 'Error: only URLs that appeared in the conversation (user messages, notes, search results) can be fetched.';
@@ -303,6 +312,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         throw error;
       }
     }
+    if ((call.name === 'list_hosts' || call.name === 'run_command') && !adminVault(vaultId)) return 'Error: SSH is only available in vaults owned by an administrator.';
     if (call.name === 'list_hosts') {
       const hosts = db.prepare('SELECT * FROM tabularius_hosts ORDER BY name').all() as unknown as Host[];
       return hosts.length ? hosts.map(h => `${h.name} (${h.username}@${h.address}): ${h.policy === 'forbidden' ? 'forbidden, never connected' : h.policy === 'authorize' ? 'each command needs the user\'s approval' : 'allowed'}`).join('\n') : 'No hosts are registered.';
@@ -310,7 +320,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     if (call.name === 'run_command') {
       const host = hostByName(String(call.input.host ?? ''));
       const command = typeof call.input.command === 'string' ? call.input.command.trim() : '';
-      const mode = row(vaultId)!.mode;
+      const mode = modeOf(vaultId);
       const id = randomUUID();
       const record = (status: string, extra: { exit_code?: number | null; reason?: string; approved_by?: string } = {}) => {
         db.prepare(`INSERT INTO tabularius_commands(id,conversation_id,user_id,host_id,command,mode,status,exit_code,reason,approved_by,created_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
@@ -345,7 +355,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     }
     const box = sandbox();
     if (call.name === 'run_sandbox' && box) {
-      const mode = row(vaultId)!.mode;
+      const mode = modeOf(vaultId);
       const id = randomUUID();
       const command = typeof call.input.command === 'string' ? call.input.command : '';
       const record = (status: string, exitCode: number | null, reason: string | null) => {
@@ -353,6 +363,8 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
           .run(id, conversation.id, conversation.user_id, 'sandbox', `[${String(call.input.image)}${call.input.network ? ', network' : ''}] ${command}`, mode, status, exitCode, reason, null, Date.now(), Date.now());
         audit(conversation.user_id, 'tabularius.sandbox', conversation.id);
       };
+      // Only the images listed in the LLM settings; the sandbox runs whatever it is sent.
+      if (!box.images.includes(String(call.input.image))) { record('refused', null, 'image not listed'); return `Error: refused: image ${String(call.input.image)} is not available; available: ${box.images.join(', ')}.`; }
       if (call.input.network === true && mode !== 'full') { record('refused', null, 'network outside full mode'); return 'Error: refused: the sandbox can use the network only in full permission mode.'; }
       const response = await fetch(`${box.url.replace(/\/+$/, '')}/run`, {
         method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${box.token}` },
@@ -488,7 +500,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         // The last round answers without tools, so a model that keeps searching still gives an answer.
         const final = round >= MAX_TOOL_ROUNDS;
         const web = webOn(conversation.vault_id, provider);
-        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() ? SSH_TOOLS : []), ...(sandbox() ? [sandboxTool(sandbox()!.images)] : []), ...(settings.knowledgeConfigured() && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
+        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() && adminVault(conversation.vault_id) ? SSH_TOOLS : []), ...(sandbox() ? [sandboxTool(sandbox()!.images)] : []), ...(settings.knowledgeConfigured() && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
           ...(web && !provider.nativeWeb ? WEB_TOOLS : [])];
         const turn = await provider.turn(system, tools, loadMessages(conversation.id), delta => send('text', { text: delta }), {
           web: web && provider.nativeWeb ? webConfig()!.options : undefined, params, answerOnly: final,
@@ -570,7 +582,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   const summaryOf = (p: Proposal) => ({ id: p.id, conversationId: p.conversation_id, title: p.title, summary: p.summary, status: p.status, error: p.error, createdAt: p.created_at, decidedAt: p.decided_at });
 
   return {
-    /** What every user's Tabularius page needs: models offered, parameter rules and the server's parameters. */
+    /** What every user's Tabularius page needs: the recipes with the default one, and the parameter rules. */
     overview() {
       return { recipes: recipeList(), defaultRecipe: settings.defaultRecipe(), rules: PARAMS,
         embeddings: Boolean(settings.embedder()), knowledge: settings.knowledgeConfigured(), web: Boolean(webConfig()), webSearch: Boolean(webConfig()?.searxng) };
@@ -611,8 +623,6 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         return fail(502, `${name}: ${(error as Error).message.slice(0, 300)}`);
       }
     },
-    /** A model's name for people, or '' when it is not offered. */
-    modelName: (id: string) => settings.models().find(model => model.id === id)?.name ?? '',
     async datasets(url: string) {
       try { return await settings.datasets(url); } catch (error) { return fail(502, `RAGFlow: ${(error as Error).message.slice(0, 300)}`); }
     },
@@ -737,11 +747,12 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     /** A conversation's recipe, extra prompt and adjusted parameters; they apply from its next answer. */
     configure(id: string, user: User, data: Record<string, unknown>) {
       const conversation = conversationFor(id, user);
-      if (data.recipe !== undefined && (typeof data.recipe !== 'string' || !settings.usableRecipe(data.recipe))) fail(400, 'Recipe not available');
+      // null goes back to following the vault's recipe.
+      if (data.recipe !== undefined && data.recipe !== null && (typeof data.recipe !== 'string' || !settings.usableRecipe(data.recipe))) fail(400, 'Recipe not available');
       if (data.prompt !== undefined && (typeof data.prompt !== 'string' || data.prompt.length > 8000)) fail(400, 'Invalid prompt');
       const params = data.params === undefined ? conversation.params : JSON.stringify(checkedParams(data.params));
       db.prepare('UPDATE tabularius_conversations SET recipe=?, prompt=?, params=? WHERE id=?')
-        .run((data.recipe as string | undefined) ?? conversation.recipe, (data.prompt as string | undefined) ?? conversation.prompt, params, id);
+        .run(data.recipe === undefined ? conversation.recipe : data.recipe as string | null, (data.prompt as string | undefined) ?? conversation.prompt, params, id);
       return settingsOf(conversationFor(id, user));
     },
     setWeb(vaultId: string, enabled: boolean) {

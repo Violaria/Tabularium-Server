@@ -2,7 +2,7 @@
 // with the default one, the server's default prompt, and the knowledge base (RAGFlow). Keys are shown only by their last
 // four characters.
 import { t } from './i18n.js';
-import { api, ApiError, confirmAction, escape, message, tip } from './core.js';
+import { api, ApiError, confirmAction, escape, message, run, tip } from './core.js';
 import { FormError, modelName, modelOptions, paramForm, PROVIDER_NAMES as NAMES, type ModelOption, type Params, type ProviderName, type Rule } from './params.js';
 
 interface ModelEntry { id: string; name: string; context?: number }
@@ -18,6 +18,9 @@ interface SettingsView {
 }
 interface Overview { rules: Record<ProviderName, Record<string, Rule>> }
 const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
+/** Recipes and providers open in the page: a redraw after saving keeps them open. */
+const openRecipes = new Set<string>();
+const openProviders = new Set<ProviderName>();
 
 export async function renderAiSettings(body: HTMLElement) {
   let view: SettingsView; let overview: Overview;
@@ -31,16 +34,34 @@ export async function renderAiSettings(body: HTMLElement) {
     view = await api<SettingsView>('/tabularius/settings', 'PUT', data);
     message(done);
   };
-  const providerCard = (name: ProviderName) => {
+  /** One added provider: its key (and vLLM address), a test, and the models chosen from its list. */
+  const providerItem = (name: ProviderName) => {
     const item = view.providers[name];
-    const keyField = `<label>${name === 'vllm' ? `<span>${t('ai.keyOptional')}${tip(t('ai.keyOptionalHint'))}</span>` : t('ai.key')}<input type="password" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label>`
-      + (item.keySet ? `<label class="check"><input type="checkbox" name="clear"> ${t('ai.clearKey')}</label>` : '');
-    return `<form class="card stack provider" data-provider="${name}"><div class="provider-head"><h3>${NAMES[name]}</h3><span class="badge ${item.configured ? '' : 'off'}">${item.configured ? t('ai.ready') : t('ai.notSet')}</span></div>
-      ${name === 'vllm' ? `<label><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" value="${escape(item.url)}" placeholder="http://vllm:8000/v1"></label>` : ''}${keyField}
-      <fieldset class="model-list"><legend>${t('ai.models')}${item.configured ? `<button type="button" class="link" data-refresh>${t('ai.refreshModels')}</button>` : ''}</legend>
-        <div data-models>${item.configured ? `<small>${t('ai.loadingModels')}</small>` : `<small>${t('ai.modelsAfterKey')}</small>`}</div></fieldset>
-      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form>`;
+    const summary = [item.keySet ? t('ai.keySet', { hint: item.keyHint }) : name === 'vllm' ? escape(item.url) : '', t('ai.modelCount', { count: item.models.length })].filter(Boolean).join(' · ');
+    return `<details class="llm-recipe llm-provider" data-provider="${name}"${openProviders.has(name) ? ' open' : ''}><summary><strong>${NAMES[name]}</strong><span class="muted">${summary}</span></summary>
+      <form class="stack" data-key>
+        <div class="recipe-fields">${name === 'vllm' ? `<label><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" value="${escape(item.url)}" placeholder="http://vllm:8000/v1"></label>` : ''}
+          <label>${name === 'vllm' ? `<span>${t('ai.keyOptional')}${tip(t('ai.keyOptionalHint'))}</span>` : t('ai.key')}<input type="password" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label></div>
+        <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" data-test-provider>${t('ai.testConnection')}</button><span class="test-status" aria-live="polite"></span>
+          <span class="actions-end">${item.keySet ? `<button type="button" data-clear-key>${t('ai.clearKey')}</button>` : ''}<button type="button" class="danger" data-remove-provider>${t('ai.removeProvider')}</button></span></div>
+      </form>
+      <fieldset class="model-list"><legend>${t('ai.models')}${tip(t('ai.modelsHint'))}</legend>
+        <div data-models>${item.models.length ? modelRows(item.models, item.models) : `<small>${t('ai.noModelsChosen')}</small>`}</div>
+        <div class="actions"><button type="button" data-fetch>${t('ai.fetchModels')}</button><button type="button" data-test-models>${t('ai.testModels')}</button>
+          <span class="actions-end"><button class="primary" type="button" data-save-models>${t('ai.saveModels')}</button></span></div></fieldset></details>`;
   };
+  /** Model ticks: `offered` as listed (or the chosen ones before the list is fetched), ticked when chosen; a test result shows at the row's end. */
+  const modelRows = (offered: ModelEntry[], chosen: ModelEntry[]) => offered.map(model => {
+    const on = chosen.some(item => item.id === model.id);
+    return `<div class="model-row" data-model="${escape(model.id)}"><label class="check"><input type="checkbox" name="model" value="${escape(model.id)}" data-name="${escape(model.name)}"${model.context ? ` data-context="${model.context}"` : ''} ${on ? 'checked' : ''}> <span>${escape(model.name)}${model.name !== model.id ? ` <small class="mono">${escape(model.id)}</small>` : ''}</span></label><span class="model-test" aria-live="polite"></span></div>`;
+  }).join('');
+  /** The form for adding a provider: its type (the ones not added yet), then key and address. */
+  const newProvider = (available: ProviderName[]) => `<details class="llm-recipe llm-provider" data-new open><summary><strong>${t('ai.newProvider')}</strong></summary>
+    <form class="stack" data-add><div class="recipe-fields">
+      <label>${t('ai.providerType')}<select name="type">${available.map(name => `<option value="${name}">${NAMES[name]}</option>`).join('')}</select></label>
+      <label data-for="vllm" ${available[0] === 'vllm' ? '' : 'hidden'}><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" placeholder="http://vllm:8000/v1"></label>
+      <label><span>${t('ai.key')}</span><input type="password" name="key" autocomplete="off"></label></div>
+      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" data-cancel>${t('ai.recipeCancel')}</button></div></form></details>`;
   const datasetList = (datasets: { id: string; name: string; description: string }[], chosen: string[]) => datasets.map(item =>
     `<label class="check dataset"><input type="checkbox" name="dataset" value="${escape(item.id)}" ${chosen.includes(item.id) ? 'checked' : ''}> <span><strong>${escape(item.name)}</strong><small>${escape(item.description)}</small></span></label>`).join('');
   /** The models ticked under providers that are set up: what a recipe can be based on. */
@@ -49,7 +70,7 @@ export async function renderAiSettings(body: HTMLElement) {
   const recipeItem = (recipe: RecipeView, index: number) => {
     const available = models.some(model => model.id === recipe.model);
     const isDefault = recipe.id !== undefined && recipe.id === view.defaultRecipe;
-    return `<details class="llm-recipe" data-index="${index}"${recipe.id ? '' : ' open'}><summary><strong>${escape(recipe.name || t('ai.recipeNew'))}</strong>`
+    return `<details class="llm-recipe" data-index="${index}"${!recipe.id || openRecipes.has(recipe.id) ? ' open' : ''}><summary><strong>${escape(recipe.name || t('ai.recipeNew'))}</strong>`
       + `<span class="muted">${escape(available ? `${NAMES[models.find(model => model.id === recipe.model)!.provider]} · ${modelName(models, recipe.model)}` : recipe.model)}</span>${isDefault ? `<span class="badge">${t('ai.recipeDefault')}</span>` : ''}`
       + `${recipe.model && !available ? `<span class="badge warn">${t('ai.recipeUnavailable')}</span>` : ''}</summary>
       <form class="stack"><div class="recipe-fields">
@@ -64,8 +85,9 @@ export async function renderAiSettings(body: HTMLElement) {
   const k = view.knowledge;
   // Drawn again after saving: stay where the page was.
   const scrolled = window.scrollY;
-  body.innerHTML = `<section class="card"><h2>${t('ai.providersTitle')}${tip(t('ai.providersDesc'))}</h2></section>
-    <div class="providers">${PROVIDERS.map(providerCard).join('')}</div>
+  const added = PROVIDERS.filter(name => view.providers[name].configured);
+  body.innerHTML = `<section class="card"><div class="card-head"><h2>${t('ai.providersTitle')}${tip(t('ai.providersDesc'))}</h2>${added.length < PROVIDERS.length ? `<button type="button" id="add-provider">${t('ai.addProvider')}</button>` : ''}</div>
+      <div id="providers" class="llm-recipes">${added.length ? added.map(providerItem).join('') : `<p class="muted">${t('ai.noProviders')}</p>`}</div></section>
     <section class="card"><div class="card-head"><h2>${t('ai.recipesTitle')}${tip(t('ai.recipesDesc'))}</h2>${models.length ? `<button type="button" id="add-recipe">${t('ai.recipeAdd')}</button>` : ''}</div>
       <div id="recipes" class="llm-recipes">${view.recipes.length ? view.recipes.map(recipeItem).join('') : `<p class="muted">${models.length ? t('ai.recipesNone') : t('ai.recipesNeedModels')}</p>`}</div></section>
     <section class="card"><h2>${t('ai.promptTitle')}${tip(t('ai.promptDesc'))}</h2><form id="server-prompt" class="stack"><textarea name="prompt" rows="16" spellcheck="false">${escape(view.prompt)}</textarea>
@@ -105,7 +127,6 @@ export async function renderAiSettings(body: HTMLElement) {
       </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form></section>`;
 
   window.scrollTo(0, scrolled);
-  const run = (action: () => Promise<void>) => action().catch(error => message(error instanceof Error ? error.message : String(error), true));
   const recipes: RecipeView[] = [...view.recipes];
   /** Saves the whole list with one recipe changed (or removed), then draws the page again where it was. */
   const saveRecipes = async (list: RecipeView[], defaultRecipe?: string) => {
@@ -116,6 +137,7 @@ export async function renderAiSettings(body: HTMLElement) {
   const bindRecipe = (item: HTMLElement) => {
     const index = Number(item.dataset.index);
     const recipe = recipes[index];
+    item.addEventListener('toggle', () => { if (recipe.id) { if ((item as HTMLDetailsElement).open) openRecipes.add(recipe.id); else openRecipes.delete(recipe.id); } });
     const recipeForm = item.querySelector('form')!;
     const select = recipeForm.querySelector<HTMLSelectElement>('select[name="model"]')!;
     const paramsRoot = item.querySelector<HTMLElement>('[data-params]')!;
@@ -148,7 +170,7 @@ export async function renderAiSettings(body: HTMLElement) {
       await saveRecipes(recipes.filter((_, i) => i !== index));
     }));
   };
-  for (const item of body.querySelectorAll<HTMLElement>('details.llm-recipe')) bindRecipe(item);
+  for (const item of body.querySelectorAll<HTMLElement>('#recipes details.llm-recipe')) bindRecipe(item);
   document.getElementById('add-recipe')?.addEventListener('click', () => {
     // One new recipe at a time.
     if (recipes.some(recipe => !recipe.id)) return;
@@ -158,44 +180,104 @@ export async function renderAiSettings(body: HTMLElement) {
     list.insertAdjacentHTML('beforeend', recipeItem(recipes[recipes.length - 1], recipes.length - 1));
     bindRecipe(list.lastElementChild as HTMLElement);
   });
-  for (const form of body.querySelectorAll<HTMLFormElement>('form.provider')) {
-    const name = form.dataset.provider as ProviderName;
-    form.addEventListener('submit', event => {
-      event.preventDefault();
-      const data = new FormData(form);
-      // The ticked models, with the names (and vLLM context lengths) the provider's list gave.
-      const item: Record<string, unknown> = { models: [...form.querySelectorAll<HTMLInputElement>('input[name="model"]:checked')].map(box =>
-        ({ id: box.value, name: box.dataset.name ?? box.value, ...(box.dataset.context ? { context: Number(box.dataset.context) } : {}) })) };
-      const key = String(data.get('key') ?? '');
-      if (data.get('clear')) item.key = ''; else if (key) item.key = key;
-      if (name === 'vllm') item.url = String(data.get('url')).trim();
-      void run(async () => { await save({ providers: { [name]: item } }); await renderAiSettings(body); message(t('ai.saved')); });
-    });
-    const list = form.querySelector<HTMLElement>('[data-models]')!;
+  const providerSave = async (name: ProviderName, item: Record<string, unknown>) => {
+    await save({ providers: { [name]: item } });
+    openProviders.add(name);
+    await renderAiSettings(body);
+    message(t('ai.saved'));
+  };
+  for (const details of body.querySelectorAll<HTMLDetailsElement>('details.llm-provider[data-provider]')) {
+    const name = details.dataset.provider as ProviderName;
     const chosen = view.providers[name].models;
+    details.addEventListener('toggle', () => { if (details.open) openProviders.add(name); else openProviders.delete(name); });
+    const keyForm = details.querySelector<HTMLFormElement>('form[data-key]')!;
+    keyForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const data = new FormData(keyForm);
+      const item: Record<string, unknown> = {};
+      const key = String(data.get('key') ?? '').trim();
+      if (key) item.key = key;
+      if (name === 'vllm') item.url = String(data.get('url')).trim();
+      void run(() => providerSave(name, item));
+    });
+    // A test reads the provider's model list with the saved key: it shows, beside the button, whether the key and address work.
+    details.querySelector('[data-test-provider]')!.addEventListener('click', event => void (async () => {
+      const button = event.currentTarget as HTMLButtonElement;
+      const status = details.querySelector<HTMLElement>('.test-status')!;
+      button.disabled = true;
+      status.innerHTML = `<span class="badge off">${t('ai.testing')}</span>`;
+      try {
+        const offered = await api<ModelEntry[]>(`/tabularius/settings/models/${name}`);
+        status.innerHTML = `<span class="badge">${escape(t('ai.testProviderOk', { count: offered.length }))}</span>`;
+      } catch (error) {
+        status.innerHTML = `<span class="badge warn" title="${escape(error instanceof Error ? error.message : String(error))}">${t('ai.testFailed')}</span>`;
+      } finally { button.disabled = false; }
+    })());
+    details.querySelector('[data-clear-key]')?.addEventListener('click', () => void run(async () => {
+      if (!await confirmAction({ title: t('ai.clearKeyTitle', { provider: NAMES[name] }), body: t('ai.clearKeyBody'), action: t('ai.clearKey'), danger: true })) return;
+      await providerSave(name, { key: '' });
+    }));
+    details.querySelector('[data-remove-provider]')!.addEventListener('click', () => void run(async () => {
+      if (!await confirmAction({ title: t('ai.removeProviderTitle', { provider: NAMES[name] }), body: t('ai.removeProviderBody'), action: t('ai.removeProvider'), danger: true })) return;
+      openProviders.delete(name);
+      await save({ providers: { [name]: { key: '', url: '', models: [] } } });
+      await renderAiSettings(body);
+      message(t('ai.saved'));
+    }));
+    const list = details.querySelector<HTMLElement>('[data-models]')!;
+    // Each ticked model answers one short request; the result shows at the end of its row.
+    details.querySelector('[data-test-models]')!.addEventListener('click', event => void run(async () => {
+      const button = event.currentTarget as HTMLButtonElement;
+      const ticked = [...list.querySelectorAll<HTMLInputElement>('input[name="model"]:checked')];
+      if (!ticked.length) { message(t('ai.testNoneTicked'), true); return; }
+      button.disabled = true;
+      try {
+        for (const box of ticked) {
+          const cell = box.closest('.model-row')!.querySelector<HTMLElement>('.model-test')!;
+          cell.innerHTML = `<span class="badge off">${t('ai.testing')}</span>`;
+          try {
+            const result = await api<{ reply: string }>('/tabularius/settings/test', 'POST', { model: `${name}/${box.value}` });
+            cell.innerHTML = `<span class="badge" title="${escape(result.reply)}">${t('ai.testPassed')}</span>`;
+          } catch (error) {
+            cell.innerHTML = `<span class="badge warn" title="${escape(error instanceof Error ? error.message : String(error))}">${t('ai.testFailed')}</span>`;
+          }
+        }
+      } finally { button.disabled = false; }
+    }));
     /** The provider's models as ticks; models chosen earlier that the provider no longer lists stay, ticked. */
-    const load = async () => {
+    details.querySelector('[data-fetch]')!.addEventListener('click', () => void run(async () => {
       list.innerHTML = `<small>${t('ai.loadingModels')}</small>`;
       let offered: ModelEntry[];
       try { offered = await api<ModelEntry[]>(`/tabularius/settings/models/${name}`); }
       catch (error) { list.innerHTML = `<small class="error-text">${escape(t('ai.modelsFailed', { error: error instanceof Error ? error.message : String(error) }))}</small>`; return; }
       const all = [...chosen.filter(model => !offered.some(item => item.id === model.id)), ...offered];
-      list.innerHTML = all.length ? all.map(model => {
-        const on = chosen.some(item => item.id === model.id);
-        return `<div class="model-row"><label class="check"><input type="checkbox" name="model" value="${escape(model.id)}" data-name="${escape(model.name)}"${model.context ? ` data-context="${model.context}"` : ''} ${on ? 'checked' : ''}> <span>${escape(model.name)}${model.name !== model.id ? ` <small class="mono">${escape(model.id)}</small>` : ''}</span></label>`
-          + (on ? `<button type="button" class="link" data-test="${escape(`${name}/${model.id}`)}">${t('ai.testShort')}</button>` : '') + '</div>';
-      }).join('') : `<small>${t('ai.noModelsListed')}</small>`;
-      for (const button of list.querySelectorAll<HTMLButtonElement>('[data-test]')) button.addEventListener('click', () => void run(async () => {
-        button.disabled = true;
-        try {
-          const result = await api<{ reply: string }>('/tabularius/settings/test', 'POST', { model: button.dataset.test });
-          message(t('ai.testOk', { model: modelName(models, button.dataset.test!), reply: result.reply }));
-        } finally { button.disabled = false; }
-      }));
-    };
-    if (view.providers[name].configured) void load();
-    form.querySelector('[data-refresh]')?.addEventListener('click', () => void load());
+      list.innerHTML = all.length ? modelRows(all, chosen) : `<small>${t('ai.noModelsListed')}</small>`;
+    }));
+    details.querySelector('[data-save-models]')!.addEventListener('click', () => void run(() => providerSave(name, {
+      models: [...list.querySelectorAll<HTMLInputElement>('input[name="model"]:checked')].map(box =>
+        ({ id: box.value, name: box.dataset.name ?? box.value, ...(box.dataset.context ? { context: Number(box.dataset.context) } : {}) })),
+    })));
   }
+  document.getElementById('add-provider')?.addEventListener('click', () => {
+    if (body.querySelector('details[data-new]')) return;
+    const list = document.getElementById('providers')!;
+    if (!list.querySelector('details')) list.innerHTML = '';
+    list.insertAdjacentHTML('afterbegin', newProvider(PROVIDERS.filter(name => !view.providers[name].configured)));
+    const fresh = list.querySelector<HTMLDetailsElement>('details[data-new]')!;
+    const addForm = fresh.querySelector<HTMLFormElement>('form[data-add]')!;
+    const type = addForm.querySelector<HTMLSelectElement>('select[name="type"]')!;
+    type.addEventListener('change', () => { addForm.querySelector<HTMLElement>('[data-for="vllm"]')!.hidden = type.value !== 'vllm'; });
+    fresh.querySelector('[data-cancel]')!.addEventListener('click', () => void renderAiSettings(body));
+    addForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const data = new FormData(addForm);
+      const name = type.value as ProviderName;
+      const key = String(data.get('key') ?? '').trim();
+      const url = String(data.get('url') ?? '').trim();
+      if (name === 'vllm' ? !url : !key) { message(name === 'vllm' ? t('ai.urlRequired') : t('ai.keyRequired'), true); return; }
+      void run(() => providerSave(name, { ...(key ? { key } : {}), ...(name === 'vllm' ? { url } : {}) }));
+    });
+  });
   const promptForm = document.getElementById('server-prompt') as HTMLFormElement;
   promptForm.addEventListener('submit', event => { event.preventDefault(); void run(() => save({ prompt: String(new FormData(promptForm).get('prompt')) })); });
   document.getElementById('restore-prompt')!.addEventListener('click', () => { promptForm.querySelector('textarea')!.value = view.defaultPrompt; });

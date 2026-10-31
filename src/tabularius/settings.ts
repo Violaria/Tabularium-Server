@@ -270,6 +270,8 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
           }
           if (item.url !== undefined) {
             if (typeof item.url !== 'string' || (item.url && !/^https?:\/\/\S+$/.test(item.url))) throw new SettingsError('Invalid address');
+            // A key belongs to its server: a new address without a new key drops the old one, so it is not sent elsewhere.
+            if (item.url.replace(/\/$/, '') !== all[name].url && item.key === undefined) { next.key = null; next.hint = ''; }
             next.url = item.url.replace(/\/$/, '');
           }
           if (item.context !== undefined) {
@@ -317,7 +319,8 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
         const previous = read<StoredEmbedding | null>('embedding', null) ?? { url: '', key: null, hint: '', model: '', batch: 64 };
         if (typeof e.url !== 'string' || (e.url && !/^https?:\/\/\S+$/.test(e.url)) || typeof e.model !== 'string' || e.model.length > 128
           || !Number.isInteger(e.batch) || (e.batch as number) < 1 || (e.batch as number) > 2048) throw new SettingsError('Invalid embedding settings');
-        embedding = { url: e.url.replace(/\/$/, ''), key: previous.key, hint: previous.hint, model: e.model, batch: e.batch as number };
+        const sameServer = e.url.replace(/\/$/, '') === previous.url;
+        embedding = { url: e.url.replace(/\/$/, ''), key: sameServer ? previous.key : null, hint: sameServer ? previous.hint : '', model: e.model, batch: e.batch as number };
         if (e.key !== undefined) {
           if (typeof e.key !== 'string' || e.key.length > 512) throw new SettingsError('Invalid key');
           embedding.key = e.key ? sealKey(e.key.trim()) : null; embedding.hint = e.key ? hintOf(e.key.trim()) : '';

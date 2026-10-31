@@ -1,20 +1,35 @@
 // The Tabularium web application: one sign-in, one shell, and the modules home, web notes, Tabularius, administration
 // and account settings. Every path of the application loads this page; the path selects the module.
 import { t, type Language } from './i18n.js';
-import { api, ApiError, applyTheme, captureLinks, connect, escape, form, icon, input, message, navigate, run, state, storedTheme, clearMessage, tip, type Session } from './core.js';
+import { api, ApiError, applyTheme, markShapes, captureLinks, chooseAction, connect, escape, form, icon, input, message, navigate, run, state, storedTheme, clearMessage, tip, type Session } from './core.js';
 import { renderHome } from './home.js';
 import { renderAdmin } from './admin.js';
 import { renderAccount } from './account.js';
 import { renderTabularius } from './tabularius.js';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
-const mark = () => `<span class="brand-mark">T</span><div><strong>Tabularium</strong><small>${t('brand.subtitle')}</small></div>`;
+const mark = () => `<span class="brand-mark"><svg viewBox="0 0 64 64" aria-hidden="true">${markShapes()}</svg></span><div><strong>Tabularium</strong><small>${t('brand.subtitle')}</small></div>`;
 const brand = () => `<div class="brand">${mark()}</div>`;
 
 type Module = 'home' | 'notes' | 'tabularius' | 'admin' | 'account';
 
 /** Web notes: a separate bundle with the sync core, loaded when the module first opens. */
-interface NotesModule { mount(target: HTMLElement): void; changeLanguage(next: Language): void; unmount(): Promise<void> }
+interface NotesModule { mount(target: HTMLElement): void; changeLanguage(next: Language): void; unmount(): Promise<void>; clearAccount(userId: string): Promise<void> }
+/** How many vaults web notes keeps in this browser for an account (records in its IndexedDB), without loading the module. */
+async function localVaults(userId: string) {
+  if (!(await indexedDB.databases()).some(db => db.name === 'tabularium-notes')) return 0;
+  return new Promise<number>(resolve => {
+    const request = indexedDB.open('tabularium-notes');
+    request.onerror = () => resolve(0);
+    request.onsuccess = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('vaults')) { db.close(); resolve(0); return; }
+      const keys = db.transaction('vaults').objectStore('vaults').getAllKeys();
+      keys.onsuccess = () => { db.close(); resolve((keys.result as string[]).filter(key => key.startsWith(`${userId}:`)).length); };
+      keys.onerror = () => { db.close(); resolve(0); };
+    };
+  });
+}
 let notes: NotesModule | undefined;
 let notesMounted = false;
 async function openNotes(content: HTMLElement) {
@@ -44,7 +59,7 @@ function moduleOf(path: string): Module {
 
 function signIn() {
   document.title = 'Tabularium';
-  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('console.signInTitle')}</h1><form id="login" class="stack">${input(t('common.username'), 'username', 'text', 'autocomplete="username"')}${input(t('common.password'), 'password', 'password', 'autocomplete="current-password"')}<button class="primary" type="submit">${t('common.signIn')}</button></form></div><small>${t('console.accountsHint')}</small></div></div>`;
+  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('console.signInTitle')}${tip(t('console.accountsHint'))}</h1><form id="login" class="stack">${input(t('common.username'), 'username', 'text', 'autocomplete="username"')}${input(t('common.password'), 'password', 'password', 'autocomplete="current-password"')}<button class="primary" type="submit">${t('common.signIn')}</button></form></div></div></div>`;
   form('login', async data => {
     state.session = await api<Session>('/web-session', 'POST', Object.fromEntries(data));
     draw();
@@ -53,7 +68,7 @@ function signIn() {
 
 /** The first sign-in replaces the initial password before any module opens. */
 function initialPassword() {
-  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('password.initialTitle')}</h1><p>${t('password.desc')}</p><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(`${t('password.new')}${tip(t('password.hint'))}`, 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<button class="primary" type="submit">${t('password.save')}</button></form></div></div></div>`;
+  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('password.initialTitle')}${tip(t('password.desc'))}</h1><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(`${t('password.new')}${tip(t('password.hint'))}`, 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<button class="primary" type="submit">${t('password.save')}</button></form></div></div></div>`;
   form('password', async data => {
     if (data.get('password') !== data.get('confirmation')) { message(t('password.mismatch'), true); return; }
     await api('/me/password', 'PUT', { currentPassword: data.get('currentPassword'), password: data.get('password') });
@@ -81,6 +96,18 @@ function frame(current: Module) {
       `<a href="${href}" data-route data-module="${module}">${icon(glyph)}<span>${label}</span></a>`).join('')}</nav><div class="account"><a href="/account/" data-route data-module="account" class="who"><span class="avatar">${escape(user.username.slice(0, 1).toUpperCase())}</span><span><strong>${escape(user.username)}</strong><small>${user.role === 'admin' ? t('role.admin') : t('role.user')}</small></span></a><button id="logout" type="button">${t('common.signOut')}</button></div></aside><main class="content" id="content"></main></div>`;
     if (kept) document.getElementById('content')!.replaceWith(kept);
     document.getElementById('logout')!.addEventListener('click', () => void run(async () => {
+      // A plain-text copy of notes left in a shared browser can be read by its next user: ask what to do with it.
+      const kept = await localVaults(user.id);
+      if (kept) {
+        const choice = await chooseAction({ title: t('signOut.title'), body: t('signOut.body', { count: kept }), choices: [
+          { value: 'keep', label: t('signOut.keep') }, { value: 'clear', label: t('signOut.clear'), danger: true }] });
+        if (!choice) return;
+        if (choice === 'clear') {
+          await leaveNotes();
+          notes ??= await import('/notes/assets/notes-module.js' as string) as NotesModule;
+          await notes.clearAccount(user.id);
+        }
+      }
       await api('/web-session', 'DELETE'); state.session = undefined; history.pushState(null, '', '/'); signIn();
     }));
   }
@@ -140,4 +167,3 @@ if ('serviceWorker' in navigator) {
   // The earlier web notes page registered its own worker under /notes/.
   void navigator.serviceWorker.getRegistrations().then(list => list.filter(r => r.scope.endsWith('/notes/')).forEach(r => void r.unregister()));
 }
-export { navigate };

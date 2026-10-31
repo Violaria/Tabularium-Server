@@ -1,10 +1,10 @@
 // Service worker of the Tabularium web application: keeps the application and web notes available without a
 // network. API and synchronisation requests are never cached.
-const CACHE = 'tabularium-app-v4';
-const SHELL = ['/app/app.html', '/app/app.css', ...['app', 'core', 'home', 'admin', 'account', 'shares', 'ai', 'params', 'server-settings', 'tabularius', 'i18n', 'messages'].map(name => `/app/${name}.js`),
+const CACHE = 'tabularium-app-v7';
+const SHELL = ['/app/app.html', '/app/app.css', '/app/icon.svg', ...['app', 'core', 'home', 'admin', 'account', 'shares', 'ai', 'params', 'server-settings', 'backups', 'tabularius', 'i18n', 'messages'].map(name => `/app/${name}.js`),
   '/notes/assets/notes-module.js', '/notes/assets/notes-module.css'];
 // Paths of the application itself: answered from the network, or with the cached application page offline.
-const PAGE = /^\/($|home$|notes(\/|$)|tabularius(\/|$)|admin(\/|$)|account(\/|$))/;
+const PAGE = /^\/($|home$|notes(\/(?!assets\/)|$)|tabularius(\/|$)|admin(\/|$)|account(\/|$))/;
 
 // Install: the application files and every web notes file the server lists (the sync core loads chunks on demand).
 self.addEventListener('install', event => {
@@ -34,8 +34,9 @@ self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) return;
   if (event.request.mode === 'navigate' && PAGE.test(url.pathname)) { event.respondWith(networkFirst(event.request, '/app/app.html')); return; }
-  // Hashed web notes files never change: a cached copy is always current.
-  if (url.pathname.startsWith('/notes/assets/') && !url.pathname.includes('notes-module.')) {
+  // Hashed web notes files never change: a cached copy is always current. The two entry files keep their names, so they
+  // are fetched first.
+  if (url.pathname.startsWith('/notes/assets/') && !url.pathname.includes('notes-module.') && !url.pathname.includes('share-viewer.')) {
     event.respondWith(caches.match(event.request).then(cached => cached ?? networkFirst(event.request)));
     return;
   }

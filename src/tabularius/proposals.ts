@@ -114,7 +114,8 @@ export async function build(root: string, filter: Filter, input: Record<string, 
     for (const change of changes) if (change.op === 'create' || change.op === 'move') after.add(change.to ?? change.path);
     const byPath = new Map(changes.map(change => [change.path, change]));
     for (const path of before) {
-      if (!isNote(path) || removed.has(path) && !moves.has(path)) continue;
+      // Notes excluded from Tabularius are never read or changed by it, not even to repair a link.
+      if (!isNote(path) || removed.has(path) && !moves.has(path) || filter.excluded(path)) continue;
       const change = byPath.get(path);
       const current = change?.after ?? await text(path);
       const updated = repairLinks(current, path, moves.get(path) ?? path, moves, before, after);

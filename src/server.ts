@@ -2,7 +2,7 @@ import { createServer, request, type IncomingMessage, type ServerResponse, type 
 import { request as httpsRequest } from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { openStore, passwordHash, verifyPassword, token, digest, type User, type Vault, type Device } from './store.js';
+import { openStore, passwordHash, verifyPassword, same, token, digest, type User, type Vault, type Device } from './store.js';
 import { loadConsole, loadViewer } from './console-assets.js';
 import { rejection } from './policy.js';
 import { sendMail, type SmtpConfig } from './smtp.js';
@@ -11,6 +11,10 @@ import { createTabularius, MODES, type TabulariusConfig } from './tabularius/ind
 import { HttpError, body, fail, field, json, payload, raw } from './http.js';
 import { createShares, type SharesConfig } from './shares.js';
 import { createServerSettings, ServerSettingsError } from './server-settings.js';
+import { BackupError, createBackups } from './backup/index.js';
+import { readFileSync } from 'node:fs';
+/** The server's own version, recorded in backup points. */
+const SERVER_VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 
 export interface Config {
   database: string; couch: CouchConfig; bootstrapUser?: string; bootstrapPassword?: string;
@@ -20,6 +24,8 @@ export interface Config {
   tabularius?: TabulariusConfig; shares?: Partial<SharesConfig>;
   /** Seals the passwords kept in the settings (TABULARIUS_SECRET_KEY). */
   secret?: Buffer;
+  /** Where scheduled backups are written (TABULARIUM_BACKUP_DIR); without it they are not offered. */
+  backupDir?: string;
 }
 // An EPUB starts with an uncompressed `mimetype` entry holding application/epub+zip (OCF 3.3 §4.3).
 const isEpub = (data: Buffer) => data.length > 58 && data.readUInt32LE(0) === 0x04034b50 && data.readUInt16LE(28) === 0 &&
@@ -66,6 +72,7 @@ function replicationAllowed(method: string, parts: string[]) {
 export async function createGateway(config: Config) {
   const serveConsole = await loadConsole();
   const startedAt = Date.now();
+  const unknownUserHash = passwordHash(token());
   const db = openStore(config.database);
   // Running settings: the configuration is imported on the first start, then the web settings apply.
   const settings = createServerSettings(db, config.secret ?? config.tabularius?.key, {
@@ -75,6 +82,8 @@ export async function createGateway(config: Config) {
     auditDays: config.auditDays, streamMs: config.streamMs, writeLimit: config.writeLimit,
   });
   const couch = new Couch(config.couch);
+  const backups = createBackups({ db, couch: config.couch, directory: config.backupDir, version: SERVER_VERSION,
+    onFailure: error => { db.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now(), 'system', 'backup.failed', error.slice(0, 200)); } });
   const active = new Map<ClientRequest, { device: string; user: string; vault: string; res: ServerResponse }>();
   const limits = new Map<string, { count: number; until: number }>();
   const stats = { requests: 0, proxyRequests: 0, statuses: {} as Record<string, number> };
@@ -139,7 +148,7 @@ export async function createGateway(config: Config) {
       WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0`).get(hash, Date.now()) as unknown as User | undefined;
     if (!user) return fail(401, 'Session expired or invalid');
     if (!bearer && !['GET', 'HEAD'].includes(req.method!)) {
-      if (!isBrowserOrigin(req) || req.headers['x-csrf-token'] !== csrfFor(hash)) fail(403, 'Invalid CSRF token or origin');
+      if (!isBrowserOrigin(req) || !same(req.headers['x-csrf-token'], csrfFor(hash))) fail(403, 'Invalid CSRF token or origin');
     }
     return { user, hash };
   }
@@ -222,6 +231,9 @@ export async function createGateway(config: Config) {
         const reason = rejection({ ...parsed, _id: rest[0] });
         if (reason) { json(res, 403, forbidden(rest[0], reason)); return; }
         write = { data, rejected: [], newEdits: true };
+      } else if (req.method === 'PUT' && rest[0] === '_local') {
+        // Checkpoints and the milestone document hold no notes; they are only held to the same size limit.
+        write = { data: (await payload(req, limit)).data, rejected: [], newEdits: true };
       } else if (req.method === 'POST' && rest.length === 1 && rest[0] === '_bulk_docs') {
         const { data, parsed } = await payload(req, limit);
         if (!Array.isArray(parsed?.docs)) fail(400, 'Expected docs array');
@@ -248,7 +260,9 @@ export async function createGateway(config: Config) {
       const chunks: Buffer[] = [];
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => {
-        const results = JSON.parse(Buffer.concat(chunks).toString());
+        // An event handler: a reply CouchDB cut short must fail this request, not the process.
+        let results: unknown;
+        try { results = JSON.parse(Buffer.concat(chunks).toString()); } catch { json(res, 502, { error: 'Invalid response from CouchDB' }); return; }
         if (!Array.isArray(results)) { json(res, response.statusCode!, results); return; }
         if (!write!.newEdits) { json(res, response.statusCode!, [...results, ...write!.rejected.map(r => r.entry)]); return; }
         const merged = [];
@@ -466,11 +480,16 @@ export async function createGateway(config: Config) {
     if (['/api/v1/sessions', '/api/v1/web-session'].includes(path) && method === 'POST') {
       const web = path === '/api/v1/web-session';
       if (web && !isBrowserOrigin(req)) fail(403, 'Browser login requires same origin');
-      limit(`login:${req.socket.remoteAddress}`, settings.loginLimit(), res);
+      // Behind a reverse proxy every request comes from the proxy's address, so the limit is kept per account (against
+      // guessing one password) with a looser one per address (against trying many accounts), and nobody locks out everyone.
+      limit(`login:${req.socket.remoteAddress}`, settings.loginLimit() * 10, res);
       const data = await body(req);
       const username = field(data, 'username'); const password = field(data, 'password', 1024);
+      limit(`login-user:${username.toLowerCase()}`, settings.loginLimit(), res);
       const user = db.prepare('SELECT * FROM users WHERE username=?').get(username) as unknown as User | undefined;
-      if (!user || user.disabled || !await verifyPassword(password, user.password_hash)) fail(401, 'Invalid username or password');
+      // An unknown user costs the same time as a wrong password, so the timing does not tell which usernames exist.
+      const valid = await verifyPassword(password, user?.password_hash ?? await unknownUserHash);
+      if (!user || user.disabled || !valid) fail(401, 'Invalid username or password');
       const accessToken = token(); const expiresAt = Date.now() + settings.sessionMs();
       db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(digest(accessToken), user!.id, expiresAt);
       if (web) {
@@ -567,7 +586,7 @@ export async function createGateway(config: Config) {
         json(res, 200, { ...overview, knowledge: overview.knowledge && user.role === 'admin', admin: user.role === 'admin',
           modes: user.role === 'admin' ? MODES.slice(0, MODES.indexOf(t.modeLimit()) + 1) : ['read-only'], vaults: vaults.map(t.status) }); return;
       }
-      // LLM settings: providers and keys, models, the default prompt and parameters, the knowledge base. Administrators only.
+      // LLM settings: providers and keys, models, recipes, the default prompt, the knowledge base. Administrators only.
       if (route[1] === 'settings') {
         if (user.role !== 'admin') fail(403, 'Administrator required');
         if (route.length === 2 && method === 'GET') { json(res, 200, t.settings()); return; }
@@ -733,7 +752,21 @@ export async function createGateway(config: Config) {
           (SELECT count(*) FROM users WHERE disabled=0) AS activeUsers,
           (SELECT count(*) FROM vaults) AS vaults,
           (SELECT count(*) FROM devices WHERE revoked=0 AND expires_at>?) AS devices`).get(Date.now());
-        json(res, 200, { ...stats, ...counts, activeProxyConnections: active.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }); return;
+        json(res, 200, { ...stats, ...counts, activeProxyConnections: active.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000), backupFailure: backups.lastFailure() }); return;
+      }
+      if (path === '/api/v1/admin/backups' && method === 'GET') { json(res, 200, await backups.view()); return; }
+      if (path === '/api/v1/admin/backups/settings' && method === 'PUT') {
+        try { backups.update(await body(req)); } catch (error) { if (error instanceof BackupError) fail(400, error.message); throw error; }
+        audit(user.id, 'backup.settings', 'server');
+        json(res, 200, await backups.view()); return;
+      }
+      if (path === '/api/v1/admin/backups/run' && method === 'POST') {
+        let run;
+        try { run = backups.run(); } catch (error) { if (error instanceof BackupError) fail(409, error.message); throw error; }
+        audit(user.id, 'backup.run', 'server');
+        // The backup goes on in the background; the page follows it through the history.
+        void run.catch(() => {});
+        json(res, 202, await backups.view()); return;
       }
       if (route[1] === 'vaults') {
         if (route.length === 2 && method === 'GET') {
@@ -851,6 +884,7 @@ export async function createGateway(config: Config) {
       return `http://${host}:${bound}`;
     },
     async close() {
+      await backups.close();
       await tabularius?.close();
       clearInterval(cleanup); cancel(() => true);
       server.closeAllConnections();

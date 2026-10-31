@@ -151,10 +151,10 @@ test('proposals are checked against the working copy and applied without turning
     ] });
     assert.deepEqual(built.changes.map(c => [c.op, c.path, c.to, c.automatic]), [
       ['move', 'a/旧名.md', 'c/旧名.md', false], ['move', 'a/附图.png', 'c/附图.png', false],
-      ['edit', 'b/索引.md', null, false], ['create', 'b/新.md', null, false], ['edit', '私密.md', null, true]]);
+      ['edit', 'b/索引.md', null, false], ['create', 'b/新.md', null, false]]);
     assert.equal(built.changes[2].after, '- [笔记](../c/旧名.md)\n');
-    assert.equal(built.changes[4].after, '[x](c/旧名.md)\n');
-    assert.equal(built.repaired, 1);
+    // 私密.md is excluded from Tabularius: its link is not repaired either.
+    assert.equal(built.repaired, 0);
 
     await writeFile(join(root, 'b/索引.md'), 'changed elsewhere\n');
     await assert.rejects(apply(root, built.changes), /changed\tb\/索引.md/);
@@ -227,7 +227,10 @@ test('commands are checked by permission mode', async () => {
   assert.equal(refuse('read-only', 'docker compose logs --tail 50 server', ''), undefined);
   assert.match(refuse('read-only', 'systemctl restart nginx', ''), /read-only/);
   for (const command of ['cat a; rm b', 'cat a | sh', 'cat $(id)', 'echo x > /etc/passwd', 'cat `id`', 'ls\nrm x']) assert.match(refuse('read-only', command, ''), /shell operators/, command);
-  assert.match(refuse('read-only', 'find / -name x -delete', ''), /find/);
+  assert.match(refuse('read-only', 'find / -name x -delete', ''), /change the host/);
+  for (const command of ['ip route flush table main', 'ip addr add 10.0.0.1/24 dev eth0', 'date -s 2020-01-01', 'hostname evil', 'journalctl --vacuum-size=1',
+    'git diff --output=/tmp/x', 'ss -K dst 10.0.0.1', 'tail -f /var/log/syslog', 'tail -nF 5 x', 'find / -fprint0 /tmp/x']) assert.match(refuse('read-only', command, ''), /change the host/, command);
+  for (const command of ['ip addr show', 'ip route', 'date', 'hostname', 'journalctl -u nginx -n 50', 'git log -n 5', 'ss -tlnp', 'tail -n 50 /var/log/syslog']) assert.equal(refuse('read-only', command, ''), undefined, command);
   assert.equal(refuse('restricted', 'systemctl restart nginx', 'systemctl restart nginx\ndocker compose -f /opt/x/compose.yaml up -d *'), undefined);
   assert.equal(refuse('restricted', 'docker compose -f /opt/x/compose.yaml up -d --wait server', 'docker compose -f /opt/x/compose.yaml up -d *'), undefined);
   assert.match(refuse('restricted', 'systemctl restart sshd', 'systemctl restart nginx'), /allow list/);

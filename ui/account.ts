@@ -90,7 +90,7 @@ async function rebuildSection(vault: Vault, devices: Device[]) {
   const revertTarget = retired.find(r => !r.partial);
   const list = retired.length ? `<h3 class="spaced">${t('rebuild.retired')}</h3><table><thead><tr><th>${t('rebuild.retiredAt')}</th><th>${t('rebuild.size')}</th><th>${t('rebuild.content')}</th><th></th></tr></thead><tbody>${retired.map((r, i) => `<tr><td>${date(r.retiredAt)}</td><td>${bytes(r.diskBytes)}</td><td>${r.partial ? t('rebuild.partial') : t('rebuild.complete')}</td><td class="right">${r === revertTarget ? `<button id="rebuild-revert">${t('rebuild.revert')}</button> ` : ''}<button class="danger" id="retired-${i}">${t('rebuild.delete')}</button></td></tr>`).join('')}</tbody></table>` : '';
   const lock = locked && !rebuild?.started ? `<div class="notice warn"><p>${t('rebuild.locked')}</p><button id="rebuild-unlock">${t('rebuild.unlock')}</button></div>` : '';
-  return `<section class="card table-wrap"><h2>${t('rebuild.title')}</h2><p>${t('rebuild.desc')}</p>${lock}${status}${list}</section>`;
+  return `<section class="card table-wrap"><h2>${t('rebuild.title')}${tip(t('rebuild.desc'))}</h2>${lock}${status}${list}</section>`;
 }
 function bindRebuild(vault: Vault, devices: Device[], reload: () => Promise<void>) {
   const rebuild = vault.rebuild;
@@ -138,7 +138,7 @@ async function sharesPage(content: HTMLElement) {
 
 function passwordPage(content: HTMLElement) {
   const body = frame(content);
-  body.innerHTML = `<section class="card"><p>${t('password.desc')}</p><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(`${t('password.new')}${tip(t('password.hint'))}`, 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<button class="primary" type="submit">${t('password.save')}</button></form></section>`;
+  body.innerHTML = `<section class="card"><h2>${t('nav.password')}${tip(t('password.desc'))}</h2><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(`${t('password.new')}${tip(t('password.hint'))}`, 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<button class="primary" type="submit">${t('password.save')}</button></form></section>`;
   form('password', async data => {
     if (data.get('password') !== data.get('confirmation')) { message(t('password.mismatch'), true); return; }
     await api('/me/password', 'PUT', { currentPassword: data.get('currentPassword'), password: data.get('password') });
@@ -198,4 +198,3 @@ function interfacePage(content: HTMLElement) {
     message(t('theme.saved'));
   });
 }
-export { navigate, state };

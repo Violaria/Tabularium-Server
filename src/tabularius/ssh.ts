@@ -64,7 +64,26 @@ const READ_ONLY = ['cat', 'head', 'tail', 'ls', 'stat', 'find', 'grep', 'wc', 'd
   'docker ps', 'docker logs', 'docker inspect', 'docker images', 'docker compose ps', 'docker compose config', 'docker compose logs', 'nginx -t',
   'git status', 'git log', 'git diff'].map(entry => entry.split(' '));
 const METACHARACTERS = /[;&|`$<>(){}\n\r\\]/;
-const FIND_WRITES = new Set(['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint', '-fprintf', '-fls']);
+const FIND_WRITES = new Set(['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls']);
+/**
+ * Arguments that turn a read-only program into one that changes the host or never ends: `ip` with anything but a show,
+ * `date`/`hostname` setting a value, journal maintenance, git writing a file, ss killing sockets, tail following.
+ */
+function writes(words: string[]) {
+  const [program, ...args] = words;
+  const has = (pattern: RegExp) => args.some(arg => pattern.test(arg));
+  switch (program) {
+    case 'ip': return args.some(arg => ['add', 'del', 'delete', 'flush', 'change', 'replace', 'set', 'append', 'prepend', 'restore', 'save', 'exec'].includes(arg));
+    case 'date': return has(/^(-s|--set(=.*)?)$/);
+    case 'hostname': return args.some(arg => !arg.startsWith('-')) || has(/^(-F|--file(=.*)?|-b|--boot)$/);
+    case 'journalctl': return has(/^--(vacuum-\w+|rotate|flush|relinquish-var|sync|setup-keys|update-catalog)/);
+    case 'git': return has(/^--output(=.*)?$/) || has(/^-o$/);
+    case 'ss': return has(/^(-K|--kill)$/);
+    case 'tail': return has(/^(-f|-F|--follow(=.*)?|--retry)$/) || has(/^-[a-zA-Z]*[fF][a-zA-Z]*$/);
+    case 'find': return args.some(arg => FIND_WRITES.has(arg));
+    default: return false;
+  }
+}
 
 /** A whitelist pattern: words matched in order; a lone `*` matches any remaining arguments, `*` inside a word any characters but spaces. */
 function matches(pattern: string, words: string[]) {
@@ -86,7 +105,7 @@ export function refuse(mode: 'read-only' | 'restricted' | 'full', command: strin
   if (METACHARACTERS.test(command)) return 'shell operators, substitutions and redirections are not allowed in this mode; run one program with its arguments';
   const words = command.trim().split(/\s+/);
   if (READ_ONLY.some(prefix => prefix.every((word, i) => words[i] === word))) {
-    if (words[0] === 'find' && words.some(word => FIND_WRITES.has(word))) return 'find may not run actions in this mode';
+    if (writes(words)) return 'these arguments change the host or do not end; only reading is allowed in this mode';
     return undefined;
   }
   if (mode === 'restricted' && whitelist.split('\n').some(pattern => pattern.trim() && matches(pattern, words))) return undefined;

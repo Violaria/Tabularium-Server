@@ -52,6 +52,17 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       }, body: data === undefined ? undefined : JSON.stringify(data) });
       const text = await response.text(); assert.equal(response.status, expected, text); return text ? JSON.parse(text) : undefined;
     };
+    // Running settings live in the application database (the settings page writes them there); a test changes them the
+    // same way, below the page's minimums where it needs short times, and restarts the gateway on the same database.
+    const configure = async change => {
+      await gateway.close();
+      const store = new DatabaseSync(config.database);
+      const values = JSON.parse(store.prepare("SELECT value FROM server_settings WHERE key='values'").get().value);
+      change(values);
+      store.prepare("UPDATE server_settings SET value=? WHERE key='values'").run(JSON.stringify(values));
+      store.close();
+      gateway = await createGateway(config); url = await gateway.listen();
+    };
     const enroll = (v, session = alice) => api(`/vaults/${v.id}/devices`, 'POST', { name: 'desktop' }, session, 201);
     const metrics = () => api('/metrics', 'GET', undefined, admin);
     await t.test('private accounts, first password change, sessions', async () => {
@@ -69,9 +80,10 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       const temporary = (await api('/sessions', 'POST', { username: 'alice', password: 'alice-updated-password' }, undefined, 201)).token;
       await api('/sessions/current', 'DELETE', undefined, temporary);
       await api('/me', 'GET', undefined, temporary, 401);
-      config.sessionMs = 1;
+      await configure(v => { v.access.sessionHours = 1 / 3_600_000; });
       const expired = (await api('/sessions', 'POST', { username: 'bob', password: 'bob-updated-password' }, undefined, 201)).token;
-      await sleep(5); await api('/me', 'GET', undefined, expired, 401); delete config.sessionMs;
+      await sleep(5); await api('/me', 'GET', undefined, expired, 401);
+      await configure(v => { v.access.sessionHours = 12; });
     });
     await t.test('vault ownership, provisioning retry, device secret storage', async () => {
       vault = await api('/vaults', 'POST', { name: 'notes' }, alice, 201);
@@ -148,7 +160,9 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       const ids = (await sync('/_all_docs')).rows.map(row => row.id);
       assert.deepEqual(ids.filter(id => !/^(h:|f:|obsydian_livesync_version$)/.test(id) && !['created', 'document'].includes(id)), []);
       assert(!ids.some(id => ['h:plain', 'h:unmarked', 'h:replicated-plain', 'h:only-plain', 'h:put-plain', 'h:attached'].includes(id)));
-      config.writeLimit = 64; await sync('/h:large', 'PUT', chunk('x'.repeat(100)), device, 413); delete config.writeLimit;
+      await configure(v => { v.access.writeMegabytes = 64 / 1024 / 1024; });
+      await sync('/h:large', 'PUT', chunk('x'.repeat(100)), device, 413);
+      await configure(v => { v.access.writeMegabytes = 64; });
     });
     await t.test('home overview: own vaults, last synchronisation, no note names without Tabularius, server summary', async () => {
       await sync('', 'GET');
@@ -218,19 +232,24 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
     await t.test('streaming, cancellation, deadline, device revoke and expiry', async () => {
       const first = await stream(); assert.equal((await metrics()).activeProxyConnections, 1);
       first.controller.abort(); await first.ended; await until(async () => (await metrics()).activeProxyConnections === 0);
-      config.streamMs = 350; const deadline = await stream(); await deadline.ended;
-      await until(async () => (await metrics()).activeProxyConnections === 0); config.streamMs = 20_000;
+      await configure(v => { v.access.streamMinutes = 350 / 60_000; });
+      const deadline = await stream(); await deadline.ended;
+      await until(async () => (await metrics()).activeProxyConnections === 0);
+      await configure(v => { v.access.streamMinutes = 20_000 / 60_000; });
       for (const feed of ['continuous', 'longpoll']) {
         const revoked = await enroll(vault); const connection = await stream(revoked, feed);
         await api(`/vaults/${vault.id}/devices/${revoked.id}`, 'DELETE', undefined, alice);
         await connection.ended; await sync('', 'GET', undefined, revoked, 401);
       }
-      config.deviceMs = 5; const expired = await enroll(vault); await sleep(10);
-      await sync('', 'GET', undefined, expired, 401); delete config.deviceMs;
+      await configure(v => { v.access.deviceDays = 5 / 86_400_000; });
+      const expired = await enroll(vault); await sleep(10);
+      await sync('', 'GET', undefined, expired, 401);
       // Renewal: the secret stays and the expiry restarts from now; revoked or expired devices cannot renew.
       const renew = credentials => fetch(url + '/api/v1/devices/current/renew', { method: 'POST', headers: { authorization: basic(credentials) } });
       assert.equal((await renew(expired)).status, 401);
-      config.deviceMs = 60_000; const short = await enroll(vault); delete config.deviceMs;
+      await configure(v => { v.access.deviceDays = 60_000 / 86_400_000; });
+      const short = await enroll(vault);
+      await configure(v => { v.access.deviceDays = 30; });
       const before = Date.now(); const renewed = await renew(short);
       assert.equal(renewed.status, 200);
       const { expiresAt } = await renewed.json();
@@ -327,7 +346,9 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       await arm(r1.id, 'wrong', alice, 400);
       await arm(r1.id, 'rebuild-me', bob, 404);
       await arm(device.id, 'rebuild-me', alice, 404);
-      config.rebuildMs = 1; await arm(r1.id); await sleep(5); await vs('/', 'DELETE', undefined, r1, 403); delete config.rebuildMs;
+      await configure(v => { v.access.rebuildMinutes = 1 / 60_000; });
+      await arm(r1.id); await sleep(5); await vs('/', 'DELETE', undefined, r1, 403);
+      await configure(v => { v.access.rebuildMinutes = 15; });
 
       const armed = await arm(r1.id);
       assert.equal(armed.rebuild.deviceId, r1.id); assert.equal(armed.rebuild.started, null); assert(armed.rebuild.until > Date.now());
@@ -403,7 +424,9 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
 
       const sink = await startSmtpSink();
       try {
+        // Without a secret key the password comes from the startup configuration; the rest from the stored settings.
         config.smtp = { host: '127.0.0.1', port: sink.port, security: 'none', user: sink.user, password: sink.password, from: 'tabularium@example.test' };
+        await configure(v => { v.mail = { host: '127.0.0.1', port: sink.port, security: 'none', user: sink.user, from: 'tabularium@example.test', password: null, hint: '' }; });
         assert.equal((await send(epub())).status, 409);
         await api('/me/kindle', 'PUT', { address: 'someone@gmail.com' }, alice, 400);
         assert.equal((await api('/me/kindle', 'PUT', { address: ' Alice@Kindle.com ' }, alice)).address, 'alice@kindle.com');
@@ -424,18 +447,17 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
         const test = parseMessage(sink.messages.at(-1).raw);
         assert.equal(test.fileName, 'Tabularium test.txt'); assert.match(test.data.toString(), /Tabularium/);
 
-        config.kindleMaxBytes = 2048;
+        await configure(v => { v.kindle.maxMegabytes = 2048 / 1024 / 1024; });
         response = await send(epub(4096)); assert.equal(response.status, 413); await response.arrayBuffer();
-        delete config.kindleMaxBytes;
-        config.kindleDaily = 2;
+        await configure(v => { v.kindle.maxMegabytes = 50; v.kindle.daily = 2; });
         response = await send(epub()); assert.equal(response.status, 429); await response.arrayBuffer();
-        delete config.kindleDaily;
+        await configure(v => { v.kindle.daily = 30; });
 
         sink.rejectRecipients = true;
         response = await send(epub());
         assert.equal(response.status, 502); assert.match((await response.json()).error, /550/);
         sink.rejectRecipients = false;
-        config.smtp = { ...config.smtp, port: 1 };
+        await configure(v => { v.mail.port = 1; });
         response = await send(epub()); assert.equal(response.status, 502); await response.arrayBuffer();
 
         const deliveries = await api('/me/kindle/deliveries', 'GET', undefined, alice);
@@ -447,6 +469,7 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
         assert.equal((await status()).address, null);
       } finally {
         delete config.smtp;
+        await configure(v => { v.mail = null; });
         await sink.close();
       }
     });
@@ -497,9 +520,9 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert.doesNotMatch(response.headers.get('content-security-policy'), /unsafe|wasm/);
       assert.equal((await api('/shares', 'GET', undefined, alice)).shares.find(share => share.id === encrypted.id).views, 1);
       // Size limit.
-      config.shares = { maxBytes: 10 };
+      await configure(v => { v.shares.maxMegabytes = 10 / 1024 / 1024; });
       response = await put(encrypted, { manifest: 'more than ten bytes' }); assert.equal(response.status, 413); await response.arrayBuffer();
-      delete config.shares;
+      await configure(v => { v.shares.maxMegabytes = 50; });
       // A public page with a password: the server checks it and hands out an access token for the files.
       const page = await api('/shares', 'POST', { vaultId: vault.id, slug: '公开页', mode: 'public', sealed: 'x', password: 'open sesame', indexable: true }, alice, 201);
       assert.equal(page.password, true);
@@ -539,10 +562,10 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert(database.prepare("SELECT count(*) AS n FROM audit_events WHERE action='share.revoke'").get().n >= 2);
       database.close();
       // Sharing turned off by the administrator's configuration.
-      config.shares = { enabled: false };
+      await configure(v => { v.shares.enabled = false; });
       await api('/shares', 'GET', undefined, alice, 403);
       response = await visit(random.slug); assert.equal(response.status, 403); await response.arrayBuffer();
-      delete config.shares;
+      await configure(v => { v.shares.enabled = true; });
     });
     await t.test('colour themes: built-in, custom recipe kept on the account', async () => {
       await api('/me/theme', 'PUT', { theme: 'custom' }, alice, 400);
@@ -555,13 +578,20 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       await api('/me/theme', 'PUT', { theme: 'neon' }, alice, 400);
     });
     await t.test('limits and account disable cancel active replication', async () => {
-      const limited = await enroll(vault); config.syncLimit = 1; await sync('', 'GET', undefined, limited); await sync('', 'GET', undefined, limited, 429); config.syncLimit = 2400;
+      const limited = await enroll(vault);
+      await configure(v => { v.access.syncPerMinute = 1; });
+      await sync('', 'GET', undefined, limited); await sync('', 'GET', undefined, limited, 429);
+      await configure(v => { v.access.syncPerMinute = 2400; });
       const connection = await stream();
       await api(`/users/${userId}`, 'PATCH', { disabled: true }, admin);
       await connection.ended;
       await api('/me', 'GET', undefined, alice, 401); await sync('', 'GET', undefined, device, 401);
-      config.loginLimit = 1;
+      // Logins are limited per account, and ten times looser per address.
+      await configure(v => { v.access.loginPerMinute = 1; });
+      await api('/sessions', 'POST', { username: 'missing', password }, undefined, 401);
       await api('/sessions', 'POST', { username: 'missing', password }, undefined, 429);
+      for (let i = 0; i < 8; i++) await api('/sessions', 'POST', { username: `missing-${i}`, password }, undefined, 401);
+      await api('/sessions', 'POST', { username: 'another', password }, undefined, 429);
     });
   } finally {
     if (gateway) await gateway.close();

@@ -109,6 +109,10 @@ label.check input { width: auto; }
 .inline-form { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; }
 .inline-form label { flex: 1; min-width: 150px; }
 .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+/* Buttons that undo or remove go to the far end of the row, away from Save. */
+.actions-end { margin-left: auto; display: flex; gap: 10px; flex-wrap: wrap; }
+.test-status:empty { display: none; }
+.test-status .badge, .model-test .badge { cursor: default; }
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .split .card { margin: 0; }
 .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
@@ -148,8 +152,9 @@ details.inactive summary { cursor: pointer; color: var(--muted); font-size: 13px
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand-mark {
     display: grid; place-items: center; width: 36px; height: 36px; background: var(--mark-bg); color: var(--mark-text); border-radius: 10px;
-    font-family: Georgia, serif; font-size: 25px; font-weight: bold; flex: none;
+    flex: none;
 }
+.brand-mark svg { width: 26px; height: 26px; }
 .brand strong { display: block; font-size: 16px; letter-spacing: 0.2px; }
 .brand small { font-size: 12px; }
 .gate .brand { margin-bottom: 26px; }
@@ -184,10 +189,11 @@ details.inactive summary { cursor: pointer; color: var(--muted); font-size: 13px
 .account button { background: transparent; color: var(--side-text); border-color: var(--side-line); font-weight: 500; padding: 6px 10px; font-size: 13px; }
 .account button:hover { background: var(--side-hover); }
 .content { min-width: 0; }
-.page { padding: 34px 40px 48px; max-width: 1180px; }
+/* Pages fill the content area at any window width. */
+.page { padding: 34px 40px 48px; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 24px; }
 .page-head p { margin-bottom: 0; }
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: -8px 0 22px; overflow-x: auto; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: -8px 0 22px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
 .tabs a {
     padding: 9px 12px; color: var(--muted); text-decoration: none; font-weight: 500; font-size: 14px; white-space: nowrap;
     border-bottom: 2px solid transparent; margin-bottom: -1px;
@@ -381,7 +387,7 @@ h3.spaced { margin-top: 22px; }
 .chat-hello { margin: 0; text-align: center; font-size: 28px; font-weight: 600; letter-spacing: -0.4px; }
 .chat-bottom { padding-top: 12px; }
 .composer {
-    display: grid; gap: 6px; width: min(820px, 100%); margin: 0 auto; padding: 12px 12px 10px 18px; border: 1px solid var(--line);
+    display: grid; gap: 6px; width: 100%; padding: 12px 12px 10px 18px; border: 1px solid var(--line);
     border-radius: 20px; background: var(--panel); box-shadow: 0 8px 28px #14251a14;
 }
 .composer:focus-within { border-color: var(--accent); }
@@ -390,9 +396,9 @@ h3.spaced { margin-top: 22px; }
 .composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .composer .send { width: 36px; height: 36px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
 .composer .send svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.log { flex: 1; min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 16px max(0px, calc((100% - 820px) / 2)) 20px; }
-.turn { max-width: 820px; }
-.turn.user { justify-self: end; background: var(--accent-soft); border-radius: 12px; padding: 10px 16px; }
+.log { flex: 1; min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 16px 0 20px; }
+.turn { min-width: 0; }
+.turn.user { justify-self: end; max-width: min(75%, 900px); background: var(--accent-soft); border-radius: 12px; padding: 10px 16px; }
 .turn.user p { color: inherit; margin: 0; }
 .turn.assistant .answer p { color: inherit; }
 .turn pre, .diff { background: var(--panel-soft); border: 1px solid var(--line); }
@@ -458,7 +464,6 @@ a.cite { overflow-wrap: anywhere; }
 .param:last-of-type { border-bottom: 0; }
 .param-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .param-name { font-size: 14px; }
-.param-name[title] { text-decoration: underline dotted var(--muted); text-underline-offset: 4px; cursor: help; }
 .param-name code { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: 4px; }
 .param-toggle { padding: 3px 10px; font-size: 12px; font-weight: 500; color: var(--muted); background: transparent; border-color: transparent; }
 .param-toggle.custom { color: var(--accent); background: var(--accent-soft); }
@@ -504,7 +509,7 @@ dialog.dialog.chat-settings h3 { margin: 6px 0 0; }
 .tip::after {
     content: attr(data-tip); position: absolute; left: -10px; bottom: calc(100% + 8px); z-index: 40; width: max-content; max-width: min(340px, 80vw);
     padding: 8px 11px; border-radius: 8px; background: var(--text); color: var(--panel); font: 400 12.5px/1.55 var(--font); letter-spacing: 0;
-    text-transform: none; white-space: normal; text-align: left; box-shadow: 0 8px 24px #0000002e; display: none; pointer-events: none;
+    text-transform: none; white-space: pre-line; text-align: left; box-shadow: 0 8px 24px #0000002e; display: none; pointer-events: none;
 }
 /* Drawn only while shown: a hidden tooltip would still widen narrow pages. */
 .tip:hover::after, .tip:focus::after { display: block; }
@@ -513,14 +518,15 @@ dialog.dialog.chat-settings h3 { margin: 6px 0 0; }
 th .tip::after { bottom: auto; top: calc(100% + 8px); }
 .param-name .param-en { margin-left: 6px; font-size: 12px; color: var(--muted); }
 .model-list { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; }
-.model-list legend { display: flex; align-items: center; justify-content: space-between; width: 100%; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-.model-list [data-models] { display: grid; gap: 4px; max-height: 260px; overflow-y: auto; }
-.model-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-/* The name takes the space left and wraps; the test link keeps its width. */
-.model-row label { min-width: 0; flex: 1; }
+.model-list legend { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.model-list [data-models] { display: grid; gap: 2px; max-height: 260px; overflow-y: auto; align-content: start; }
+.model-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+/* The name takes the space left and wraps; a test result sits right after it. */
+.model-row label { min-width: 0; }
 .model-row label span { overflow-wrap: anywhere; }
-.model-row > button { flex: none; white-space: nowrap; }
 .model-row small.mono { margin-left: 6px; }
+.model-test:empty { display: none; }
+
 .error-text { color: var(--danger); }
 optgroup { font-weight: 600; }
 
@@ -533,3 +539,4 @@ optgroup { font-weight: 600; }
 .llm-recipe[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 14px; }
 .llm-recipe > form { padding-bottom: 14px; }
 .llm-recipe h4 { margin: 4px 0 0; font-size: 14px; }
+.recipe-fields > [hidden] { display: none; }

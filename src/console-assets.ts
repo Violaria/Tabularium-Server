@@ -17,8 +17,9 @@ export async function loadConsole() {
   for (const [path, file, type] of [
     // One application page for home, administration and account settings; its scripts and styles live under /app/.
     ['/app/app.html', 'app.html', 'text/html; charset=utf-8'],
-    ...['app', 'core', 'home', 'admin', 'account', 'shares', 'ai', 'params', 'server-settings', 'tabularius', 'i18n', 'messages'].map(name => [`/app/${name}.js`, `${name}.js`, 'text/javascript; charset=utf-8']),
+    ...['app', 'core', 'home', 'admin', 'account', 'shares', 'ai', 'params', 'server-settings', 'backups', 'tabularius', 'i18n', 'messages'].map(name => [`/app/${name}.js`, `${name}.js`, 'text/javascript; charset=utf-8']),
     ['/app/app.css', 'app.css', 'text/css; charset=utf-8'],
+    ['/app/icon.svg', 'icon.svg', 'image/svg+xml'],
     ['/sw.js', 'sw.js', 'text/javascript; charset=utf-8'],
   ]) assets.set(path, { data: await readFile(new URL(`./public/${file}`, import.meta.url)), type });
   // Web notes files: the fixed-name entry and hashed chunks. Their list lets the service worker cache all of them.

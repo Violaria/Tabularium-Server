@@ -67,6 +67,7 @@ const gateway = await createGateway({
   auditDays: process.env.TABULARIUM_AUDIT_DAYS ? Number(process.env.TABULARIUM_AUDIT_DAYS) : undefined,
   smtp,
   tabularius,
+  backupDir: process.env.TABULARIUM_BACKUP_DIR || undefined,
   shares: {
     enabled: process.env.TABULARIUM_SHARES !== 'off',
     maxBytes: process.env.TABULARIUM_SHARE_MAX_BYTES ? Number(process.env.TABULARIUM_SHARE_MAX_BYTES) : undefined,

@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { body, fail, json, raw } from './http.js';
-import { digest, passwordHash, token, verifyPassword, type Device, type Share, type User } from './store.js';
+import { digest, passwordHash, same, token, verifyPassword, type Device, type Share, type User } from './store.js';
 
 export interface SharesConfig {
   /** false turns sharing off: nothing can be created or opened. */
@@ -33,7 +33,7 @@ const randomSlug = () => token().replace(/[^A-Za-z0-9]/g, '').slice(0, 10);
 
 /**
  * Upload format: for each file, its name length (2 bytes, big-endian), name (ASCII), data length (4 bytes) and data.
- * The same framing is written by the clients (`features/tabularium/share/bundle.ts`).
+ * The same framing is written by the clients (`encodeBundle` in `features/tabularium/share/package.ts`).
  */
 export function readBundle(data: Buffer) {
   const files = new Map<string, Buffer>();
@@ -115,7 +115,8 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
       if (typeof written !== 'string' || !SLUG.test(written)) fail(400, 'Invalid address');
       const slug = (written as string).normalize('NFC');
       const taken = db.prepare('SELECT * FROM shares WHERE slug=?').get(slug) as unknown as Share | undefined;
-      if (taken && state(taken) === 'active') fail(409, 'Address already in use');
+      // An ended share's address stays its owner's: another account taking it over would show its content under an old link.
+      if (taken && (state(taken) === 'active' || taken.owner_id !== user.id)) fail(409, 'Address already in use');
       const { password, hash } = await protection(mode as string, data);
       const share: Share = {
         id: randomUUID(), slug, owner_id: user.id, vault_id: vaultId as string, mode: mode as Share['mode'], sealed: sealed(data.sealed),
@@ -184,7 +185,8 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
 
   /** The share behind a public address, or the reason it cannot be opened. */
   function lookup(slug: string) {
-    const share = db.prepare('SELECT * FROM shares WHERE slug=?').get(slug.normalize('NFC')) as unknown as Share | undefined;
+    // A disabled account's shares are not served.
+    const share = db.prepare('SELECT s.* FROM shares s JOIN users u ON u.id=s.owner_id WHERE s.slug=? AND u.disabled=0').get(slug.normalize('NFC')) as unknown as Share | undefined;
     if (!share) return fail(404, 'Share not found');
     const now = state(share);
     if (now !== 'active') {
@@ -199,7 +201,8 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
   };
   /** Public routes under /api/v1/public/shares/<address>; no sign-in, limited per address of the visitor. */
   async function visitor(req: IncomingMessage, res: ServerResponse, route: string[], method: string) {
-    limit(`share-visit:${req.socket.remoteAddress}`, 1200, res);
+    // Per share as well as per address: behind a reverse proxy all visitors share one address.
+    limit(`share-visit:${req.socket.remoteAddress}:${route[2] ?? ''}`, 1200, res);
     robots(res);
     if (method !== 'GET' || route.length < 3) fail(404, 'Route not found');
     const share = lookup(route[2]);
@@ -210,9 +213,9 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
         if (typeof typed !== 'string') fail(401, 'Password required');
         let password = '';
         try { password = decodeURIComponent(typed as string); } catch { fail(400, 'Invalid password'); }
-        limit(`share-password:${req.socket.remoteAddress}`, 20, res);
+        limit(`share-password:${route[2]}`, 20, res);
         if (!await verifyPassword(password, share.password_hash!)) fail(403, 'Wrong password');
-      } else if (req.headers['x-share-access'] !== access(share)) fail(401, 'Password required');
+      } else if (!same(req.headers['x-share-access'], access(share))) fail(401, 'Password required');
     }
     if (route.length === 3) {
       db.prepare('UPDATE shares SET views=views+1 WHERE id=?').run(share.id);

@@ -1,5 +1,6 @@
-// The sandbox service: the only process with Docker access. It runs one command in a throwaway container from a listed image
-// and returns the output; Tabularius reaches it over an internal network with a shared token.
+// The sandbox service: the only process with Docker access. It runs one command in a throwaway container and returns the
+// output; Tabularius reaches it over an internal network with a shared token and chooses the image from the list set in
+// the LLM settings. Images are never pulled here, so only images already on the host can run, always without privileges.
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, request, type IncomingMessage } from 'node:http';
 
@@ -35,8 +36,8 @@ function demultiplex(data: Buffer) {
 
 export class SandboxError extends Error {}
 
-export async function runInSandbox(socket: string, images: string[], input: SandboxRequest): Promise<SandboxResult> {
-  if (!images.includes(input.image)) throw new SandboxError(`image ${input.image} is not available; available: ${images.join(', ')}`);
+export async function runInSandbox(socket: string, input: SandboxRequest): Promise<SandboxResult> {
+  if (typeof input.image !== 'string' || !/^[\w./:@-]{1,200}$/.test(input.image)) throw new SandboxError('image must be an image name');
   if (typeof input.command !== 'string' || !input.command.trim()) throw new SandboxError('command must be a non-empty string');
   const files = Object.entries(input.files ?? {});
   for (const [name] of files) if (!/^[\w.-]+$/.test(name) || name.startsWith('.')) throw new SandboxError(`invalid file name ${name}`);
@@ -52,6 +53,8 @@ export async function runInSandbox(socket: string, images: string[], input: Sand
       Tmpfs: { '/work': 'rw,size=64m,mode=1777', '/tmp': 'rw,size=64m,mode=1777' },
       Memory: 512 * 1024 * 1024, MemorySwap: 512 * 1024 * 1024, NanoCpus: 1_000_000_000, PidsLimit: 128,
       CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges'],
+      // A command that prints without end fills at most this much log on the host, which is all that is read back.
+      LogConfig: { Type: 'json-file', Config: { 'max-size': '1m', 'max-file': '1' } },
     },
   });
   if (created.status === 404) throw new SandboxError(`image ${input.image} is not pulled on this host`);
@@ -72,8 +75,10 @@ export async function runInSandbox(socket: string, images: string[], input: Sand
   }
 }
 
-/** Starts the service; returns the bound port. */
-export function serveSandbox(options: { socket: string; images: string[]; token: string; port: number; host?: string }) {
+/** Starts the service; returns the bound port. Containers left by a run that was cut short are removed first. */
+export async function serveSandbox(options: { socket: string; token: string; port: number; host?: string }) {
+  const left = await docker(options.socket, 'GET', `/containers/json?all=1&filters=${encodeURIComponent(JSON.stringify({ label: ['tabularius.sandbox=1'] }))}`);
+  for (const container of JSON.parse(left.data.toString()) as { Id: string }[]) await docker(options.socket, 'DELETE', `/containers/${container.Id}?force=1`);
   const expected = Buffer.from(`Bearer ${options.token}`);
   const server = createServer(async (req, res) => {
     const send = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -82,7 +87,7 @@ export function serveSandbox(options: { socket: string; images: string[]; token:
     if (req.method !== 'POST' || req.url !== '/run') return send(404, { error: 'Route not found' });
     const chunks: Buffer[] = []; let size = 0;
     for await (const chunk of req) { size += chunk.length; if (size > 4 * 1024 * 1024) return send(413, { error: 'Request too large' }); chunks.push(chunk); }
-    try { send(200, await runInSandbox(options.socket, options.images, JSON.parse(Buffer.concat(chunks).toString()))); } catch (error) {
+    try { send(200, await runInSandbox(options.socket, JSON.parse(Buffer.concat(chunks).toString()))); } catch (error) {
       if (error instanceof SandboxError || error instanceof SyntaxError) send(400, { error: (error as Error).message });
       else { console.error('Sandbox run failed:', (error as Error).message); send(500, { error: 'Sandbox failed' }); }
     }
@@ -95,7 +100,6 @@ export function serveSandbox(options: { socket: string; images: string[]; token:
 if (import.meta.url === `file://${process.argv[1]}`) {
   const token = process.env.TABULARIUM_SANDBOX_TOKEN;
   if (!token || token.length < 32) throw new Error('TABULARIUM_SANDBOX_TOKEN must be at least 32 characters');
-  const images = (process.env.TABULARIUS_SANDBOX_IMAGES || 'python:3.13-slim,node:24-slim,alpine:3').split(',').map(image => image.trim()).filter(Boolean);
-  const { port } = await serveSandbox({ socket: process.env.DOCKER_SOCKET || '/var/run/docker.sock', images, token, port: Number(process.env.SANDBOX_PORT || 3100) });
-  console.log(`Tabularius sandbox listening on ${port}; images: ${images.join(', ')}`);
+  const { port } = await serveSandbox({ socket: process.env.DOCKER_SOCKET || '/var/run/docker.sock', token, port: Number(process.env.SANDBOX_PORT || 3100) });
+  console.log(`Tabularius sandbox listening on ${port}`);
 }

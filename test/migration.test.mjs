@@ -37,7 +37,7 @@ for (const version of [1, 2]) {
     legacy.close();
     try {
       const upgraded = openStore(path);
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 13);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 16);
       assert.equal(upgraded.prepare('SELECT kindle_address FROM users').get().kindle_address, null);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM kindle_deliveries').get().n, 0);
       // Existing records are unchanged; devices gain an empty last synchronisation time (schema 11).
@@ -48,6 +48,10 @@ for (const version of [1, 2]) {
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM retired_databases').get().n, 0);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM tabularius_proposals').get().n, 0);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM shares').get().n, 0);
+      // Server settings (14), recipe columns (15) and the backup history (16) start empty.
+      assert.equal(upgraded.prepare('SELECT count(*) AS n FROM server_settings').get().n, 0);
+      assert.equal(upgraded.prepare('SELECT count(*) AS n FROM tabularius_vaults WHERE recipe IS NOT NULL').get().n, 0);
+      assert.equal(upgraded.prepare('SELECT count(*) AS n FROM backup_runs').get().n, 0);
       upgraded.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now(), 'u', 'device.revoke', 'd');
       upgraded.close();
       const reopened = openStore(path);

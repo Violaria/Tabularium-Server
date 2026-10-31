@@ -14,6 +14,13 @@ export async function verifyPassword(password: string, stored: string) {
   const [salt, hash] = stored.split(':');
   return timingSafeEqual(await derive(password, salt, 64) as Buffer, Buffer.from(hash, 'hex'));
 }
+/** Compares a secret given by a client with the expected one in constant time. */
+export function same(given: unknown, expected: string) {
+  if (typeof given !== 'string') return false;
+  const a = createHash('sha256').update(given).digest();
+  const b = createHash('sha256').update(expected).digest();
+  return timingSafeEqual(a, b);
+}
 export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number; kindle_address: string | null; theme: string | null; theme_recipe: string | null }
 export interface Vault {
   id: string; owner_id: string; name: string; database_name: string; state: string;
@@ -289,6 +296,19 @@ export function openStore(path: string) {
   `);
     version = 15;
   }
-  if (version !== 15) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 15) {
+    // Scheduled backups: one row per run, kept as the history the backups page shows.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE backup_runs (
+      id TEXT PRIMARY KEY, trigger TEXT NOT NULL CHECK(trigger IN ('scheduled','manual')), type TEXT CHECK(type IN ('full','incremental')),
+      chain TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, size INTEGER, ok INTEGER, error TEXT
+    ) STRICT;
+    PRAGMA user_version=16;
+    COMMIT;
+  `);
+    version = 16;
+  }
+  if (version !== 16) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

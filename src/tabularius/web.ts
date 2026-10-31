@@ -10,13 +10,16 @@ export interface SearchResult { url: string; title: string; content: string }
 const FETCH_LIMIT = 2 * 1024 * 1024;
 const TEXT_LIMIT = 40_000;
 const TIMEOUT_MS = 20_000;
+/** The whole fetch, redirects and body included: a server sending a byte now and then must not hold it open for long. */
+const TOTAL_MS = 60_000;
 
 // Addresses a fetch must never reach: private, loopback, link-local, carrier-grade NAT, unspecified and multicast ranges.
 const blocked = new BlockList();
 for (const [network, prefix] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12],
   ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3]] as const) blocked.addSubnet(network, prefix, 'ipv4');
 // IPv4-mapped IPv6 addresses are checked as the IPv4 address they carry: a ::ffff:0:0/96 rule would match every IPv4 address.
-for (const [network, prefix] of [['::', 127], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8], ['64:ff9b::', 96]] as const) blocked.addSubnet(network, prefix, 'ipv6');
+// 6to4 (2002::/16) and Teredo (2001::/32) embed IPv4 addresses, which may be private.
+for (const [network, prefix] of [['::', 127], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8], ['64:ff9b::', 96], ['2002::', 16], ['2001::', 32]] as const) blocked.addSubnet(network, prefix, 'ipv6');
 export function isPublicAddress(address: string): boolean {
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
   if (mapped) return isPublicAddress(mapped[1]);
@@ -96,6 +99,7 @@ export function htmlText(html: string) {
 /** Fetches a public web page as text, following up to five redirects, each checked against the domain rules. */
 export async function fetchPage(options: WebOptions, policy: AddressPolicy, address: string) {
   let url = new URL(address);
+  const deadline = Date.now() + TOTAL_MS;
   for (let hop = 0; ; hop++) {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('only http and https URLs can be fetched');
     if (!domainAllowed(options, url.href)) throw new Error(`${url.hostname} is outside the allowed domains`);
@@ -111,11 +115,14 @@ export async function fetchPage(options: WebOptions, policy: AddressPolicy, addr
     const type = String(response.headers['content-type'] ?? '');
     if (!/^(text\/|application\/(json|xhtml\+xml))/i.test(type)) { response.resume(); throw new Error(`unsupported content type ${type || 'unknown'}`); }
     const chunks: Buffer[] = []; let size = 0;
-    for await (const chunk of response as AsyncIterable<Buffer>) {
-      size += chunk.length;
-      if (size > FETCH_LIMIT) { response.destroy(); break; }
-      chunks.push(chunk);
-    }
+    const timer = setTimeout(() => response.destroy(new Error('timed out')), Math.max(0, deadline - Date.now()));
+    try {
+      for await (const chunk of response as AsyncIterable<Buffer>) {
+        size += chunk.length;
+        if (size > FETCH_LIMIT) { response.destroy(); break; }
+        chunks.push(chunk);
+      }
+    } finally { clearTimeout(timer); }
     const body = Buffer.concat(chunks).toString('utf8');
     const text = /html/i.test(type) ? htmlText(body) : body;
     const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(body)?.[1]?.trim() ?? '';

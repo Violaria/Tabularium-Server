@@ -52,8 +52,15 @@ export function createFilter(excluded: string, masks: string): Filter {
 const lines = (value: string) => value.split('\n').map(line => line.trim()).filter(Boolean);
 
 /** Rejects a rule list that would fail later: every mask must compile. */
+/**
+ * Mask patterns run on the server's main thread over every note, so patterns that can take exponential time are refused:
+ * a quantified group that itself contains a quantifier (such as `(a+)+`), and back-references.
+ */
 export function checkMasks(masks: string) {
-  for (const source of lines(masks)) new RegExp(source, 'g');
+  for (const source of lines(masks)) {
+    if (source.length > 300 || /\\[1-9]|\\k</.test(source) || /\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*(?:[+*{]|\?(?!:))/.test(source)) throw new Error('Unsafe mask pattern');
+    new RegExp(source, 'g');
+  }
 }
 
 /**
