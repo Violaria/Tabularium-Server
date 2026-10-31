@@ -1,4 +1,4 @@
-// AI settings, for administrators: providers with their keys and models, the default model, the server's default prompt,
+// LLM settings, for administrators: providers with their keys and models, the default model, the server's default prompt,
 // the server's model parameters, and the knowledge base (RAGFlow). Keys are shown only by their last four characters.
 import { t } from './i18n.js';
 import { api, ApiError, escape, message, tip } from './core.js';

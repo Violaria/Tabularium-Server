@@ -642,9 +642,7 @@ const en = {
   'error.Invalid colour recipe': 'The colour scheme is not valid.',
   'share.signInFirst': 'Sign in to the Tabularium server first.',
   'nav.tabularius': 'Clerk',
-  'nav.ai': 'AI settings',
   'ai.notConfigured': 'Tabularius is not enabled on this server: set TABULARIUS_SECRET_KEY in the server\'s .env first.',
-  'ai.saved': 'AI settings saved; new requests use them.',
   'ai.modelsTitle': 'Models',
   'ai.modelsDesc': 'Models of the providers set up below are offered in every vault and conversation. The default model is used where nothing else is chosen.',
   'ai.defaultModel': 'Default model',
@@ -843,6 +841,9 @@ const en = {
   'ai.sandboxImages': 'Sandbox images',
   'ai.sandboxImagesHint': 'Container images the sandbox may run, one per line; they must exist on the server.',
   'error.Passwords need TABULARIUS_SECRET_KEY on the server': 'Storing passwords needs TABULARIUS_SECRET_KEY on the server.',
+  'nav.ai': 'LLM settings',
+  'ai.saved': 'LLM settings saved; new requests use them.',
+  'settings.saved': 'Server settings saved; they apply to the next request.',
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1488,9 +1489,7 @@ const zh: Catalogue = {
   'error.Invalid colour recipe': '配色方案无效。',
   'share.signInFirst': '请先登录 Tabularium 服务器。',
   'nav.tabularius': '书记员',
-  'nav.ai': 'AI 设置',
   'ai.notConfigured': '这台服务器没有启用 Tabularius：先在服务器的 .env 中设置 TABULARIUS_SECRET_KEY。',
-  'ai.saved': 'AI 设置已保存，之后的请求使用新设置。',
   'ai.modelsTitle': '模型',
   'ai.modelsDesc': '下面配置好的提供商的模型可供各笔记库和对话选择。没有另外选择时使用默认模型。',
   'ai.defaultModel': '默认模型',
@@ -1689,6 +1688,9 @@ const zh: Catalogue = {
   'ai.sandboxImages': '沙箱可用镜像',
   'ai.sandboxImagesHint': '沙箱可以运行的容器镜像，每行一个，服务器上要有这些镜像。',
   'error.Passwords need TABULARIUS_SECRET_KEY on the server': '保存密码需要服务器上的 TABULARIUS_SECRET_KEY。',
+  'nav.ai': 'LLM 设置',
+  'ai.saved': 'LLM 设置已保存，之后的请求使用新设置。',
+  'settings.saved': '服务器设置已保存，下一次请求起生效。',
 };
 
 const la: Catalogue = {
@@ -2331,9 +2333,7 @@ const la: Catalogue = {
   "error.Invalid colour recipe": "Colores non validi sunt.",
   "share.signInFirst": "Prius in ministrum Tabularium intra.",
   "nav.tabularius": "Tabularius",
-  "nav.ai": "Optiones AI",
   "ai.notConfigured": "Tabularius in hoc ministro non est: prius TABULARIUS_SECRET_KEY in .env ministri pone.",
-  "ai.saved": "Optiones AI servatae; petitiones sequentes eis utuntur.",
   "ai.modelsTitle": "Exemplaria",
   "ai.modelsDesc": "Exemplaria praebitorum infra constitutorum in omnibus tabulariis et colloquiis offeruntur. Ubi nihil aliud eligitur, exemplar praefinitum adhibetur.",
   "ai.defaultModel": "Exemplar praefinitum",
@@ -2532,6 +2532,9 @@ const la: Catalogue = {
   "ai.sandboxImages": "Imagines arenae",
   "ai.sandboxImagesHint": "Imagines quas arena currere potest, una in singulis lineis; in ministro adesse debent.",
   "error.Passwords need TABULARIUS_SECRET_KEY on the server": "Tesserae servandae TABULARIUS_SECRET_KEY in ministro requirunt.",
+  "nav.ai": "Optiones LLM",
+  "ai.saved": "Optiones LLM servatae; petitiones sequentes eis utuntur.",
+  "settings.saved": "Optiones ministratoris servatae; a proxima petitione valent.",
 };
 
 export const catalogues = { en, zh, la } as const;

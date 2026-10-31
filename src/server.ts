@@ -567,7 +567,7 @@ export async function createGateway(config: Config) {
         json(res, 200, { ...overview, knowledge: overview.knowledge && user.role === 'admin', admin: user.role === 'admin',
           modes: user.role === 'admin' ? MODES.slice(0, MODES.indexOf(t.modeLimit()) + 1) : ['read-only'], vaults: vaults.map(t.status) }); return;
       }
-      // AI settings: providers and keys, models, the default prompt and parameters, the knowledge base. Administrators only.
+      // LLM settings: providers and keys, models, the default prompt and parameters, the knowledge base. Administrators only.
       if (route[1] === 'settings') {
         if (user.role !== 'admin') fail(403, 'Administrator required');
         if (route.length === 2 && method === 'GET') { json(res, 200, t.settings()); return; }

@@ -462,7 +462,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     const answer: Answer = { read: new Set(), sources: new Map(), found: new Map(), searches: 0, fetches: 0 };
     try {
       const model = modelFor(conversation);
-      if (!model) throw new ProviderError('No model is configured; an administrator sets up providers in the AI settings');
+      if (!model) throw new ProviderError('No model is configured; an administrator sets up providers in the LLM settings');
       const provider = settings.provider(model);
       const name = parseModel(model)!.provider;
       // The conversation's parameters over the vault's over the server's, for this conversation's provider.

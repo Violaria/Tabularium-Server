@@ -49,7 +49,7 @@ export async function renderServerSettings(body: HTMLElement) {
         ${ACCESS.map(([name, min, max, step]) => field(t(`settings.access.${name}`), `<input name="${name}" type="number" min="${min}" max="${max}" step="${step}" value="${view.access[name]}">`, t(`settings.access.${name}Hint`))).join('')}
       </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form></section>`;
   window.scrollTo(0, scrolled);
-  const save = async (data: Record<string, unknown>) => { await api('/admin/settings', 'PUT', data); await renderServerSettings(body); message(t('ai.saved')); };
+  const save = async (data: Record<string, unknown>) => { await api('/admin/settings', 'PUT', data); await renderServerSettings(body); message(t('settings.saved')); };
   form('mail', async data => {
     const host = String(data.get('host')).trim();
     const password = String(data.get('password') ?? '');
