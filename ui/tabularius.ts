@@ -1,16 +1,18 @@
 // Tabularius: enable the AI curator for a vault, set what it may send, and talk to it about the notes.
 import { formatDate, serverError, t } from './i18n.js';
 import { api, ApiError, confirmAction, escape, message, run, state, tip } from './core.js';
-import { FormError, modelName, modelOptions, paramForm, paramLabel, PROVIDER_NAMES, type ModelOption, type Params, type ProviderName, type Rule } from './params.js';
+import { FormError, paramForm, paramLabel, PROVIDER_NAMES, type Params, type ProviderName, type Rule } from './params.js';
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
-  deviceRevoked?: boolean; knowledge?: boolean; web?: boolean; mode?: Mode; params?: Partial<Record<ProviderName, Params>>; prompt?: string; model?: string | null; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
+  deviceRevoked?: boolean; knowledge?: boolean; web?: boolean; mode?: Mode; prompt?: string; recipe?: string | null; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
 }
 type Mode = 'read-only' | 'restricted' | 'full';
-interface Overview { models: ModelOption[]; defaultModel: string; rules: Record<ProviderName, Record<string, Rule>>; serverParams: Record<ProviderName, Params>;
+/** A recipe: a model with parameters and a prompt, set up by an administrator. */
+interface RecipeView { id: string; name: string; model: string; modelName: string; provider: ProviderName; params: Params; prompt: string }
+interface Overview { recipes: RecipeView[]; defaultRecipe: string; rules: Record<ProviderName, Record<string, Rule>>;
   embeddings: boolean; knowledge: boolean; web: boolean; admin: boolean; modes: Mode[]; vaults: VaultStatus[] }
-/** The open conversation's model, extra prompt and parameters, or what a new conversation will start with. */
-interface ChatSettings { model: string; prompt: string; params: Partial<Record<ProviderName, Params>> }
+/** The open conversation's recipe, extra prompt and adjusted parameters, or what a new conversation will start with. */
+interface ChatSettings { recipe: string; prompt: string; params: Partial<Record<ProviderName, Params>> }
 interface Summary { id: string; title: string; updatedAt: number }
 interface ProposalRef { id: string; title: string; status: string; files?: number }
 interface ToolUse { name: string; input: Record<string, unknown>; proposal?: ProposalRef }
@@ -37,13 +39,15 @@ let conversations: Summary[] = [];
 let conversationId: string | undefined;
 let entries: Entry[] = [];
 let busy = false;
-let chat: ChatSettings = { model: '', prompt: '', params: {} };
-const providerOf = (model: string) => model.slice(0, model.indexOf('/')) as ProviderName;
-/** A new conversation starts with the vault's default model, else the server's. */
+let chat: ChatSettings = { recipe: '', prompt: '', params: {} };
+const recipeOf = (id: string | null | undefined) => overview!.recipes.find(recipe => recipe.id === id);
+/** A new conversation starts with the vault's default recipe, else the server's. */
 function newChat() {
-  const own = vault()?.model;
-  chat = { model: own && overview!.models.some(m => m.id === own) ? own : overview!.defaultModel, prompt: '', params: {} };
+  chat = { recipe: recipeOf(vault()?.recipe)?.id ?? overview!.defaultRecipe, prompt: '', params: {} };
 }
+/** Recipes as select options with their model's name; `empty` adds a first option with the value ''. */
+const recipeOptions = (selected: string, empty?: string) => (empty === undefined ? '' : `<option value="" ${selected ? '' : 'selected'}>${escape(empty)}</option>`)
+  + overview!.recipes.map(recipe => `<option value="${escape(recipe.id)}" ${recipe.id === selected ? 'selected' : ''}>${escape(recipe.name)}</option>`).join('');
 
 const vault = () => overview?.vaults.find(v => v.id === vaultId);
 
@@ -146,33 +150,34 @@ function shell(content: string) {
 }
 async function openConversation(id: string) {
   const loaded = await api<{ id: string; messages: Entry[] } & ChatSettings>(`/tabularius/conversations/${id}`);
-  view = 'chat'; conversationId = loaded.id; entries = loaded.messages; chat = { model: loaded.model, prompt: loaded.prompt, params: loaded.params ?? {} }; draw();
+  view = 'chat'; conversationId = loaded.id; entries = loaded.messages; chat = { recipe: loaded.recipe, prompt: loaded.prompt, params: loaded.params ?? {} }; draw();
 }
 /** Saves the conversation's settings, or keeps them for the first message of a new conversation. */
 async function saveChat(next: Partial<ChatSettings>) {
-  const before = chat.model;
+  const before = recipeOf(chat.recipe);
   chat = { ...chat, ...next };
   if (conversationId) {
     const saved = await api<ChatSettings>(`/tabularius/conversations/${conversationId}`, 'PATCH', next);
-    chat = { model: saved.model, prompt: saved.prompt, params: saved.params ?? {} };
+    chat = { recipe: saved.recipe, prompt: saved.prompt, params: saved.params ?? {} };
   }
-  // Parameters chosen for another provider do not travel with a switch of model.
-  if (next.model && before && providerOf(before) !== providerOf(next.model)) {
-    const left = Object.keys({ ...(vault()?.params?.[providerOf(before)] ?? {}), ...(chat.params[providerOf(before)] ?? {}) });
-    if (left.length) message(t('tabularius.paramsNotApplied', { names: left.map(paramLabel).join(', '), model: modelName(overview!.models, next.model) }));
+  // Adjustments made for another provider do not travel with a switch of recipe.
+  const after = recipeOf(chat.recipe);
+  if (next.recipe && before && after && before.provider !== after.provider) {
+    const left = Object.keys(chat.params[before.provider] ?? {});
+    if (left.length) message(t('tabularius.paramsNotApplied', { names: left.map(paramLabel).join(', '), model: after.modelName }));
   }
 }
-/** The conversation settings dialog: an extra prompt and parameters for the conversation's model. */
+/** The conversation settings dialog: an extra prompt, and adjustments to the recipe's parameters for this conversation. */
 function chatSettings() {
-  const provider = providerOf(chat.model);
+  const recipe = recipeOf(chat.recipe);
+  const provider = recipe?.provider;
   const dialog = document.createElement('dialog');
   dialog.className = 'dialog chat-settings';
   dialog.innerHTML = `<form method="dialog" class="stack"><h2>${t('tabularius.chatSettings')}</h2><label><span>${t('tabularius.chatPrompt')}${tip(t('tabularius.chatPromptHint'))}</span><textarea name="prompt" rows="4">${escape(chat.prompt)}</textarea></label>
-    <h3>${t('tabularius.paramsFor', { model: escape(modelName(overview!.models, chat.model)) })}</h3><div class="chat-params"></div>
+    <h3>${t('tabularius.paramsFor', { recipe: escape(recipe?.name ?? ''), model: escape(recipe?.modelName ?? '') })}${tip(t('tabularius.paramsForHint'))}</h3><div class="chat-params"></div>
     <div class="buttons"><button type="button" data-cancel>${t('dialog.cancel')}</button><button type="submit" class="primary">${t('common.save')}</button></div></form>`;
   document.body.append(dialog);
-  const defaults = { ...overview!.serverParams[provider], ...(vault()?.params?.[provider] ?? {}) };
-  const read = provider ? paramForm(dialog.querySelector<HTMLElement>('.chat-params')!, provider, overview!.rules[provider], defaults, chat.params[provider] ?? {}) : () => ({});
+  const read = provider ? paramForm(dialog.querySelector<HTMLElement>('.chat-params')!, provider, overview!.rules[provider], recipe!.params, chat.params[provider] ?? {}) : () => ({});
   const close = () => { dialog.close(); dialog.remove(); };
   dialog.addEventListener('cancel', close);
   dialog.querySelector('[data-cancel]')!.addEventListener('click', close);
@@ -206,7 +211,7 @@ const rulesFields = (excluded: string, masks: string) => `
 
 function drawEnable(current: VaultStatus) {
   shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.enableTitle', { name: escape(current.name) })}</h1></div></header>
-    <div class="card"><p>${t('tabularius.enableWarning', { provider: escape(overview!.defaultModel ? modelName(overview!.models, overview!.defaultModel) : t('tabularius.noModel')) })}</p>
+    <div class="card"><p>${t('tabularius.enableWarning', { provider: escape(recipeOf(overview!.defaultRecipe)?.modelName ?? t('tabularius.noModel')) })}</p>
     <form id="enable" class="stack"><label class="check"><input type="checkbox" name="confirm" required> ${t('tabularius.enableConfirm')}</label>
     <label>${t('tabularius.passphrase')}<input name="passphrase" type="password" autocomplete="off" required></label>
     ${rulesFields('', '')}
@@ -270,13 +275,11 @@ function drawSettings(current: VaultStatus) {
     <div class="card"><h2>${t('tabularius.promptTitle')}${tip(t('tabularius.promptDesc'))}</h2><form id="vault-prompt" class="stack"><textarea name="prompt" rows="8" spellcheck="false">${escape(current.prompt ?? '')}</textarea>
       <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="import-prompt">${t('tabularius.importPrompt')}</button></div></form>
       <details id="preview"><summary>${t('tabularius.preview')}${tip(t('tabularius.previewHint'))}</summary><div class="preview-body"></div></details></div>
-    <div class="card"><div class="card-head"><h2>${t('tabularius.modelTitle')}</h2>${overview!.admin ? `<a class="button" href="/admin/ai" data-route>${t('tabularius.manageModels')}</a>` : ''}</div><label>${t('tabularius.vaultModel')}<select id="vault-model">${modelOptions(overview!.models, current.model ?? '', t('tabularius.followServer'))}</select></label></div>
-    <div class="card"><h2>${t('tabularius.paramsTitle')}${tip(t('tabularius.paramsDesc'))}</h2>${[...new Set(overview!.models.map(m => m.provider))].map(provider =>
-      `<details class="param-provider"${provider === providerOf(current.model || overview!.defaultModel) ? ' open' : ''}><summary>${PROVIDER_NAMES[provider]}</summary><div data-params="${provider}"></div></details>`).join('') || `<p class="muted">${t('tabularius.noModel')}</p>`}
-      <button class="primary" type="button" id="save-params">${t('common.save')}</button></div>
+    <div class="card"><div class="card-head"><h2>${t('tabularius.recipeTitle')}${tip(t('tabularius.recipeDesc'))}</h2>${overview!.admin ? `<a class="button" href="/admin/ai" data-route>${t('tabularius.manageRecipes')}</a>` : ''}</div>
+      <label>${t('tabularius.vaultRecipe')}<select id="vault-recipe">${recipeOptions(recipeOf(current.recipe)?.id ?? '', t('tabularius.followServer'))}</select></label></div>
     ${overview!.knowledge ? `<div class="card"><div class="card-head"><h2>${t('tabularius.knowledge')}${tip(t('tabularius.knowledgeDesc'))}</h2><a class="button" href="/admin/ai" data-route>${t('tabularius.knowledgeSettings')}</a></div>
       <label class="check"><input type="checkbox" id="knowledge" ${current.knowledge ? 'checked' : ''}> ${t('tabularius.knowledgeEnable')}</label></div>` : ''}
-    <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.model')}</dt><dd>${escape(current.model || overview!.defaultModel ? modelName(overview!.models, current.model || overview!.defaultModel) : t('tabularius.noModel'))}</dd>
+    <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.recipe')}</dt><dd>${escape(((recipe) => recipe ? `${recipe.name} · ${PROVIDER_NAMES[recipe.provider]} ${recipe.modelName}` : t('tabularius.noModel'))(recipeOf(current.recipe) ?? recipeOf(overview!.defaultRecipe)))}</dd>
       <dt>${t('tabularius.embeddings')}</dt><dd>${overview!.embeddings ? t('tabularius.embeddingsOn') : t('tabularius.embeddingsOff')}</dd>
       <dt>${t('tabularius.enabledAt')}</dt><dd>${formatDate(current.enabledAt!)}</dd></dl>
       ${current.log?.length ? `<details><summary>${t('tabularius.log')}</summary><pre class="mono">${escape(current.log.join('\n'))}</pre></details>` : ''}</div>
@@ -309,18 +312,6 @@ function drawSettings(current: VaultStatus) {
       await api(`/tabularius/hosts/${id}`, 'DELETE'); await loadHosts(); draw();
     }));
   }
-  const providers = [...new Set(overview!.models.map(m => m.provider))];
-  const readers = Object.fromEntries(providers.map(provider => [provider,
-    paramForm(document.querySelector<HTMLElement>(`[data-params="${provider}"]`)!, provider, overview!.rules[provider], overview!.serverParams[provider] ?? {}, current.params?.[provider] ?? {})]));
-  document.getElementById('save-params')?.addEventListener('click', () => void run(async () => {
-    let params: Record<string, Params>;
-    try { params = Object.fromEntries(providers.map(provider => [provider, readers[provider]()])); } catch (error) {
-      if (error instanceof FormError) { message(error.message, true); return; }
-      throw error;
-    }
-    await api(`/tabularius/vaults/${vaultId}/params`, 'PUT', { params: { ...current.params, ...params } });
-    await refresh(); message(t('tabularius.saved'));
-  }));
   form('vault-prompt', async data => {
     await api(`/tabularius/vaults/${vaultId}/prompt`, 'PUT', { prompt: data.get('prompt') });
     await refresh(); message(t('tabularius.promptSaved'));
@@ -332,13 +323,13 @@ function drawSettings(current: VaultStatus) {
   }));
   document.getElementById('preview')!.addEventListener('toggle', event => void run(async () => {
     if (!(event.target as HTMLDetailsElement).open) return;
-    const preview = await api<{ fixed: string; server: string; vault: string }>(`/tabularius/vaults/${vaultId}/prompt`);
-    document.querySelector('#preview .preview-body')!.innerHTML = [[t('tabularius.previewServer'), preview.server], [t('tabularius.previewFixed'), preview.fixed], [t('tabularius.previewVault'), preview.vault]]
+    const preview = await api<{ fixed: string; server: string; vault: string; recipe: string }>(`/tabularius/vaults/${vaultId}/prompt`);
+    document.querySelector('#preview .preview-body')!.innerHTML = [[t('tabularius.previewServer'), preview.server], [t('tabularius.previewFixed'), preview.fixed], [t('tabularius.previewVault'), preview.vault], [t('tabularius.previewRecipe'), preview.recipe]]
       .map(([title, text]) => `<h4>${escape(title)}</h4><pre class="prompt-text">${escape(text || '—')}</pre>`).join('');
   }));
-  document.getElementById('vault-model')!.addEventListener('change', event => void run(async () => {
+  document.getElementById('vault-recipe')!.addEventListener('change', event => void run(async () => {
     const value = (event.target as HTMLSelectElement).value;
-    await api(`/tabularius/vaults/${vaultId}/model`, 'PUT', { model: value || null });
+    await api(`/tabularius/vaults/${vaultId}/recipe`, 'PUT', { recipe: value || null });
     await refresh(); message(t('tabularius.saved'));
   }));
   document.getElementById('knowledge')?.addEventListener('change', event => void run(async () => {
@@ -426,15 +417,14 @@ function drawChat(current: VaultStatus) {
   const title = conversations.find(c => c.id === conversationId)?.title ?? (entries.length ? t('tabularius.newChat') : '');
   const composer = `<form id="ask" class="composer"><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${t('tabularius.ask')}" aria-label="${t('tabularius.ask')}" required ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></form>`;
   // A new conversation starts in the middle of the page; once it has messages the box moves below them.
-  const models = overview!.models;
-  const picker = models.length ? `<select id="chat-model" class="compact" aria-label="${t('tabularius.model')}">${modelOptions(models, chat.model, chat.model ? undefined : t('tabularius.noModel'))}</select><button id="chat-settings" type="button">${t('tabularius.chatSettings')}</button>` : '';
+  const picker = overview!.recipes.length ? `<select id="chat-recipe" class="compact" aria-label="${t('tabularius.recipe')}" title="${escape(recipeOf(chat.recipe)?.modelName ?? '')}">${recipeOptions(chat.recipe, chat.recipe ? undefined : t('tabularius.noModel'))}</select><button id="chat-settings" type="button">${t('tabularius.chatSettings')}</button>` : '';
   shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${picker}${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
     ${current.indexError ? `<p class="notice error">${t('tabularius.indexError', { error: escape(current.indexError) })}</p>` : ''}
     ${entries.length ? `<section id="log" class="log" aria-live="polite">${entries.map(entryHtml).join('')}</section><div class="chat-bottom">${composer}</div>`
     : `<div class="chat-start"><div class="chat-start-inner"><h2 class="chat-hello">Tabularius</h2>${composer}</div></div><div id="log" hidden></div>`}`);
   const log = document.getElementById('log')!;
   log.scrollTop = log.scrollHeight;
-  document.getElementById('chat-model')?.addEventListener('change', event => void run(async () => { await saveChat({ model: (event.target as HTMLSelectElement).value }); draw(); }));
+  document.getElementById('chat-recipe')?.addEventListener('change', event => void run(async () => { await saveChat({ recipe: (event.target as HTMLSelectElement).value }); draw(); }));
   document.getElementById('chat-settings')?.addEventListener('click', chatSettings);
   document.getElementById('delete')?.addEventListener('click', () => void run(async () => {
     if (!await confirmAction({ title: t('tabularius.deleteChat'), body: t('tabularius.confirmDeleteChat'), action: t('tabularius.deleteChat'), danger: true })) return;
@@ -464,7 +454,7 @@ async function ask(text: string) {
   update();
   try {
     const response = await fetch(conversationId ? `/api/v1/tabularius/conversations/${conversationId}/messages` : `/api/v1/tabularius/vaults/${vaultId}/conversations`, {
-      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': state.session!.csrf }, body: JSON.stringify(conversationId ? { message: text } : { message: text, model: chat.model || undefined, prompt: chat.prompt, params: chat.params }),
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': state.session!.csrf }, body: JSON.stringify(conversationId ? { message: text } : { message: text, recipe: chat.recipe || undefined, prompt: chat.prompt, params: chat.params }),
     });
     if (!response.ok) throw new ApiError(response.status, serverError((await response.json()).error));
     const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();

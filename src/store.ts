@@ -277,6 +277,18 @@ export function openStore(path: string) {
   `);
     version = 14;
   }
-  if (version !== 14) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 14) {
+    // Recipes (model, parameters and prompt) replace a vault's and a conversation's model; the old columns stay unread
+    // except a conversation's parameters, which become its adjustments to the recipe.
+    db.exec(`
+    BEGIN;
+    ALTER TABLE tabularius_vaults ADD COLUMN recipe TEXT;
+    ALTER TABLE tabularius_conversations ADD COLUMN recipe TEXT;
+    PRAGMA user_version=15;
+    COMMIT;
+  `);
+    version = 15;
+  }
+  if (version !== 15) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

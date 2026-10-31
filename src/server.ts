@@ -313,7 +313,7 @@ export async function createGateway(config: Config) {
       let storage = false;
       try { const up = await couch.admin('/_up'); storage = up.ok; await up.arrayBuffer(); } catch { /* Shown as not ready. */ }
       server = { uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000), activeProxyConnections: active.size, storage,
-        model: tabularius ? tabularius.modelName(tabularius.overview().defaultModel) || null : null };
+        model: tabularius ? (({ recipes, defaultRecipe }) => recipes.find(recipe => recipe.id === defaultRecipe)?.name ?? null)(tabularius.overview()) : null };
     }
     return { vaults: result, conversations, server };
   }
@@ -616,18 +616,14 @@ export async function createGateway(config: Config) {
           audit(user.id, data.enabled ? 'tabularius.web.enable' : 'tabularius.web.disable', vault.id);
           json(res, 200, t.status(vault)); return;
         }
-        if (route.length === 4 && route[3] === 'params' && method === 'PUT') {
-          t.setParams(vault.id, (await body(req, 65_536)).params);
-          json(res, 200, t.status(vault)); return;
-        }
         if (route.length === 4 && route[3] === 'prompt' && method === 'PUT') {
           t.setPrompt(vault.id, field(await body(req, 131_072), 'prompt', 40_000, 0));
           json(res, 200, t.status(vault)); return;
         }
         if (route.length === 4 && route[3] === 'prompt' && method === 'GET') { json(res, 200, t.preview(vault.id)); return; }
         if (route.length === 5 && route[3] === 'prompt' && route[4] === 'import' && method === 'POST') { json(res, 200, { prompt: await t.importPrompt(vault.id) }); return; }
-        if (route.length === 4 && route[3] === 'model' && method === 'PUT') {
-          t.setModel(vault.id, (await body(req)).model ?? null);
+        if (route.length === 4 && route[3] === 'recipe' && method === 'PUT') {
+          t.setRecipe(vault.id, (await body(req)).recipe ?? null);
           json(res, 200, t.status(vault)); return;
         }
         if (route.length === 4 && route[3] === 'mode' && method === 'PUT') {

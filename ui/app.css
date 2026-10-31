@@ -516,6 +516,20 @@ th .tip::after { bottom: auto; top: calc(100% + 8px); }
 .model-list legend { display: flex; align-items: center; justify-content: space-between; width: 100%; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
 .model-list [data-models] { display: grid; gap: 4px; max-height: 260px; overflow-y: auto; }
 .model-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* The name takes the space left and wraps; the test link keeps its width. */
+.model-row label { min-width: 0; flex: 1; }
+.model-row label span { overflow-wrap: anywhere; }
+.model-row > button { flex: none; white-space: nowrap; }
 .model-row small.mono { margin-left: 6px; }
 .error-text { color: var(--danger); }
 optgroup { font-weight: 600; }
+
+/* LLM recipes: one row per recipe that opens into its form. */
+.llm-recipes { display: grid; gap: 8px; }
+.llm-recipe { border: 1px solid var(--line); border-radius: 12px; padding: 0 14px; background: var(--panel-soft); }
+.llm-recipe > summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
+.llm-recipe > summary::-webkit-details-marker { display: none; }
+.llm-recipe > summary .muted { font-size: 13px; }
+.llm-recipe[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+.llm-recipe > form { padding-bottom: 14px; }
+.llm-recipe h4 { margin: 4px 0 0; font-size: 14px; }

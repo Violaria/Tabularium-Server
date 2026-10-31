@@ -1,20 +1,22 @@
-// LLM settings, for administrators: providers with their keys and models, the default model, the server's default prompt,
-// the server's model parameters, and the knowledge base (RAGFlow). Keys are shown only by their last four characters.
+// LLM settings, for administrators: providers with their keys and models, recipes (a model with parameters and a prompt)
+// with the default one, the server's default prompt, and the knowledge base (RAGFlow). Keys are shown only by their last
+// four characters.
 import { t } from './i18n.js';
-import { api, ApiError, escape, message, tip } from './core.js';
+import { api, ApiError, confirmAction, escape, message, tip } from './core.js';
 import { FormError, modelName, modelOptions, paramForm, PROVIDER_NAMES as NAMES, type ModelOption, type Params, type ProviderName, type Rule } from './params.js';
 
 interface ModelEntry { id: string; name: string; context?: number }
 interface ProviderView { configured: boolean; keySet: boolean; keyHint: string; models: ModelEntry[]; url: string }
 interface Knowledge { url: string; datasets: string[]; limit: number; threshold: number; weight: number; keyword: boolean; topK: number; rerank: string }
+interface RecipeView { id?: string; name: string; model: string; params: Params; prompt: string }
 interface SettingsView {
-  prompt: string; defaultPrompt: string; defaultModel: string; params: Partial<Record<ProviderName, Params>>;
+  prompt: string; defaultPrompt: string; recipes: RecipeView[]; defaultRecipe: string;
   providers: Record<ProviderName, ProviderView>; knowledge: Knowledge;
   embedding: { url: string; keySet: boolean; hint: string; model: string; batch: number };
   web: { enabled: boolean; searxng: string; allowed: string[]; blocked: string[]; maxUses: number; intranet: string[] };
   limits: { modeLimit: 'read-only' | 'restricted' | 'full'; sshTimeout: number; sandboxImages: string[] };
 }
-interface Overview { models: ModelOption[]; rules: Record<ProviderName, Record<string, Rule>> }
+interface Overview { rules: Record<ProviderName, Record<string, Rule>> }
 const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
 
 export async function renderAiSettings(body: HTMLElement) {
@@ -31,26 +33,43 @@ export async function renderAiSettings(body: HTMLElement) {
   };
   const providerCard = (name: ProviderName) => {
     const item = view.providers[name];
-    const keyField = `<label>${name === 'vllm' ? t('ai.keyOptional') : t('ai.key')}<input type="password" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label>`
+    const keyField = `<label>${name === 'vllm' ? `<span>${t('ai.keyOptional')}${tip(t('ai.keyOptionalHint'))}</span>` : t('ai.key')}<input type="password" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label>`
       + (item.keySet ? `<label class="check"><input type="checkbox" name="clear"> ${t('ai.clearKey')}</label>` : '');
     return `<form class="card stack provider" data-provider="${name}"><div class="provider-head"><h3>${NAMES[name]}</h3><span class="badge ${item.configured ? '' : 'off'}">${item.configured ? t('ai.ready') : t('ai.notSet')}</span></div>
-      ${name === 'vllm' ? `<label>${t('ai.url')}<input name="url" value="${escape(item.url)}" placeholder="http://vllm:8000/v1"></label>` : ''}${keyField}
+      ${name === 'vllm' ? `<label><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" value="${escape(item.url)}" placeholder="http://vllm:8000/v1"></label>` : ''}${keyField}
       <fieldset class="model-list"><legend>${t('ai.models')}${item.configured ? `<button type="button" class="link" data-refresh>${t('ai.refreshModels')}</button>` : ''}</legend>
         <div data-models>${item.configured ? `<small>${t('ai.loadingModels')}</small>` : `<small>${t('ai.modelsAfterKey')}</small>`}</div></fieldset>
       <div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form>`;
   };
   const datasetList = (datasets: { id: string; name: string; description: string }[], chosen: string[]) => datasets.map(item =>
     `<label class="check dataset"><input type="checkbox" name="dataset" value="${escape(item.id)}" ${chosen.includes(item.id) ? 'checked' : ''}> <span><strong>${escape(item.name)}</strong><small>${escape(item.description)}</small></span></label>`).join('');
+  /** The models ticked under providers that are set up: what a recipe can be based on. */
+  const models: ModelOption[] = PROVIDERS.flatMap(name => view.providers[name].configured
+    ? view.providers[name].models.map(model => ({ id: `${name}/${model.id}`, provider: name, model: model.id, name: model.name })) : []);
+  const recipeItem = (recipe: RecipeView, index: number) => {
+    const available = models.some(model => model.id === recipe.model);
+    const isDefault = recipe.id !== undefined && recipe.id === view.defaultRecipe;
+    return `<details class="llm-recipe" data-index="${index}"${recipe.id ? '' : ' open'}><summary><strong>${escape(recipe.name || t('ai.recipeNew'))}</strong>`
+      + `<span class="muted">${escape(available ? `${NAMES[models.find(model => model.id === recipe.model)!.provider]} · ${modelName(models, recipe.model)}` : recipe.model)}</span>${isDefault ? `<span class="badge">${t('ai.recipeDefault')}</span>` : ''}`
+      + `${recipe.model && !available ? `<span class="badge warn">${t('ai.recipeUnavailable')}</span>` : ''}</summary>
+      <form class="stack"><div class="recipe-fields">
+        <label>${t('ai.recipeName')}<input name="name" required maxlength="60" value="${escape(recipe.name)}"></label>
+        <label>${t('ai.recipeModel')}<select name="model" required>${modelOptions(models, available ? recipe.model : '', t('ai.recipeChooseModel'))}</select></label>
+      </div>
+      <label><span>${t('ai.recipePrompt')}${tip(t('ai.recipePromptHint'))}</span><textarea name="prompt" rows="4">${escape(recipe.prompt)}</textarea></label>
+      <h4>${t('ai.recipeParams')}${tip(t('ai.recipeParamsHint'))}</h4><div data-params></div>
+      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button>${recipe.id && !isDefault ? `<button type="button" data-default>${t('ai.recipeMakeDefault')}</button>` : ''}`
+      + `${recipe.id ? `<button type="button" class="danger" data-delete>${t('ai.recipeDelete')}</button>` : `<button type="button" data-cancel>${t('ai.recipeCancel')}</button>`}</div></form></details>`;
+  };
   const k = view.knowledge;
   // Drawn again after saving: stay where the page was.
   const scrolled = window.scrollY;
-  body.innerHTML = `<section class="card"><h2>${t('ai.modelsTitle')}${tip(t('ai.modelsDesc'))}</h2>
-      <label class="inline-select">${t('ai.defaultModel')}<select id="default-model">${modelOptions(overview.models, view.defaultModel, t('ai.defaultNone'))}</select></label></section>
+  body.innerHTML = `<section class="card"><h2>${t('ai.providersTitle')}${tip(t('ai.providersDesc'))}</h2></section>
     <div class="providers">${PROVIDERS.map(providerCard).join('')}</div>
+    <section class="card"><div class="card-head"><h2>${t('ai.recipesTitle')}${tip(t('ai.recipesDesc'))}</h2>${models.length ? `<button type="button" id="add-recipe">${t('ai.recipeAdd')}</button>` : ''}</div>
+      <div id="recipes" class="llm-recipes">${view.recipes.length ? view.recipes.map(recipeItem).join('') : `<p class="muted">${models.length ? t('ai.recipesNone') : t('ai.recipesNeedModels')}</p>`}</div></section>
     <section class="card"><h2>${t('ai.promptTitle')}${tip(t('ai.promptDesc'))}</h2><form id="server-prompt" class="stack"><textarea name="prompt" rows="16" spellcheck="false">${escape(view.prompt)}</textarea>
       <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="restore-prompt">${t('ai.restorePrompt')}</button></div></form></section>
-    <section class="card"><h2>${t('ai.paramsTitle')}${tip(t('ai.paramsDesc'))}</h2>${PROVIDERS.map(name => `<details class="param-provider"${name === overview.models[0]?.provider ? ' open' : ''}><summary>${NAMES[name]}</summary><div data-params="${name}"></div></details>`).join('')}
-      <button class="primary" type="button" id="save-params">${t('common.save')}</button></section>
     <section class="card"><h2>${t('ai.knowledgeTitle')}${tip(`${t('ai.knowledgeDesc')} ${t('ai.knowledgeHint')}`)}</h2><form id="knowledge" class="stack">
       <div class="inline-form"><label>${t('ai.mcpUrl')}<input name="url" value="${escape(k.url)}" placeholder="http://ragflow:9382/mcp"></label><button type="button" id="read-datasets">${t('ai.readDatasets')}</button></div>
       <fieldset class="datasets"><legend>${t('ai.datasets')}</legend><div id="datasets">${k.datasets.length ? k.datasets.map(id => `<label class="check dataset"><input type="checkbox" name="dataset" value="${escape(id)}" checked> <span class="mono">${escape(id)}</span></label>`).join('') : `<small>${t('ai.noDatasets')}</small>`}</div></fieldset>
@@ -87,7 +106,58 @@ export async function renderAiSettings(body: HTMLElement) {
 
   window.scrollTo(0, scrolled);
   const run = (action: () => Promise<void>) => action().catch(error => message(error instanceof Error ? error.message : String(error), true));
-  document.getElementById('default-model')!.addEventListener('change', event => void run(() => save({ defaultModel: (event.target as HTMLSelectElement).value })));
+  const recipes: RecipeView[] = [...view.recipes];
+  /** Saves the whole list with one recipe changed (or removed), then draws the page again where it was. */
+  const saveRecipes = async (list: RecipeView[], defaultRecipe?: string) => {
+    await save({ recipes: list.map(({ id, name, model, params, prompt }) => ({ ...(id ? { id } : {}), name, model, params, prompt })), ...(defaultRecipe !== undefined ? { defaultRecipe } : {}) });
+    await renderAiSettings(body);
+    message(t('ai.saved'));
+  };
+  const bindRecipe = (item: HTMLElement) => {
+    const index = Number(item.dataset.index);
+    const recipe = recipes[index];
+    const recipeForm = item.querySelector('form')!;
+    const select = recipeForm.querySelector<HTMLSelectElement>('select[name="model"]')!;
+    const paramsRoot = item.querySelector<HTMLElement>('[data-params]')!;
+    let provider: ProviderName | undefined;
+    let read: () => Params = () => ({});
+    // The parameter form follows the model's provider; values set for another provider do not carry over.
+    const drawParams = () => {
+      const next = select.value ? models.find(model => model.id === select.value)!.provider : undefined;
+      if (next === provider) return;
+      const current = next && recipe.model.startsWith(`${next}/`) ? recipe.params : {};
+      provider = next;
+      if (next) read = paramForm(paramsRoot, next, overview.rules[next], {}, current);
+      else { paramsRoot.innerHTML = `<p class="muted">${t('ai.recipeChooseModel')}</p>`; read = () => ({}); }
+    };
+    drawParams();
+    select.addEventListener('change', drawParams);
+    recipeForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const data = new FormData(recipeForm);
+      let params: Params;
+      try { params = read(); } catch (error) { if (error instanceof FormError) { message(error.message, true); return; } throw error; }
+      const updated = { ...recipe, name: String(data.get('name')).trim(), model: String(data.get('model')), prompt: String(data.get('prompt')), params };
+      // The first recipe becomes the default, so Tabularius can answer.
+      void run(() => saveRecipes(recipes.map((other, i) => i === index ? updated : other), view.defaultRecipe ? undefined : updated.id ?? ''));
+    });
+    item.querySelector('[data-default]')?.addEventListener('click', () => void run(() => saveRecipes(recipes, recipe.id)));
+    item.querySelector('[data-cancel]')?.addEventListener('click', () => { recipes.splice(index, 1); void renderAiSettings(body); });
+    item.querySelector('[data-delete]')?.addEventListener('click', () => void run(async () => {
+      if (!await confirmAction({ title: t('ai.recipeDeleteTitle', { name: recipe.name }), body: t('ai.recipeDeleteBody'), action: t('ai.recipeDelete'), danger: true })) return;
+      await saveRecipes(recipes.filter((_, i) => i !== index));
+    }));
+  };
+  for (const item of body.querySelectorAll<HTMLElement>('details.llm-recipe')) bindRecipe(item);
+  document.getElementById('add-recipe')?.addEventListener('click', () => {
+    // One new recipe at a time.
+    if (recipes.some(recipe => !recipe.id)) return;
+    recipes.push({ name: '', model: '', params: {}, prompt: '' });
+    const list = document.getElementById('recipes')!;
+    if (!list.querySelector('details')) list.innerHTML = '';
+    list.insertAdjacentHTML('beforeend', recipeItem(recipes[recipes.length - 1], recipes.length - 1));
+    bindRecipe(list.lastElementChild as HTMLElement);
+  });
   for (const form of body.querySelectorAll<HTMLFormElement>('form.provider')) {
     const name = form.dataset.provider as ProviderName;
     form.addEventListener('submit', event => {
@@ -119,7 +189,7 @@ export async function renderAiSettings(body: HTMLElement) {
         button.disabled = true;
         try {
           const result = await api<{ reply: string }>('/tabularius/settings/test', 'POST', { model: button.dataset.test });
-          message(t('ai.testOk', { model: modelName(overview.models, button.dataset.test!), reply: result.reply }));
+          message(t('ai.testOk', { model: modelName(models, button.dataset.test!), reply: result.reply }));
         } finally { button.disabled = false; }
       }));
     };
@@ -129,11 +199,6 @@ export async function renderAiSettings(body: HTMLElement) {
   const promptForm = document.getElementById('server-prompt') as HTMLFormElement;
   promptForm.addEventListener('submit', event => { event.preventDefault(); void run(() => save({ prompt: String(new FormData(promptForm).get('prompt')) })); });
   document.getElementById('restore-prompt')!.addEventListener('click', () => { promptForm.querySelector('textarea')!.value = view.defaultPrompt; });
-  const readers = Object.fromEntries(PROVIDERS.map(name => [name, paramForm(body.querySelector<HTMLElement>(`[data-params="${name}"]`)!, name, overview.rules[name], {}, view.params[name] ?? {})]));
-  document.getElementById('save-params')!.addEventListener('click', () => void run(async () => {
-    try { await save({ params: Object.fromEntries(PROVIDERS.map(name => [name, readers[name]()])) }); }
-    catch (error) { if (error instanceof FormError) message(error.message, true); else throw error; }
-  }));
   const knowledge = document.getElementById('knowledge') as HTMLFormElement;
   document.getElementById('read-datasets')!.addEventListener('click', () => void run(async () => {
     const url = String(new FormData(knowledge).get('url')).trim();

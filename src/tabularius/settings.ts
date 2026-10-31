@@ -1,8 +1,9 @@
 // Tabularius's settings, edited by administrators on the web: the server's default prompt, the providers with their keys
-// (sealed with TABULARIUS_SECRET_KEY, never returned), the models offered, the default model, the server's model
-// parameters and the knowledge base. The first start imports what the environment configured; afterwards the
-// application database is the source.
+// (sealed with TABULARIUS_SECRET_KEY, never returned), the models offered, the recipes (a model with parameters and a
+// prompt) with the default one, and the knowledge base. The first start imports what the environment configured;
+// afterwards the application database is the source.
 import type { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import { open, seal } from './client.js';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
@@ -33,6 +34,8 @@ export interface WebSettings { enabled: boolean; searxng: string; allowed: strin
 /** The highest permission mode, how long a command may run over SSH, and the images the sandbox may run. */
 export interface Limits { modeLimit: Mode; sshTimeout: number; sandboxImages: string[] }
 interface StoredEmbedding { url: string; key: string | null; hint: string; model: string; batch: number }
+/** A named way of answering: a model offered here, its parameters and a prompt added to the vault's. */
+export interface Recipe { id: string; name: string; model: string; params: Params; prompt: string }
 export class SettingsError extends Error {}
 
 const blank = (): StoredProvider => ({ key: null, hint: '', models: [], url: '', context: 32_768 });
@@ -109,19 +112,54 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
     const all = stored();
     return PROVIDERS.flatMap(name => usable(name, all[name]) ? all[name].models.map(model => ({ id: `${name}/${model.id}`, provider: name, model: model.id, name: model.name })) : []);
   }
-  function defaultModel() {
-    const list = models();
-    // Only the administrator's choice: no model is picked on their behalf.
-    const chosen = read('default_model', '');
-    return list.some(item => item.id === chosen) ? chosen : '';
-  }
+  const recipes = () => read<Recipe[]>('recipes', []);
+  /** A recipe that can answer now: it exists and its model is offered. */
+  const usableRecipe = (id: string | null | undefined) => {
+    if (!id) return undefined;
+    const recipe = recipes().find(item => item.id === id);
+    return recipe && models().some(item => item.id === recipe.model) ? recipe : undefined;
+  };
+  /** A recipe named after its model; a second one with the same name gets a number. */
+  const nameFor = (model: string, taken: string[]) => {
+    const parsed = parseModel(model)!;
+    const base = models().find(item => item.id === model)?.name ?? displayName(parsed.provider, parsed.model);
+    let name = base;
+    for (let n = 2; taken.includes(name); n++) name = `${base} ${n}`;
+    return name;
+  };
   const knowledgeSettings = () => read<KnowledgeSettings | null>('knowledge', null);
 
   return {
-    models, defaultModel,
+    models, recipes, usableRecipe,
+    /** The administrator's default recipe, when it can answer; no recipe is picked on their behalf. */
+    defaultRecipe: () => usableRecipe(read('default_recipe', ''))?.id ?? '',
+    /**
+     * Once, when recipes arrive: the default model with its provider's server parameters becomes the default recipe, and
+     * each other model with parameters that `used` lists (a vault's or a conversation's) becomes a recipe. Returns the
+     * recipe for each entry of `used`, so behaviour does not change.
+     */
+    upgradeToRecipes(used: { model: string; params: Params }[]) {
+      if (!missing('recipes')) return undefined;
+      const made: Recipe[] = [];
+      const serverParams = read<Partial<Record<ProviderName, Params>>>('params', {});
+      const recipeFor = (model: string, params: Params) => {
+        const same = made.find(item => item.model === model && JSON.stringify(item.params) === JSON.stringify(params));
+        if (same) return same.id;
+        const recipe = { id: randomUUID(), name: nameFor(model, made.map(item => item.name)), model, params, prompt: '' };
+        made.push(recipe);
+        return recipe.id;
+      };
+      const defaultModel = read('default_model', '');
+      const parsed = parseModel(defaultModel);
+      const defaultId = parsed ? recipeFor(defaultModel, serverParams[parsed.provider] ?? {}) : '';
+      const ids = used.map(item => parseModel(item.model) ? recipeFor(item.model, { ...serverParams[parseModel(item.model)!.provider], ...item.params }) : null);
+      db.exec('BEGIN');
+      write('recipes', made);
+      write('default_recipe', defaultId);
+      db.exec('COMMIT');
+      return ids;
+    },
     prompt: () => read('prompt', DEFAULT_PROMPT),
-    /** The server's parameters for one provider. */
-    params: (name: ProviderName): Params => read<Partial<Record<ProviderName, Params>>>('params', {})[name] ?? {},
     available: (id: string) => models().some(item => item.id === id),
     /** The provider for a model offered here; created on first use and again after the settings change. */
     provider(id: string): Provider {
@@ -198,7 +236,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
     view() {
       const all = stored();
       return {
-        prompt: read('prompt', DEFAULT_PROMPT), defaultPrompt: DEFAULT_PROMPT, defaultModel: read('default_model', ''), params: read('params', {}),
+        prompt: read('prompt', DEFAULT_PROMPT), defaultPrompt: DEFAULT_PROMPT, recipes: recipes(), defaultRecipe: read('default_recipe', ''),
         providers: Object.fromEntries(PROVIDERS.map(name => [name, { configured: usable(name, all[name]), keySet: Boolean(all[name].key), keyHint: all[name].hint,
           models: all[name].models, url: all[name].url }])),
         knowledge: knowledgeSettings() ?? { url: '', datasets: [], ...KNOWLEDGE_DEFAULTS },
@@ -242,17 +280,24 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
         }
       }
       if (data.prompt !== undefined && (typeof data.prompt !== 'string' || data.prompt.length > 60_000)) throw new SettingsError('Invalid prompt');
-      let params: Record<string, Params> | undefined;
-      if (data.params !== undefined) {
-        if (typeof data.params !== 'object' || data.params === null) throw new SettingsError('Invalid parameters');
-        params = {};
-        for (const name of PROVIDERS) {
-          try { params[name] = checkParams(name, (data.params as Record<string, unknown>)[name]); } catch (error) {
-            if (error instanceof ParamsError) throw new SettingsError(`Invalid parameters: ${error.message}`);
+      let recipeList: Recipe[] | undefined;
+      if (data.recipes !== undefined) {
+        if (!Array.isArray(data.recipes) || data.recipes.length > 100) throw new SettingsError('Invalid recipes');
+        recipeList = (data.recipes as Record<string, unknown>[]).map(item => {
+          const parsed = typeof item?.model === 'string' ? parseModel(item.model) : undefined;
+          if (typeof item?.name !== 'string' || !item.name.trim() || item.name.length > 60 || !parsed || typeof item.prompt !== 'string' || item.prompt.length > 8000
+            || (item.id !== undefined && (typeof item.id !== 'string' || !/^[\w-]{1,64}$/.test(item.id)))) throw new SettingsError('Invalid recipe');
+          let params: Params;
+          try { params = checkParams(parsed.provider, item.params ?? {}); } catch (error) {
+            if (error instanceof ParamsError) throw new SettingsError(`${item.name}: ${error.message}`);
             throw error;
           }
-        }
+          return { id: (item.id as string | undefined) ?? randomUUID(), name: item.name.trim(), model: item.model as string, params, prompt: item.prompt };
+        });
+        if (new Set(recipeList.map(item => item.name)).size !== recipeList.length) throw new SettingsError('Recipe names must differ');
+        if (new Set(recipeList.map(item => item.id)).size !== recipeList.length) throw new SettingsError('Invalid recipe');
       }
+      if (data.defaultRecipe !== undefined && typeof data.defaultRecipe !== 'string') throw new SettingsError('Invalid default recipe');
       let knowledge: KnowledgeSettings | null | undefined;
       if (data.knowledge !== undefined) {
         const k = data.knowledge as Record<string, unknown> | null;
@@ -266,7 +311,6 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
             keyword: k.keyword, topK: k.topK as number, rerank: k.rerank };
         }
       }
-      if (data.defaultModel !== undefined && typeof data.defaultModel !== 'string') throw new SettingsError('Invalid default model');
       let embedding: StoredEmbedding | undefined;
       if (data.embedding !== undefined) {
         const e = data.embedding as Record<string, unknown>;
@@ -298,14 +342,14 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
       db.exec('BEGIN');
       write('providers', all);
       if (data.prompt !== undefined) write('prompt', data.prompt);
-      if (params) write('params', params);
+      if (recipeList) write('recipes', recipeList);
+      if (data.defaultRecipe !== undefined) write('default_recipe', data.defaultRecipe);
       if (knowledge !== undefined) write('knowledge', knowledge);
-      if (data.defaultModel !== undefined) write('default_model', data.defaultModel);
       if (embedding) write('embedding', embedding);
       if (web) write('web', web);
       if (limits) write('limits', limits);
       db.exec('COMMIT');
-      if (data.defaultModel && !models().some(item => item.id === data.defaultModel)) write('default_model', '');
+      if (!recipes().some(item => item.id === read('default_recipe', ''))) write('default_recipe', '');
       // Later requests use the new settings.
       cache = new Map();
       if (knowledge !== undefined) { await knowledgeBase?.close().catch(() => {}); knowledgeBase = undefined; }

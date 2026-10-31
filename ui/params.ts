@@ -8,7 +8,8 @@ export type Rule =
   | { kind: 'number'; min: number; max: number; step: number; integer?: boolean; initial: number }
   | { kind: 'enum'; values: string[]; initial: string }
   | { kind: 'boolean'; initial: boolean }
-  | { kind: 'list'; initial: string[] };
+  | { kind: 'list'; initial: string[] }
+  | { kind: 'bias'; initial: Record<string, number> };
 export type Params = Record<string, unknown>;
 export type ProviderName = 'anthropic' | 'openai' | 'vllm';
 export class FormError extends Error {}
@@ -34,7 +35,7 @@ const hint = (name: string) => { const key = `param.${name}Hint`; return hasMess
 const valueLabel = (value: string) => { const key = `param.value.${value}`; return hasMessage(key) ? t(key) : value; };
 const shown = (rule: Rule, value: unknown) =>
   value === undefined ? '' : rule.kind === 'boolean' ? (value ? t('param.on') : t('param.off')) : rule.kind === 'enum' ? valueLabel(String(value))
-    : rule.kind === 'list' ? (value as string[]).join(', ') || '—' : String(value);
+    : rule.kind === 'list' ? (value as string[]).join(', ') || '—' : rule.kind === 'bias' ? String(Object.keys(value as object).length) : String(value);
 
 /**
  * Draws the form into `root`. `defaults` are what applies when a parameter is left at default (the next level up);
@@ -63,6 +64,8 @@ export function paramForm(root: HTMLElement, provider: ProviderName, rules: Reco
         if (values[name] === undefined) delete values[name];
         draw();
       });
+      // Logit bias is typed as lines of "token ID: bias" and read when the form is saved.
+      row.querySelector<HTMLTextAreaElement>('textarea')?.addEventListener('input', event => { values[name] = (event.target as HTMLTextAreaElement).value; });
       for (const input of row.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input, select')) {
         input.addEventListener('input', () => {
           if (rule.kind === 'number') {
@@ -103,7 +106,7 @@ export function paramForm(root: HTMLElement, provider: ProviderName, rules: Reco
       if (!rule) continue;
       if (rule.kind === 'number' && (typeof value !== 'number' || !Number.isFinite(value) || value < rule.min || value > rule.max || (rule.integer && !Number.isInteger(value))))
         throw new FormError(t('param.outOfRange', { name: label(name), min: rule.min, max: rule.max }));
-      result[name] = value;
+      result[name] = rule.kind === 'bias' && typeof value === 'string' ? readBias(name, value) : value;
     }
     for (const item of custom) {
       if (!item.name.trim()) continue;
@@ -118,9 +121,24 @@ function control(name: string, rule: Rule, value: unknown) {
     const attributes = `min="${rule.min}" max="${rule.max}" step="${rule.step}" value="${escape(String(value))}"`;
     return `<input type="range" aria-label="${escape(label(name))}" ${attributes}><input type="number" class="param-number" aria-label="${escape(label(name))}" ${attributes}>`;
   }
+  if (rule.kind === 'bias') {
+    const text = typeof value === 'string' ? value : Object.entries(value as Record<string, number>).map(([token, bias]) => `${token}: ${bias}`).join('\n');
+    return `<textarea rows="3" spellcheck="false" aria-label="${escape(label(name))}" placeholder="${escape(t('param.biasHint'))}">${escape(text)}</textarea>`;
+  }
   if (rule.kind === 'enum') return `<select aria-label="${escape(label(name))}">${rule.values.map(item => `<option value="${escape(item)}" ${item === value ? 'selected' : ''}>${escape(valueLabel(item))}</option>`).join('')}</select>`;
   const items = (value as string[]) ?? [];
   return `<div class="tags">${items.map(item => `<span class="tag">${escape(item)}<button type="button" class="link" data-tag="${escape(item)}" aria-label="${escape(t('param.remove'))}">×</button></span>`).join('')}<input aria-label="${escape(label(name))}" placeholder="${escape(t('param.tagHint'))}"></div>`;
+}
+
+/** Lines of "token ID: bias" (-100 to 100) as an object. */
+function readBias(name: string, text: string) {
+  const result: Record<string, number> = {};
+  for (const line of text.split('\n').map(item => item.trim()).filter(Boolean)) {
+    const match = /^(\d{1,9})\s*[:=]\s*(-?\d+(?:\.\d+)?)$/.exec(line);
+    if (!match || Math.abs(Number(match[2])) > 100) throw new FormError(t('param.biasInvalid', { name: label(name), line }));
+    result[match[1]] = Number(match[2]);
+  }
+  return result;
 }
 
 /** A parameter's name in the interface language. */

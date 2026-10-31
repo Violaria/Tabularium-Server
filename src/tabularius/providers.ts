@@ -67,6 +67,7 @@ export function anthropic(model: string, apiKey?: string): Provider {
       const stream = client.beta.messages.stream({
         model, max_tokens: (params.max_tokens as number | undefined) ?? 64000,
         thinking: { type: 'adaptive' }, output_config: { effort: (params.effort as 'medium' | undefined) ?? 'medium' },
+        ...((params.stop_sequences as string[] | undefined)?.length ? { stop_sequences: params.stop_sequences as string[] } : {}),
         // Compaction summarises early context server-side near the window's limit; its block is replayed with the turn.
         betas: ['compact-2026-01-12', ...(fallback ? ['server-side-fallback-2026-07-01'] : [])],
         context_management: { edits: [{ type: 'compact_20260112' }] },
@@ -134,8 +135,13 @@ export function openai(model: string, apiKey?: string): Provider {
       let response: OpenAI.Responses.Response | undefined;
       try {
         const stream = await client.responses.create({
-          model, stream: true, store: false, include: ['reasoning.encrypted_content'], truncation: 'auto',
-          ...(params.reasoning_effort ? { reasoning: { effort: params.reasoning_effort as OpenAI.ReasoningEffort } } : {}),
+          model, stream: true, store: false, include: ['reasoning.encrypted_content'],
+          truncation: (params.truncation as 'auto' | 'disabled' | undefined) ?? 'auto',
+          ...(params.reasoning_effort || params.reasoning_summary ? { reasoning: {
+            ...(params.reasoning_effort ? { effort: params.reasoning_effort as OpenAI.ReasoningEffort } : {}),
+            ...(params.reasoning_summary ? { summary: params.reasoning_summary as 'auto' | 'concise' | 'detailed' } : {}),
+          } } : {}),
+          ...(params.service_tier ? { service_tier: params.service_tier as 'auto' | 'default' | 'flex' | 'priority' } : {}),
           ...(params.verbosity ? { text: { verbosity: params.verbosity as 'low' | 'medium' | 'high' } } : {}),
           ...(params.max_output_tokens ? { max_output_tokens: params.max_output_tokens as number } : {}),
           ...(params.temperature !== undefined ? { temperature: params.temperature as number } : {}),

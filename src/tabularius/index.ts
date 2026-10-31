@@ -13,7 +13,7 @@ import { createSettings, parseModel, PROVIDERS, SettingsError, type InitialSetti
 import { addressPolicy, fetchPage, searxng, urlsIn, type WebOptions } from './web.js';
 import { createMemories, MemoryError } from './memory.js';
 import { detectFingerprint, generateKey, refuse, run as runSsh, type Target } from './ssh.js';
-import { CONVERSATION_PROMPT, FIXED, FIXED_PART, MEMORIES, VAULT_PROMPT } from './prompt.js';
+import { CONVERSATION_PROMPT, FIXED, FIXED_PART, MEMORIES, RECIPE_PROMPT, VAULT_PROMPT } from './prompt.js';
 import { ProviderError, type Message, type Part, type Provider, type Tool } from './providers.js';
 import { apply, build, ProposalError, type Change } from './proposals.js';
 import { forget, notes, search, update, type Embedder } from './search.js';
@@ -35,10 +35,10 @@ export interface TabulariusConfig {
 /** What one answer has used so far: notes read, cited pages, and client-side web calls against the limits. */
 // `found`: search results the model saw; those its answer links to are listed as sources with the pages it fetched.
 interface Answer { read: Set<string>; sources: Map<string, string>; found: Map<string, string>; searches: number; fetches: number }
-interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string; knowledge: number; embedding_model: string | null; web: number; mode: Mode; params: string; prompt: string; model: string | null }
+interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string; knowledge: number; embedding_model: string | null; web: number; mode: Mode; params: string; prompt: string; model: string | null; recipe: string | null }
 interface Host { id: string; name: string; address: string; port: number; username: string; policy: 'allowed' | 'authorize' | 'forbidden'; commands: string; fingerprint: string | null; private_key: Uint8Array; public_key: string; created_at: number }
 interface Proposal { id: string; conversation_id: string; call_id: string; vault_id: string; user_id: string; title: string; summary: string; status: 'pending' | 'applied' | 'discarded'; error: string | null; created_at: number; decided_at: number | null }
-interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number; model: string | null; prompt: string; params: string }
+interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number; model: string | null; prompt: string; params: string; recipe: string | null }
 
 const RENEW_BEFORE_MS = 15 * 86_400_000;
 const MAX_TOOL_ROUNDS = 8;
@@ -135,11 +135,25 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   }
   /** Per-provider parameters stored as JSON: a vault's or a conversation's. */
   const paramsOf = (text: string, provider: ProviderName) => (JSON.parse(text || '{}') as Partial<Record<ProviderName, Params>>)[provider] ?? {};
-  /** The model of a conversation: its own, else the vault's default, else the server's. */
-  const modelFor = (conversation: Pick<Conversation, 'model' | 'vault_id'>) => {
-    const vaultModel = row(conversation.vault_id)?.model;
-    return [conversation.model, vaultModel, settings.defaultModel()].find(id => id && settings.available(id)) ?? '';
-  };
+  // Recipes replace the models and parameters set on vaults and conversations; each becomes the recipe it amounted to.
+  {
+    const vaults = db.prepare("SELECT vault_id, model, params FROM tabularius_vaults WHERE (model IS NOT NULL AND model<>'') OR params NOT IN ('', '{}')").all() as { vault_id: string; model: string | null; params: string }[];
+    const conversations = db.prepare("SELECT id, model FROM tabularius_conversations WHERE model IS NOT NULL AND model<>''").all() as { id: string; model: string }[];
+    const defaultModel = (db.prepare("SELECT value FROM tabularius_settings WHERE key='default_model'").get() as { value: string } | undefined)?.value;
+    const fallback = defaultModel ? JSON.parse(defaultModel) as string : '';
+    const used = [
+      ...vaults.map(v => { const model = v.model || fallback; const provider = parseModel(model)?.provider; return { model, params: provider ? paramsOf(v.params, provider) : {} }; }),
+      ...conversations.map(c => ({ model: c.model, params: {} })),
+    ];
+    const ids = settings.upgradeToRecipes(used);
+    if (ids) {
+      vaults.forEach((v, i) => db.prepare('UPDATE tabularius_vaults SET recipe=? WHERE vault_id=?').run(ids[i], v.vault_id));
+      conversations.forEach((c, i) => db.prepare('UPDATE tabularius_conversations SET recipe=? WHERE id=?').run(ids[vaults.length + i], c.id));
+    }
+  }
+  /** The recipe a conversation answers with: its own, else the vault's, else the server's default. */
+  const recipeFor = (conversation: Pick<Conversation, 'recipe' | 'vault_id'>) =>
+    settings.usableRecipe(conversation.recipe) ?? settings.usableRecipe(row(conversation.vault_id)?.recipe) ?? settings.usableRecipe(settings.defaultRecipe());
   const filterOf = (r: Row) => createFilter(r.excluded, r.masks);
   const memories = createMemories(db, () => settings.embedder());
   /** Web lookup as configured now, or undefined while it is off. */
@@ -227,7 +241,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     const counts = db.prepare('SELECT (SELECT count(*) FROM tabularius_files WHERE vault_id=?) AS notes, (SELECT count(*) FROM tabularius_chunks WHERE vault_id=?) AS chunks').get(vault.id, vault.id) as { notes: number; chunks: number };
     return { id: vault.id, name: vault.name, enabled: true, enabledAt: current.enabled_at, excluded: current.excluded, masks: current.masks,
       running: Boolean(client?.running), replicated: Boolean(client?.replicated), restarts: client?.restarts ?? 0, deviceRevoked: Boolean(device.revoked),
-      knowledge: Boolean(current.knowledge), web: Boolean(current.web), mode: current.mode, params: JSON.parse(current.params || '{}'), prompt: current.prompt, model: current.model, indexError: indexErrors.get(vault.id) ?? null, log: client?.log.slice(-8) ?? [], ...counts };
+      knowledge: Boolean(current.knowledge), web: Boolean(current.web), mode: current.mode, prompt: current.prompt, recipe: current.recipe, indexError: indexErrors.get(vault.id) ?? null, log: client?.log.slice(-8) ?? [], ...counts };
   }
 
   // Tools: read-only access to the working copy, filtered and masked before anything leaves the server.
@@ -461,13 +475,14 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     append(conversation.id, { role: 'user', parts: [{ type: 'text', text }] });
     const answer: Answer = { read: new Set(), sources: new Map(), found: new Map(), searches: 0, fetches: 0 };
     try {
-      const model = modelFor(conversation);
-      if (!model) throw new ProviderError('No model is configured; an administrator sets up providers in the LLM settings');
+      const recipe = recipeFor(conversation);
+      if (!recipe) throw new ProviderError('No recipe is configured; an administrator sets up providers and recipes in the LLM settings');
+      const model = recipe.model;
       const provider = settings.provider(model);
       const name = parseModel(model)!.provider;
-      // The conversation's parameters over the vault's over the server's, for this conversation's provider.
-      const params = { ...settings.params(name), ...paramsOf(current.params, name), ...paramsOf(conversation.params, name) };
-      const system = conversation.system + CONVERSATION_PROMPT(conversation.prompt);
+      // The conversation's adjustments over the recipe's parameters, for the recipe's provider.
+      const params = { ...recipe.params, ...paramsOf(conversation.params, name) };
+      const system = conversation.system + RECIPE_PROMPT(recipe.prompt) + CONVERSATION_PROMPT(conversation.prompt);
       for (let round = 0; ; round++) {
         // The last round answers without tools, so a model that keeps searching still gives an answer.
         const final = round >= MAX_TOOL_ROUNDS;
@@ -540,7 +555,10 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     }
     return checked;
   }
-  const settingsOf = (conversation: Conversation) => ({ model: modelFor(conversation), prompt: conversation.prompt, params: JSON.parse(conversation.params || '{}') as unknown });
+  const settingsOf = (conversation: Conversation) => ({ recipe: recipeFor(conversation)?.id ?? '', prompt: conversation.prompt, params: JSON.parse(conversation.params || '{}') as unknown });
+  /** Recipes as every user sees them: without nothing secret, with the model's name. */
+  const recipeList = () => settings.recipes().filter(recipe => settings.available(recipe.model))
+    .map(recipe => ({ ...recipe, modelName: settings.models().find(model => model.id === recipe.model)!.name, provider: parseModel(recipe.model)!.provider }));
   function proposalFor(id: string, user: User) {
     const proposal = db.prepare('SELECT * FROM tabularius_proposals WHERE id=? AND user_id=?').get(id, user.id) as unknown as Proposal | undefined;
     if (!proposal) fail(404, 'Proposal not found');
@@ -553,8 +571,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   return {
     /** What every user's Tabularius page needs: models offered, parameter rules and the server's parameters. */
     overview() {
-      return { models: settings.models(), defaultModel: settings.defaultModel(), rules: PARAMS,
-        serverParams: Object.fromEntries(PROVIDERS.map(name => [name, settings.params(name)])),
+      return { recipes: recipeList(), defaultRecipe: settings.defaultRecipe(), rules: PARAMS,
         embeddings: Boolean(settings.embedder()), knowledge: settings.knowledgeConfigured(), web: Boolean(webConfig()), webSearch: Boolean(webConfig()?.searxng) };
     },
     modeLimit: () => settings.limits().modeLimit,
@@ -691,11 +708,6 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       return updated!;
     },
     removeMemory(user: User, id: string) { if (!memories.remove(user.id, id)) fail(404, 'Memory not found'); },
-    /** A vault's parameters, per provider. */
-    setParams(vaultId: string, value: unknown) {
-      if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
-      db.prepare('UPDATE tabularius_vaults SET params=? WHERE vault_id=?').run(JSON.stringify(checkedParams(value)), vaultId);
-    },
     /** The vault's prompt, set by its owner; it applies to conversations started afterwards. */
     setPrompt(vaultId: string, prompt: string) {
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
@@ -712,21 +724,23 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     /** Everything a new conversation in this vault is told, in order, without the memories found for its first question. */
     preview(vaultId: string) {
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
-      return { fixed: FIXED, server: settings.prompt(), vault: row(vaultId)!.prompt, full: promptOf(vaultId) };
+      const recipe = recipeFor({ recipe: null, vault_id: vaultId });
+      return { fixed: FIXED, server: settings.prompt(), vault: row(vaultId)!.prompt, recipe: recipe?.prompt ?? '', full: promptOf(vaultId) + RECIPE_PROMPT(recipe?.prompt ?? '') };
     },
-    setModel(vaultId: string, model: unknown) {
+    /** The vault's default recipe; null follows the server's. */
+    setRecipe(vaultId: string, recipe: unknown) {
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
-      if (model !== null && (typeof model !== 'string' || !settings.available(model))) fail(400, 'Model not available');
-      db.prepare('UPDATE tabularius_vaults SET model=? WHERE vault_id=?').run(model as string | null, vaultId);
+      if (recipe !== null && (typeof recipe !== 'string' || !settings.usableRecipe(recipe))) fail(400, 'Recipe not available');
+      db.prepare('UPDATE tabularius_vaults SET recipe=? WHERE vault_id=?').run(recipe as string | null, vaultId);
     },
-    /** A conversation's model, extra prompt and parameters; they apply from its next answer. */
+    /** A conversation's recipe, extra prompt and adjusted parameters; they apply from its next answer. */
     configure(id: string, user: User, data: Record<string, unknown>) {
       const conversation = conversationFor(id, user);
-      if (data.model !== undefined && (typeof data.model !== 'string' || !settings.available(data.model))) fail(400, 'Model not available');
+      if (data.recipe !== undefined && (typeof data.recipe !== 'string' || !settings.usableRecipe(data.recipe))) fail(400, 'Recipe not available');
       if (data.prompt !== undefined && (typeof data.prompt !== 'string' || data.prompt.length > 8000)) fail(400, 'Invalid prompt');
       const params = data.params === undefined ? conversation.params : JSON.stringify(checkedParams(data.params));
-      db.prepare('UPDATE tabularius_conversations SET model=?, prompt=?, params=? WHERE id=?')
-        .run((data.model as string | undefined) ?? conversation.model, (data.prompt as string | undefined) ?? conversation.prompt, params, id);
+      db.prepare('UPDATE tabularius_conversations SET recipe=?, prompt=?, params=? WHERE id=?')
+        .run((data.recipe as string | undefined) ?? conversation.recipe, (data.prompt as string | undefined) ?? conversation.prompt, params, id);
       return settingsOf(conversationFor(id, user));
     },
     setWeb(vaultId: string, enabled: boolean) {
@@ -753,14 +767,14 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     async start_conversation(res: ServerResponse, vaultId: string, user: User, text: string, options: Record<string, unknown> = {}) {
       const current = row(vaultId);
       if (!current) fail(404, 'Tabularius is not enabled for this vault');
-      if (options.model !== undefined && options.model !== null && (typeof options.model !== 'string' || !settings.available(options.model))) fail(400, 'Model not available');
+      if (options.recipe !== undefined && options.recipe !== null && (typeof options.recipe !== 'string' || !settings.usableRecipe(options.recipe))) fail(400, 'Recipe not available');
       if (options.prompt !== undefined && (typeof options.prompt !== 'string' || options.prompt.length > 8000)) fail(400, 'Invalid prompt');
       const params = JSON.stringify(options.params === undefined ? {} : checkedParams(options.params));
       const conversation: Conversation = { id: randomUUID(), user_id: user.id, vault_id: vaultId, title: text.replace(/\s+/g, ' ').trim().slice(0, 60),
         system: await systemFor(vaultId, filterOf(current!), user, text), created_at: Date.now(), updated_at: Date.now(),
-        model: (options.model as string | undefined) || modelFor({ model: null, vault_id: vaultId }) || null, prompt: (options.prompt as string | undefined) ?? '', params };
-      db.prepare('INSERT INTO tabularius_conversations(id,user_id,vault_id,title,system,created_at,updated_at,model,prompt,params) VALUES(?,?,?,?,?,?,?,?,?,?)')
-        .run(conversation.id, user.id, vaultId, conversation.title, conversation.system, conversation.created_at, conversation.updated_at, conversation.model, conversation.prompt, conversation.params);
+        model: null, recipe: (options.recipe as string | undefined) || null, prompt: (options.prompt as string | undefined) ?? '', params };
+      db.prepare('INSERT INTO tabularius_conversations(id,user_id,vault_id,title,system,created_at,updated_at,recipe,prompt,params) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(conversation.id, user.id, vaultId, conversation.title, conversation.system, conversation.created_at, conversation.updated_at, conversation.recipe, conversation.prompt, conversation.params);
       await converse(res, conversation, text);
     },
     async continue_conversation(res: ServerResponse, id: string, user: User, text: string) {
