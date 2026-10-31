@@ -2581,7 +2581,7 @@ const la: Catalogue = {
   "settings.access.writeMegabytes": "Missio maxima (MB)",
   "settings.access.writeMegabytesHint": "Petitio maxima quam machina semel mittere potest.",
   "ai.embeddingTitle": "Embedding (quaestio sensus)",
-  "ai.embeddingDesc": "Quaestio sensus partes commentariorum hoc servitio in vectores vertit. Nullum exemplar: tantum textus. Exemplar mutatum indices reficit.",
+  "ai.embeddingDesc": "Quaestio sensus partes commentariorum hoc servitio in vectores vertit. Nullum exemplar: tantum textus. Exemplar mutatum indices reaedificat.",
   "ai.embeddingUrl": "Inscriptio",
   "ai.embeddingUrlHint": "Servitium OpenAI congruens, ut Infinity aut Ollama (/v1 in fine). Vacua: OpenAI cum clave infra.",
   "ai.embeddingModel": "Exemplar",
