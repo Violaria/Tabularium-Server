@@ -635,7 +635,7 @@ export async function createGateway(config: Config) {
         if (route.length === 4 && route[3] === 'conversations' && method === 'GET') { json(res, 200, t.conversations(vault.id, user)); return; }
         if (route.length === 4 && route[3] === 'conversations' && method === 'POST') {
           const data = await body(req, 131_072);
-          await t.start_conversation(res, vault.id, user, field(data, 'message', 8000), { model: data.model, prompt: data.prompt, params: data.params }); return;
+          await t.start_conversation(res, vault.id, user, field(data, 'message', 8000), { recipe: data.recipe, prompt: data.prompt, params: data.params }); return;
         }
       }
       if (route[1] === 'vaults' && route.length === 4 && route[3] === 'proposals' && method === 'GET') {

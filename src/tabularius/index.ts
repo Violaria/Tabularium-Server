@@ -13,7 +13,7 @@ import { createSettings, parseModel, PROVIDERS, SettingsError, type InitialSetti
 import { addressPolicy, fetchPage, searxng, urlsIn, type WebOptions } from './web.js';
 import { createMemories, MemoryError } from './memory.js';
 import { detectFingerprint, generateKey, refuse, run as runSsh, type Target } from './ssh.js';
-import { CONVERSATION_PROMPT, FIXED, FIXED_PART, MEMORIES, RECIPE_PROMPT, VAULT_PROMPT } from './prompt.js';
+import { CONVERSATION_PROMPT, FIXED, FIXED_PART, MEMORIES, MODEL_PROMPT, RECIPE_PROMPT, VAULT_PROMPT } from './prompt.js';
 import { ProviderError, type Message, type Part, type Provider, type Tool } from './providers.js';
 import { apply, build, ProposalError, type Change } from './proposals.js';
 import { forget, notes, search, update, type Embedder } from './search.js';
@@ -482,7 +482,8 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       const name = parseModel(model)!.provider;
       // The conversation's adjustments over the recipe's parameters, for the recipe's provider.
       const params = { ...recipe.params, ...paramsOf(conversation.params, name) };
-      const system = conversation.system + RECIPE_PROMPT(recipe.prompt) + CONVERSATION_PROMPT(conversation.prompt);
+      const system = conversation.system + RECIPE_PROMPT(recipe.prompt) + CONVERSATION_PROMPT(conversation.prompt)
+        + MODEL_PROMPT(settings.models().find(item => item.id === model)!.name, { anthropic: 'Anthropic', openai: 'OpenAI', vllm: 'a local vLLM server' }[name]);
       for (let round = 0; ; round++) {
         // The last round answers without tools, so a model that keeps searching still gives an answer.
         const final = round >= MAX_TOOL_ROUNDS;

@@ -51,5 +51,8 @@ Memory and earlier conversations:
 export const FIXED_PART = `\n\n${FIXED}`;
 export const VAULT_PROMPT = (text: string) => text.trim() ? `\n\nInstructions for this vault, set by its owner:\n\n${text.trim()}` : '';
 export const RECIPE_PROMPT = (text: string) => text.trim() ? `\n\nInstructions for this way of answering:\n\n${text.trim()}` : '';
+/** Which model answers this turn: conversations can switch models, and earlier answers may come from another one. */
+export const MODEL_PROMPT = (model: string, provider: string) =>
+  `\n\nThis answer is written by ${model}, served by ${provider}. Earlier answers in this conversation may come from other models; if asked which model you are, say ${model}.`;
 export const CONVERSATION_PROMPT = (text: string) => text.trim() ? `\n\nInstructions for this conversation:\n\n${text.trim()}` : '';
 export const MEMORIES = (lines: string[]) => lines.length ? `\n\nWhat you remember about the user (memory ids in brackets, for update_memory and delete_memory):\n${lines.join('\n')}` : '';
