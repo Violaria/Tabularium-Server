@@ -1,7 +1,7 @@
 // Service worker of the Tabularium web application: keeps the application and web notes available without a
 // network. API and synchronisation requests are never cached.
-const CACHE = 'tabularium-app-v2';
-const SHELL = ['/app/app.html', '/app/app.css', ...['app', 'core', 'home', 'admin', 'account', 'shares', 'tabularius', 'i18n', 'messages'].map(name => `/app/${name}.js`),
+const CACHE = 'tabularium-app-v3';
+const SHELL = ['/app/app.html', '/app/app.css', ...['app', 'core', 'home', 'admin', 'account', 'shares', 'ai', 'params', 'tabularius', 'i18n', 'messages'].map(name => `/app/${name}.js`),
   '/notes/assets/notes-module.js', '/notes/assets/notes-module.css'];
 // Paths of the application itself: answered from the network, or with the cached application page offline.
 const PAGE = /^\/($|home$|notes(\/|$)|tabularius(\/|$)|admin(\/|$)|account(\/|$))/;

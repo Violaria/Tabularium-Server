@@ -1,6 +1,7 @@
 // Administration, for administrators only: overview, accounts, every vault, and the audit log. The server refuses these
 // routes to other users; the shell does not offer the module to them.
 import { shareTable, type ShareRow } from './shares.js';
+import { renderAiSettings } from './ai.js';
 import { formatDate, hasMessage, t } from './i18n.js';
 import { api, button, bytes, confirmAction, escape, form, input, message, page, state, type User } from './core.js';
 import { badge, deviceTable, type Device, type Vault } from './account.js';
@@ -10,7 +11,7 @@ interface Usage { diskBytes: number; activeBytes: number; documents: number; del
 interface Audit { id: number; occurredAt: number; actor: string; action: string; targetId: string }
 
 const date = formatDate;
-const tabs = (): [string, string][] => [['/admin/', t('nav.overview')], ['/admin/users', t('nav.users')], ['/admin/vaults', t('nav.vaults')], ['/admin/shares', t('shares.all')], ['/admin/audit', t('nav.audit')]];
+const tabs = (): [string, string][] => [['/admin/', t('nav.overview')], ['/admin/users', t('nav.users')], ['/admin/vaults', t('nav.vaults')], ['/admin/shares', t('shares.all')], ['/admin/ai', t('nav.ai')], ['/admin/audit', t('nav.audit')]];
 const frame = (content: HTMLElement) => page(content, { title: t('nav.admin'), subtitle: t('admin.desc'), tabs: tabs() });
 
 export async function renderAdmin(content: HTMLElement, path: string) {
@@ -24,6 +25,7 @@ export async function renderAdmin(content: HTMLElement, path: string) {
   else if (path.startsWith('/admin/vaults')) await vaultsPage(content);
   else if (path.startsWith('/admin/audit')) await auditPage(content);
   else if (path.startsWith('/admin/shares')) await sharesPage(content);
+  else if (path.startsWith('/admin/ai')) await renderAiSettings(frame(content));
   else await overviewPage(content);
 }
 

@@ -250,6 +250,23 @@ export function openStore(path: string) {
   `);
     version = 12;
   }
-  if (version !== 12) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 12) {
+    // Tabularius settings edited on the web (prompt, providers with sealed keys, models, parameters, knowledge base); each
+    // vault's own prompt and default model; each conversation's model, extra prompt and parameters. A vault's parameters
+    // are kept per provider from now on.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE tabularius_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+    ALTER TABLE tabularius_vaults ADD COLUMN prompt TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tabularius_vaults ADD COLUMN model TEXT;
+    ALTER TABLE tabularius_conversations ADD COLUMN model TEXT;
+    ALTER TABLE tabularius_conversations ADD COLUMN prompt TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tabularius_conversations ADD COLUMN params TEXT NOT NULL DEFAULT '{}';
+    PRAGMA user_version=13;
+    COMMIT;
+  `);
+    version = 13;
+  }
+  if (version !== 13) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

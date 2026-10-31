@@ -1,12 +1,17 @@
 // Tabularius: enable the AI curator for a vault, set what it may send, and talk to it about the notes.
 import { formatDate, serverError, t } from './i18n.js';
 import { api, ApiError, confirmAction, escape, message, run, state } from './core.js';
+import { FormError, paramForm, paramLabel, type Params, type ProviderName, type Rule } from './params.js';
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
-  deviceRevoked?: boolean; knowledge?: boolean; web?: boolean; mode?: Mode; params?: string; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
+  deviceRevoked?: boolean; knowledge?: boolean; web?: boolean; mode?: Mode; params?: Partial<Record<ProviderName, Params>>; prompt?: string; model?: string | null; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
 }
 type Mode = 'read-only' | 'restricted' | 'full';
-interface Overview { provider: string; model: string; embeddings: boolean; knowledge: boolean; web: boolean; modes: Mode[]; params: Record<string, unknown>; paramNames: string[]; vaults: VaultStatus[] }
+interface ModelOption { id: string; provider: ProviderName; model: string }
+interface Overview { models: ModelOption[]; defaultModel: string; rules: Record<ProviderName, Record<string, Rule>>; serverParams: Record<ProviderName, Params>;
+  embeddings: boolean; knowledge: boolean; web: boolean; admin: boolean; modes: Mode[]; vaults: VaultStatus[] }
+/** The open conversation's model, extra prompt and parameters, or what a new conversation will start with. */
+interface ChatSettings { model: string; prompt: string; params: Partial<Record<ProviderName, Params>> }
 interface Summary { id: string; title: string; updatedAt: number }
 interface ProposalRef { id: string; title: string; status: string; files?: number }
 interface ToolUse { name: string; input: Record<string, unknown>; proposal?: ProposalRef }
@@ -33,6 +38,13 @@ let conversations: Summary[] = [];
 let conversationId: string | undefined;
 let entries: Entry[] = [];
 let busy = false;
+let chat: ChatSettings = { model: '', prompt: '', params: {} };
+const providerOf = (model: string) => model.slice(0, model.indexOf('/')) as ProviderName;
+/** A new conversation starts with the vault's default model, else the server's. */
+function newChat() {
+  const own = vault()?.model;
+  chat = { model: own && overview!.models.some(m => m.id === own) ? own : overview!.defaultModel, prompt: '', params: {} };
+}
 
 const vault = () => overview?.vaults.find(v => v.id === vaultId);
 
@@ -98,7 +110,7 @@ async function load() {
   await openVault();
 }
 async function openVault() {
-  conversationId = undefined; entries = [];
+  conversationId = undefined; entries = []; newChat();
   conversations = vault()?.enabled ? await api<Summary[]>(`/tabularius/vaults/${vaultId}/conversations`) : [];
   draw();
 }
@@ -115,7 +127,7 @@ function shell(content: string) {
     ${current?.enabled ? `<nav class="pane-list" aria-label="${t('tabularius.conversations')}">${list || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`}</nav><nav class="pane-foot"><button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="memories" ${view === 'memories' ? 'aria-current="page"' : ''}>${t('tabularius.memories')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button></nav>` : ''}</aside>
     <section class="assist-main">${content}</section></div>`;
   document.getElementById('vault')?.addEventListener('change', event => { vaultId = (event.target as HTMLSelectElement).value; view = 'chat'; void run(openVault); });
-  document.getElementById('new')?.addEventListener('click', () => { view = 'chat'; conversationId = undefined; entries = []; draw(); });
+  document.getElementById('new')?.addEventListener('click', () => { view = 'chat'; conversationId = undefined; entries = []; newChat(); draw(); });
   document.getElementById('settings')?.addEventListener('click', () => { view = 'settings'; void run(async () => { await loadHosts(); await refresh(); }); });
   document.getElementById('proposals')?.addEventListener('click', () => void run(showProposals));
   document.getElementById('memories')?.addEventListener('click', () => void run(showMemories));
@@ -123,8 +135,47 @@ function shell(content: string) {
   for (const item of app.querySelectorAll<HTMLButtonElement>('.conversation')) item.addEventListener('click', () => void run(() => openConversation(item.dataset.id!)));
 }
 async function openConversation(id: string) {
-  const loaded = await api<{ id: string; messages: Entry[] }>(`/tabularius/conversations/${id}`);
-  view = 'chat'; conversationId = loaded.id; entries = loaded.messages; draw();
+  const loaded = await api<{ id: string; messages: Entry[] } & ChatSettings>(`/tabularius/conversations/${id}`);
+  view = 'chat'; conversationId = loaded.id; entries = loaded.messages; chat = { model: loaded.model, prompt: loaded.prompt, params: loaded.params ?? {} }; draw();
+}
+/** Saves the conversation's settings, or keeps them for the first message of a new conversation. */
+async function saveChat(next: Partial<ChatSettings>) {
+  const before = chat.model;
+  chat = { ...chat, ...next };
+  if (conversationId) {
+    const saved = await api<ChatSettings>(`/tabularius/conversations/${conversationId}`, 'PATCH', next);
+    chat = { model: saved.model, prompt: saved.prompt, params: saved.params ?? {} };
+  }
+  // Parameters chosen for another provider do not travel with a switch of model.
+  if (next.model && before && providerOf(before) !== providerOf(next.model)) {
+    const left = Object.keys({ ...(vault()?.params?.[providerOf(before)] ?? {}), ...(chat.params[providerOf(before)] ?? {}) });
+    if (left.length) message(t('tabularius.paramsNotApplied', { names: left.map(paramLabel).join(', '), model: next.model }));
+  }
+}
+/** The conversation settings dialog: an extra prompt and parameters for the conversation's model. */
+function chatSettings() {
+  const provider = providerOf(chat.model);
+  const dialog = document.createElement('dialog');
+  dialog.className = 'dialog chat-settings';
+  dialog.innerHTML = `<form method="dialog" class="stack"><h2>${t('tabularius.chatSettings')}</h2><label>${t('tabularius.chatPrompt')}<textarea name="prompt" rows="4">${escape(chat.prompt)}</textarea><small>${t('tabularius.chatPromptHint')}</small></label>
+    <h3>${t('tabularius.paramsFor', { model: escape(chat.model) })}</h3><div class="chat-params"></div>
+    <div class="buttons"><button type="button" data-cancel>${t('dialog.cancel')}</button><button type="submit" class="primary">${t('common.save')}</button></div></form>`;
+  document.body.append(dialog);
+  const defaults = { ...overview!.serverParams[provider], ...(vault()?.params?.[provider] ?? {}) };
+  const read = provider ? paramForm(dialog.querySelector<HTMLElement>('.chat-params')!, provider, overview!.rules[provider], defaults, chat.params[provider] ?? {}) : () => ({});
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.addEventListener('cancel', close);
+  dialog.querySelector('[data-cancel]')!.addEventListener('click', close);
+  dialog.querySelector('form')!.addEventListener('submit', event => {
+    event.preventDefault();
+    let params: Params;
+    try { params = read(); } catch (error) { if (error instanceof FormError) { message(error.message, true); return; } throw error; }
+    void run(async () => {
+      await saveChat({ prompt: String(new FormData(dialog.querySelector('form')!).get('prompt')), params: { ...chat.params, ...(provider ? { [provider]: params } : {}) } });
+      close(); draw(); message(t('tabularius.saved'));
+    });
+  });
+  dialog.showModal();
 }
 
 function draw() {
@@ -145,7 +196,7 @@ const rulesFields = (excluded: string, masks: string) => `
 
 function drawEnable(current: VaultStatus) {
   shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.enableTitle', { name: escape(current.name) })}</h1></div></header>
-    <div class="card"><p>${t('tabularius.enableWarning', { provider: escape(`${overview!.provider} ${overview!.model}`) })}</p>
+    <div class="card"><p>${t('tabularius.enableWarning', { provider: escape(overview!.defaultModel || t('tabularius.noModel')) })}</p>
     <form id="enable" class="stack"><label class="check"><input type="checkbox" name="confirm" required> ${t('tabularius.enableConfirm')}</label>
     <label>${t('tabularius.passphrase')}<input name="passphrase" type="password" autocomplete="off" required></label>
     ${rulesFields('', '')}
@@ -206,11 +257,17 @@ function drawSettings(current: VaultStatus) {
         ${policyField('allowed')}<label>${t('tabularius.hostCommands')}<textarea name="commands" rows="3" spellcheck="false"></textarea><small>${t('tabularius.hostCommandsHint')}</small></label>
         <button class="primary" type="submit">${t('tabularius.addHost')}</button></form>
       ${commandLog.length ? `<details><summary>${t('tabularius.commandLog')}</summary><table><tbody>${commandLog.slice(0, 30).map(c => `<tr><td>${formatDate(c.createdAt)}</td><td>${escape(c.host ?? '')}</td><td><code>${escape(c.command)}</code></td><td>${escape(c.status)}${c.exitCode !== null ? ` (${c.exitCode})` : ''}${c.reason ? ` · ${escape(c.reason)}` : ''}</td></tr>`).join('')}</tbody></table></details>` : ''}</div>` : ''}
-    <div class="card"><h2>${t('tabularius.paramsTitle')}</h2><form id="params" class="stack"><label>${t('tabularius.params')}<textarea name="params" rows="3" spellcheck="false" placeholder='{"effort": "high"}'>${escape(current.params ?? '')}</textarea>
-      <small>${t('tabularius.paramsHint', { names: escape(overview!.paramNames.join(', ')), defaults: escape(JSON.stringify(overview!.params)) })}</small></label><button class="primary" type="submit">${t('common.save')}</button></form></div>
+    <div class="card"><h2>${t('tabularius.promptTitle')}</h2><p>${t('tabularius.promptDesc')}</p><form id="vault-prompt" class="stack"><textarea name="prompt" rows="8" spellcheck="false">${escape(current.prompt ?? '')}</textarea>
+      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="import-prompt">${t('tabularius.importPrompt')}</button></div></form>
+      <details id="preview"><summary>${t('tabularius.preview')}</summary><div class="preview-body"></div></details></div>
+    <div class="card"><h2>${t('tabularius.modelTitle')}</h2><label>${t('tabularius.vaultModel')}<select id="vault-model"><option value="">${escape(t('tabularius.followServer', { model: overview!.defaultModel || t('tabularius.noModel') }))}</option>${overview!.models.map(m =>
+      `<option value="${escape(m.id)}" ${m.id === current.model ? 'selected' : ''}>${escape(m.id)}</option>`).join('')}</select></label></div>
+    <div class="card"><h2>${t('tabularius.paramsTitle')}</h2><p>${t('tabularius.paramsDesc')}</p>${[...new Set(overview!.models.map(m => m.provider))].map(provider =>
+      `<details class="param-provider"${provider === providerOf(current.model || overview!.defaultModel) ? ' open' : ''}><summary>${escape(provider)}</summary><div data-params="${provider}"></div></details>`).join('') || `<p class="muted">${t('tabularius.noModel')}</p>`}
+      <button class="primary" type="button" id="save-params">${t('common.save')}</button></div>
     ${overview!.knowledge ? `<div class="card"><h2>${t('tabularius.knowledge')}</h2><p>${t('tabularius.knowledgeDesc')}</p>
       <label class="check"><input type="checkbox" id="knowledge" ${current.knowledge ? 'checked' : ''}> ${t('tabularius.knowledgeEnable')}</label></div>` : ''}
-    <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.model')}</dt><dd>${escape(`${overview!.provider} ${overview!.model}`)}</dd>
+    <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.model')}</dt><dd>${escape(current.model || overview!.defaultModel || t('tabularius.noModel'))}</dd>
       <dt>${t('tabularius.embeddings')}</dt><dd>${overview!.embeddings ? t('tabularius.embeddingsOn') : t('tabularius.embeddingsOff')}</dd>
       <dt>${t('tabularius.enabledAt')}</dt><dd>${formatDate(current.enabledAt!)}</dd></dl>
       ${current.log?.length ? `<details><summary>${t('tabularius.log')}</summary><pre class="mono">${escape(current.log.join('\n'))}</pre></details>` : ''}</div>
@@ -243,10 +300,38 @@ function drawSettings(current: VaultStatus) {
       await api(`/tabularius/hosts/${id}`, 'DELETE'); await loadHosts(); draw();
     }));
   }
-  form('params', async data => {
-    await api(`/tabularius/vaults/${vaultId}/params`, 'PUT', { params: data.get('params') });
+  const providers = [...new Set(overview!.models.map(m => m.provider))];
+  const readers = Object.fromEntries(providers.map(provider => [provider,
+    paramForm(document.querySelector<HTMLElement>(`[data-params="${provider}"]`)!, provider, overview!.rules[provider], overview!.serverParams[provider] ?? {}, current.params?.[provider] ?? {})]));
+  document.getElementById('save-params')?.addEventListener('click', () => void run(async () => {
+    let params: Record<string, Params>;
+    try { params = Object.fromEntries(providers.map(provider => [provider, readers[provider]()])); } catch (error) {
+      if (error instanceof FormError) { message(error.message, true); return; }
+      throw error;
+    }
+    await api(`/tabularius/vaults/${vaultId}/params`, 'PUT', { params: { ...current.params, ...params } });
     await refresh(); message(t('tabularius.saved'));
+  }));
+  form('vault-prompt', async data => {
+    await api(`/tabularius/vaults/${vaultId}/prompt`, 'PUT', { prompt: data.get('prompt') });
+    await refresh(); message(t('tabularius.promptSaved'));
   });
+  document.getElementById('import-prompt')!.addEventListener('click', () => void run(async () => {
+    const { prompt } = await api<{ prompt: string }>(`/tabularius/vaults/${vaultId}/prompt/import`, 'POST', {});
+    document.querySelector<HTMLTextAreaElement>('#vault-prompt textarea')!.value = prompt;
+    message(t('tabularius.imported'));
+  }));
+  document.getElementById('preview')!.addEventListener('toggle', event => void run(async () => {
+    if (!(event.target as HTMLDetailsElement).open) return;
+    const preview = await api<{ fixed: string; server: string; vault: string }>(`/tabularius/vaults/${vaultId}/prompt`);
+    document.querySelector('#preview .preview-body')!.innerHTML = [[t('tabularius.previewServer'), preview.server], [t('tabularius.previewFixed'), preview.fixed], [t('tabularius.previewVault'), preview.vault]]
+      .map(([title, text]) => `<h4>${escape(title)}</h4><pre class="prompt-text">${escape(text || '—')}</pre>`).join('') + `<small>${t('tabularius.previewHint')}</small>`;
+  }));
+  document.getElementById('vault-model')!.addEventListener('change', event => void run(async () => {
+    const value = (event.target as HTMLSelectElement).value;
+    await api(`/tabularius/vaults/${vaultId}/model`, 'PUT', { model: value || null });
+    await refresh(); message(t('tabularius.saved'));
+  }));
   document.getElementById('knowledge')?.addEventListener('change', event => void run(async () => {
     await api(`/tabularius/vaults/${vaultId}/knowledge`, 'PUT', { enabled: (event.target as HTMLInputElement).checked });
     await refresh(); message(t('tabularius.saved'));
@@ -332,16 +417,20 @@ function drawChat(current: VaultStatus) {
   const title = conversations.find(c => c.id === conversationId)?.title ?? (entries.length ? t('tabularius.newChat') : '');
   const composer = `<form id="ask" class="composer"><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${t('tabularius.ask')}" aria-label="${t('tabularius.ask')}" required ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></form>`;
   // A new conversation starts in the middle of the page; once it has messages the box moves below them.
-  shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
+  const models = overview!.models;
+  const picker = models.length ? `<select id="chat-model" class="compact" aria-label="${t('tabularius.model')}">${models.map(m => `<option value="${escape(m.id)}" ${m.id === chat.model ? 'selected' : ''}>${escape(m.id)}</option>`).join('')}</select><button id="chat-settings" type="button">${t('tabularius.chatSettings')}</button>` : '';
+  shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${picker}${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
     ${current.indexError ? `<p class="notice error">${t('tabularius.indexError', { error: escape(current.indexError) })}</p>` : ''}
     ${entries.length ? `<section id="log" class="log" aria-live="polite">${entries.map(entryHtml).join('')}</section><div class="chat-bottom">${composer}</div>`
     : `<div class="chat-start"><div class="chat-start-inner"><h2 class="chat-hello">Tabularius</h2>${composer}</div></div><div id="log" hidden></div>`}`);
   const log = document.getElementById('log')!;
   log.scrollTop = log.scrollHeight;
+  document.getElementById('chat-model')?.addEventListener('change', event => void run(async () => { await saveChat({ model: (event.target as HTMLSelectElement).value }); draw(); }));
+  document.getElementById('chat-settings')?.addEventListener('click', chatSettings);
   document.getElementById('delete')?.addEventListener('click', () => void run(async () => {
     if (!await confirmAction({ title: t('tabularius.deleteChat'), body: t('tabularius.confirmDeleteChat'), action: t('tabularius.deleteChat'), danger: true })) return;
     await api(`/tabularius/conversations/${conversationId}`, 'DELETE');
-    conversations = conversations.filter(c => c.id !== conversationId); conversationId = undefined; entries = []; draw();
+    conversations = conversations.filter(c => c.id !== conversationId); conversationId = undefined; entries = []; newChat(); draw();
   }));
   const textarea = document.querySelector<HTMLTextAreaElement>('#ask textarea')!;
   textarea.addEventListener('keydown', event => {
@@ -366,7 +455,7 @@ async function ask(text: string) {
   update();
   try {
     const response = await fetch(conversationId ? `/api/v1/tabularius/conversations/${conversationId}/messages` : `/api/v1/tabularius/vaults/${vaultId}/conversations`, {
-      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': state.session!.csrf }, body: JSON.stringify({ message: text }),
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': state.session!.csrf }, body: JSON.stringify(conversationId ? { message: text } : { message: text, model: chat.model || undefined, prompt: chat.prompt, params: chat.params }),
     });
     if (!response.ok) throw new ApiError(response.status, serverError((await response.json()).error));
     const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();

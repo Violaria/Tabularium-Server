@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { Embedder } from './search.js';
-import type { Params } from './params.js';
+import { vllmBody, type Params } from './params.js';
 import type { WebOptions } from './web.js';
 
 // Conversations are stored in a small neutral form so they survive a change of provider. An assistant turn also keeps the
@@ -13,10 +13,10 @@ export type Part =
   | { type: 'tool_result'; id: string; content: string }
   | { type: 'web'; name: string; input: Record<string, unknown> }
   | { type: 'source'; url: string; title: string };
-export interface Message { role: 'user' | 'assistant'; parts: Part[]; native?: { provider: string; content: unknown } }
+export interface Message { role: 'user' | 'assistant'; parts: Part[]; native?: { provider: string; model?: string; content: unknown } }
 export interface Tool { name: string; description: string; parameters: { type: 'object'; properties: Record<string, unknown>; required: string[] } }
 /** `paused`: the provider paused a long server-side turn; send it back unchanged to continue. */
-export interface Turn { parts: Part[]; native: { provider: string; content: unknown }; paused?: boolean }
+export interface Turn { parts: Part[]; native: { provider: string; model?: string; content: unknown }; paused?: boolean }
 export interface Provider {
   name: 'anthropic' | 'openai' | 'vllm'; model: string;
   /** Whether the provider searches the web itself; the others get client-side search tools. */
@@ -35,13 +35,19 @@ function sources(list: { url: string; title?: string | null }[]): Part[] {
   return list.filter(s => s.url && !seen.has(s.url) && seen.add(s.url)).map(s => ({ type: 'source', url: s.url, title: s.title ?? '' }));
 }
 export class ProviderError extends Error {}
+/**
+ * Whether an assistant turn's own items can be replayed: only to the provider and model that made them (older turns did
+ * not record the model). After a switch the neutral parts are sent instead.
+ */
+const own = (message: Message, provider: string, model: string) =>
+  message.native?.provider === provider && (message.native.model === undefined || message.native.model === model);
 
 // Models that accept server-side fallbacks on a safety decline.
 const FALLBACK_MODELS = new Set(['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5']);
 
-/** Anthropic Messages API; the key and an optional base URL come from ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL. */
-export function anthropic(model: string): Provider {
-  const client = new Anthropic();
+/** Anthropic Messages API; an optional base URL comes from ANTHROPIC_BASE_URL. */
+export function anthropic(model: string, apiKey?: string): Provider {
+  const client = new Anthropic({ ...(apiKey ? { apiKey } : {}) });
   const toBlocks = (message: Message): Anthropic.Beta.BetaContentBlockParam[] => message.parts.flatMap((part): Anthropic.Beta.BetaContentBlockParam[] =>
     part.type === 'text' ? [{ type: 'text', text: part.text }]
       : part.type === 'tool_call' ? [{ type: 'tool_use', id: part.id, name: part.name, input: part.input }]
@@ -73,8 +79,8 @@ export function anthropic(model: string): Provider {
         // Turns from another provider that left nothing readable here (only its own web activity) are skipped.
         messages: messages.map(message => ({
           role: message.role,
-          content: message.role === 'assistant' && message.native?.provider === 'anthropic'
-            ? message.native.content as Anthropic.Beta.BetaContentBlockParam[] : toBlocks(message),
+          content: message.role === 'assistant' && own(message, 'anthropic', model)
+            ? message.native!.content as Anthropic.Beta.BetaContentBlockParam[] : toBlocks(message),
         })).filter(message => message.content.length),
       });
       stream.on('text', text => onText(text));
@@ -96,20 +102,20 @@ export function anthropic(model: string): Provider {
         else if (block.type === 'server_tool_use' && (block.name === 'web_search' || block.name === 'web_fetch')) parts.push({ type: 'web', name: block.name, input: block.input as Record<string, unknown> });
         else if (block.type === 'web_fetch_tool_result' && block.content.type === 'web_fetch_result') cited.push({ url: block.content.url, title: block.content.content.title });
       }
-      return { parts: [...parts, ...sources(cited)], native: { provider: 'anthropic', content: final.content }, paused: final.stop_reason === 'pause_turn' };
+      return { parts: [...parts, ...sources(cited)], native: { provider: 'anthropic', model, content: final.content }, paused: final.stop_reason === 'pause_turn' };
     },
   };
 }
 
 /**
  * OpenAI Responses API, with OpenAI's own web search. Nothing is stored at OpenAI (`store: false`); response items, with
- * encrypted reasoning, are replayed from our copy. The key comes from OPENAI_API_KEY.
+ * encrypted reasoning, are replayed from our copy.
  */
-export function openai(model: string): Provider {
-  const client = new OpenAI();
+export function openai(model: string, apiKey?: string): Provider {
+  const client = new OpenAI({ ...(apiKey ? { apiKey } : {}) });
   const toItems = (message: Message): OpenAI.Responses.ResponseInputItem[] => {
     if (message.role === 'assistant') {
-      if (message.native?.provider === 'openai') return message.native.content as OpenAI.Responses.ResponseInputItem[];
+      if (own(message, 'openai', model)) return message.native!.content as OpenAI.Responses.ResponseInputItem[];
       const text = message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
       return [...(text ? [{ role: 'assistant' as const, content: text }] : []),
         ...message.parts.flatMap(part => part.type === 'tool_call'
@@ -163,7 +169,7 @@ export function openai(model: string): Provider {
           parts.push({ type: 'web', name: action.type === 'search' ? 'web_search' : 'web_fetch', input: action.type === 'search' ? { query: action.query ?? action.queries?.join(' / ') ?? '' } : { url: action.url ?? '' } });
         }
       }
-      return { parts: [...parts, ...sources(cited)], native: { provider: 'openai', content: response.output } };
+      return { parts: [...parts, ...sources(cited)], native: { provider: 'openai', model, content: response.output } };
     },
   };
 }
@@ -182,7 +188,7 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
       const text = message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
       const calls = message.parts.flatMap(part => part.type === 'tool_call'
         ? [{ id: part.id, type: 'function' as const, function: { name: part.name, arguments: JSON.stringify(part.input) } }] : []);
-      const reasoning = message.native?.provider === 'vllm' ? (message.native.content as { reasoning?: string }).reasoning : undefined;
+      const reasoning = own(message, 'vllm', model) ? (message.native!.content as { reasoning?: string }).reasoning : undefined;
       if (!text && !calls.length) return [];
       const assistant: Assistant = { role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}), ...(reasoning ? { reasoning } : {}) };
       return [assistant];
@@ -199,7 +205,7 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
       try {
         // vLLM's own fields (top_k, min_p, repetition_penalty, chat_template_kwargs) go in the body next to the standard ones.
         const stream = await client.chat.completions.create({
-          ...params,
+          ...vllmBody(params),
           model, stream: true,
           messages: [{ role: 'system', content: system }, ...fit(messages, contextTokens - estimate(system) - estimate(JSON.stringify(tools))).flatMap(toMessages),
             // With tool_choice none alone Qwen often still tries a call, which vLLM drops, leaving an empty answer.
@@ -228,7 +234,7 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
         try { input = JSON.parse(call.arguments || '{}'); } catch { input = { invalid: call.arguments }; }
         parts.push({ type: 'tool_call', id: call.id, name: call.name, input });
       }
-      return { parts, native: { provider: 'vllm', content: { reasoning } } };
+      return { parts, native: { provider: 'vllm', model, content: { reasoning } } };
     },
   };
 }

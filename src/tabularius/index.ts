@@ -8,12 +8,12 @@ import type { Couch } from '../couch.js';
 import { digest, token, type User, type Vault } from '../store.js';
 import { createClients, inspect, open, seal, WrongPassphrase } from './client.js';
 import { checkMasks, createFilter, type Filter } from './filter.js';
-import type { KnowledgeBase } from './knowledge.js';
-import { checkParams, PARAMS, ParamsError, type Params } from './params.js';
+import { checkParams, PARAMS, ParamsError, type Params, type ProviderName } from './params.js';
+import { createSettings, parseModel, PROVIDERS, SettingsError, type InitialSettings } from './settings.js';
 import { addressPolicy, fetchPage, searxng, urlsIn, type WebOptions } from './web.js';
 import { createMemories, MemoryError } from './memory.js';
 import { detectFingerprint, generateKey, refuse, run as runSsh, type Target } from './ssh.js';
-import { BUILT_IN, MEMORIES, VAULT_RULES } from './prompt.js';
+import { CONVERSATION_PROMPT, FIXED, FIXED_PART, MEMORIES, VAULT_PROMPT } from './prompt.js';
 import { ProviderError, type Message, type Part, type Provider, type Tool } from './providers.js';
 import { apply, build, ProposalError, type Change } from './proposals.js';
 import { forget, notes, search, update, type Embedder } from './search.js';
@@ -23,11 +23,11 @@ export const MODES: Mode[] = ['read-only', 'restricted', 'full'];
 /** Web access: domain rules and limits, SearXNG for providers without their own search, and the intranet the restricted mode may reach. */
 export interface WebConfig { options: WebOptions; searxng?: string; intranet: string[] }
 export interface TabulariusConfig {
-  key: Buffer; root: string; cli: string; provider: Provider; embedder?: Embedder; knowledge?: KnowledgeBase; web?: WebConfig;
+  key: Buffer; root: string; cli: string; embedder?: Embedder; web?: WebConfig;
   /** The highest permission mode a vault may use. */
   modeLimit: Mode;
-  /** Server-wide model parameters; a vault's own parameters override them. */
-  params: Params;
+  /** Providers, models, parameters and the knowledge base from the environment, taken the first time; then the web settings apply. */
+  initial?: InitialSettings;
   /** Seconds a command may run over SSH. */
   sshTimeout?: number;
   /** The sandbox service, its token and the images it runs. */
@@ -36,10 +36,10 @@ export interface TabulariusConfig {
 /** What one answer has used so far: notes read, cited pages, and client-side web calls against the limits. */
 // `found`: search results the model saw; those its answer links to are listed as sources with the pages it fetched.
 interface Answer { read: Set<string>; sources: Map<string, string>; found: Map<string, string>; searches: number; fetches: number }
-interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string; knowledge: number; embedding_model: string | null; web: number; mode: Mode; params: string }
+interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string; knowledge: number; embedding_model: string | null; web: number; mode: Mode; params: string; prompt: string; model: string | null }
 interface Host { id: string; name: string; address: string; port: number; username: string; policy: 'allowed' | 'authorize' | 'forbidden'; commands: string; fingerprint: string | null; private_key: Uint8Array; public_key: string; created_at: number }
 interface Proposal { id: string; conversation_id: string; call_id: string; vault_id: string; user_id: string; title: string; summary: string; status: 'pending' | 'applied' | 'discarded'; error: string | null; created_at: number; decided_at: number | null }
-interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number }
+interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number; model: string | null; prompt: string; params: string }
 
 const RENEW_BEFORE_MS = 15 * 86_400_000;
 const MAX_TOOL_ROUNDS = 8;
@@ -126,6 +126,21 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   const indexing = new Map<string, Promise<unknown>>();
   const indexErrors = new Map<string, string>();
   const row = (vaultId: string) => db.prepare('SELECT * FROM tabularius_vaults WHERE vault_id=?').get(vaultId) as unknown as Row | undefined;
+  const settings = createSettings(db, config.key, config.initial);
+  // Parameters saved before they were kept per provider belong to the provider configured then.
+  const formerProvider = parseModel(config.initial?.defaultModel ?? '')?.provider ?? 'anthropic';
+  for (const r of db.prepare("SELECT vault_id, params FROM tabularius_vaults WHERE params<>''").all() as { vault_id: string; params: string }[]) {
+    const value = JSON.parse(r.params) as Record<string, unknown>;
+    if (Object.keys(value).some(name => !PROVIDERS.includes(name as ProviderName)))
+      db.prepare('UPDATE tabularius_vaults SET params=? WHERE vault_id=?').run(JSON.stringify({ [formerProvider]: value }), r.vault_id);
+  }
+  /** Per-provider parameters stored as JSON: a vault's or a conversation's. */
+  const paramsOf = (text: string, provider: ProviderName) => (JSON.parse(text || '{}') as Partial<Record<ProviderName, Params>>)[provider] ?? {};
+  /** The model of a conversation: its own, else the vault's default, else the server's. */
+  const modelFor = (conversation: Pick<Conversation, 'model' | 'vault_id'>) => {
+    const vaultModel = row(conversation.vault_id)?.model;
+    return [conversation.model, vaultModel, settings.defaultModel()].find(id => id && settings.available(id)) ?? '';
+  };
   const filterOf = (r: Row) => createFilter(r.excluded, r.masks);
   const memories = createMemories(db, config.embedder);
   const approvals = new Map<string, (decision: { approved: boolean; by: string }) => void>();
@@ -206,7 +221,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     const counts = db.prepare('SELECT (SELECT count(*) FROM tabularius_files WHERE vault_id=?) AS notes, (SELECT count(*) FROM tabularius_chunks WHERE vault_id=?) AS chunks').get(vault.id, vault.id) as { notes: number; chunks: number };
     return { id: vault.id, name: vault.name, enabled: true, enabledAt: current.enabled_at, excluded: current.excluded, masks: current.masks,
       running: Boolean(client?.running), replicated: Boolean(client?.replicated), restarts: client?.restarts ?? 0, deviceRevoked: Boolean(device.revoked),
-      knowledge: Boolean(current.knowledge), web: Boolean(current.web), mode: current.mode, params: current.params, indexError: indexErrors.get(vault.id) ?? null, log: client?.log.slice(-8) ?? [], ...counts };
+      knowledge: Boolean(current.knowledge), web: Boolean(current.web), mode: current.mode, params: JSON.parse(current.params || '{}'), prompt: current.prompt, model: current.model, indexError: indexErrors.get(vault.id) ?? null, log: client?.log.slice(-8) ?? [], ...counts };
   }
 
   // Tools: read-only access to the working copy, filtered and masked before anything leaves the server.
@@ -219,7 +234,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     db.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now(), actorId, action, targetId);
   }
   const hasHosts = () => Boolean(db.prepare('SELECT 1 FROM tabularius_hosts LIMIT 1').get());
-  const webOn = (vaultId: string) => Boolean(config.web && row(vaultId)?.web && (config.provider.nativeWeb || config.web.searxng));
+  const webOn = (vaultId: string, provider: Provider) => Boolean(config.web && row(vaultId)?.web && (provider.nativeWeb || config.web.searxng));
   /** URLs the user or a tool result has shown in this conversation; outside the full mode only these can be fetched. */
   function seenUrls(conversationId: string) {
     const seen = new Set<string>();
@@ -229,12 +244,12 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     }
     return seen;
   }
-  async function runTool(conversation: Conversation, filter: Filter, call: Extract<Part, { type: 'tool_call' }>, answer: Answer,
+  async function runTool(conversation: Conversation, provider: Provider, filter: Filter, call: Extract<Part, { type: 'tool_call' }>, answer: Answer,
     send: (event: string, data: unknown) => void): Promise<string> {
     const vaultId = conversation.vault_id;
     const root = clients.working(vaultId);
     const web = config.web;
-    if ((call.name === 'web_search' || call.name === 'fetch_url') && web?.searxng && !config.provider.nativeWeb && webOn(vaultId)) {
+    if ((call.name === 'web_search' || call.name === 'fetch_url') && web?.searxng && !provider.nativeWeb && webOn(vaultId, provider)) {
       audit(conversation.user_id, 'tabularius.web', conversation.id);
       if (call.name === 'web_search') {
         if (typeof call.input.query !== 'string' || !call.input.query.trim()) return 'Error: query must be a non-empty string.';
@@ -347,10 +362,11 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       const text = plainText(other.id);
       return filter.mask(`${other.title}\n\n${text.length > CONVERSATION_LIMIT ? `${text.slice(-CONVERSATION_LIMIT)}\n\n[Earlier part truncated]` : text}`);
     }
-    if (call.name === 'search_knowledge_base' && config.knowledge && row(vaultId)?.knowledge) {
+    const knowledge = settings.knowledge();
+    if (call.name === 'search_knowledge_base' && knowledge && row(vaultId)?.knowledge) {
       if (typeof call.input.question !== 'string' || !call.input.question.trim()) return 'Error: question must be a non-empty string.';
       const present = new Set(await notes(root));
-      const chunks = (await config.knowledge.search(call.input.question)).filter(chunk => !filter.excluded(chunk.document_name));
+      const chunks = (await knowledge.search(call.input.question)).filter(chunk => !filter.excluded(chunk.document_name));
       if (!chunks.length) return 'No matching passages in the knowledge base.';
       return filter.mask(chunks.map(chunk => `${present.has(chunk.document_name) ? `[[${chunk.document_name}]]` : `Knowledge base ${chunk.dataset_name}: ${chunk.document_name}`}` +
         ` (similarity ${chunk.similarity.toFixed(2)})\n${chunk.content}`).join('\n\n---\n\n'));
@@ -410,14 +426,15 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       .run(conversationId, message.role, JSON.stringify(message.parts), message.native ? JSON.stringify(message.native) : null, Date.now());
     db.prepare('UPDATE tabularius_conversations SET updated_at=? WHERE id=?').run(Date.now(), conversationId);
   }
-  /** The prompt a conversation keeps: built-in rules, the vault's own rules, then the memories related to its first message. */
+  /**
+   * The prompt without memories: the server's default prompt (who Tabularius is and how it works), the fixed part, then the
+   * vault's prompt. The fixed rules follow the identity: a local model keeps them better there than as the opening lines.
+   */
+  const promptOf = (vaultId: string) => (settings.prompt().trim() + FIXED_PART).trimStart() + VAULT_PROMPT(row(vaultId)?.prompt ?? '');
+  /** The prompt a conversation keeps from its start: the prompt above and the memories related to its first message. */
   async function systemFor(vaultId: string, filter: Filter, user: User, first: string) {
-    let rules = '';
-    if (!filter.excluded('Tabularius.md')) {
-      try { rules = VAULT_RULES(filter.mask(await readFile(join(clients.working(vaultId), 'Tabularius.md'), 'utf8'))); } catch { rules = ''; }
-    }
     const related = await memories.relevant(user.id, first, MEMORY_LIMIT);
-    return BUILT_IN + rules + MEMORIES(related.map(m => filter.mask(`- [${m.id}] ${m.content}`)));
+    return promptOf(vaultId) + MEMORIES(related.map(m => filter.mask(`- [${m.id}] ${m.content}`)));
   }
   /** User questions and assistant answers of a conversation as plain text, without tool details. */
   function plainText(conversationId: string) {
@@ -437,15 +454,21 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     append(conversation.id, { role: 'user', parts: [{ type: 'text', text }] });
     const answer: Answer = { read: new Set(), sources: new Map(), found: new Map(), searches: 0, fetches: 0 };
     try {
+      const model = modelFor(conversation);
+      if (!model) throw new ProviderError('No model is configured; an administrator sets up providers in the AI settings');
+      const provider = settings.provider(model);
+      const name = parseModel(model)!.provider;
+      // The conversation's parameters over the vault's over the server's, for this conversation's provider.
+      const params = { ...settings.params(name), ...paramsOf(current.params, name), ...paramsOf(conversation.params, name) };
+      const system = conversation.system + CONVERSATION_PROMPT(conversation.prompt);
       for (let round = 0; ; round++) {
         // The last round answers without tools, so a model that keeps searching still gives an answer.
         const final = round >= MAX_TOOL_ROUNDS;
-        const web = webOn(conversation.vault_id);
-        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() ? SSH_TOOLS : []), ...(config.sandbox ? [sandboxTool(config.sandbox.images)] : []), ...(config.knowledge && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
-          ...(web && !config.provider.nativeWeb ? WEB_TOOLS : [])];
-        const turn = await config.provider.turn(conversation.system, tools, loadMessages(conversation.id), delta => send('text', { text: delta }), {
-          web: web && config.provider.nativeWeb ? config.web!.options : undefined,
-          params: { ...config.params, ...JSON.parse(row(conversation.vault_id)!.params || '{}') }, answerOnly: final,
+        const web = webOn(conversation.vault_id, provider);
+        const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() ? SSH_TOOLS : []), ...(config.sandbox ? [sandboxTool(config.sandbox.images)] : []), ...(settings.knowledgeConfigured() && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
+          ...(web && !provider.nativeWeb ? WEB_TOOLS : [])];
+        const turn = await provider.turn(system, tools, loadMessages(conversation.id), delta => send('text', { text: delta }), {
+          web: web && provider.nativeWeb ? config.web!.options : undefined, params, answerOnly: final,
         });
         append(conversation.id, { role: 'assistant', ...turn });
         for (const part of turn.parts) {
@@ -462,7 +485,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         const results: Part[] = final
           ? calls.map(call => ({ type: 'tool_result', id: call.id, content: 'Tool limit reached for this answer. Answer with what you have found.' }))
           : await Promise.all(calls.map(async call => ({ type: 'tool_result' as const, id: call.id,
-            content: await runTool(conversation, filter, call, answer, send).catch((error: Error) => `Error: ${error.message.slice(0, 300)}`) })));
+            content: await runTool(conversation, provider, filter, call, answer, send).catch((error: Error) => `Error: ${error.message.slice(0, 300)}`) })));
         append(conversation.id, { role: 'user', parts: results });
         // A closed page stops the answer after the current round; the transcript stays complete.
         if (final || res.destroyed) break;
@@ -497,6 +520,20 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     });
   }
 
+  /** Parameters per provider, each checked against that provider's rules. */
+  function checkedParams(value: unknown) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return fail(400, 'Invalid parameters');
+    const checked: Partial<Record<ProviderName, Params>> = {};
+    for (const [name, item] of Object.entries(value)) {
+      if (!PROVIDERS.includes(name as ProviderName)) fail(400, 'Invalid parameters');
+      try { checked[name as ProviderName] = checkParams(name as ProviderName, item); } catch (error) {
+        if (error instanceof ParamsError) fail(400, `Invalid parameters: ${error.message}`);
+        throw error;
+      }
+    }
+    return checked;
+  }
+  const settingsOf = (conversation: Conversation) => ({ model: modelFor(conversation), prompt: conversation.prompt, params: JSON.parse(conversation.params || '{}') as unknown });
   function proposalFor(id: string, user: User) {
     const proposal = db.prepare('SELECT * FROM tabularius_proposals WHERE id=? AND user_id=?').get(id, user.id) as unknown as Proposal | undefined;
     if (!proposal) fail(404, 'Proposal not found');
@@ -507,13 +544,44 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   const summaryOf = (p: Proposal) => ({ id: p.id, conversationId: p.conversation_id, title: p.title, summary: p.summary, status: p.status, error: p.error, createdAt: p.created_at, decidedAt: p.decided_at });
 
   return {
-    provider: config.provider,
-    embeddings: Boolean(config.embedder),
-    knowledge: Boolean(config.knowledge),
-    web: Boolean(config.web && (config.provider.nativeWeb || config.web.searxng)),
+    /** What every user's Tabularius page needs: models offered, parameter rules and the server's parameters. */
+    overview() {
+      return { models: settings.models(), defaultModel: settings.defaultModel(), rules: PARAMS,
+        serverParams: Object.fromEntries(PROVIDERS.map(name => [name, settings.params(name)])),
+        embeddings: Boolean(config.embedder), knowledge: settings.knowledgeConfigured(), web: Boolean(config.web), webSearch: Boolean(config.web?.searxng) };
+    },
     modeLimit: config.modeLimit,
-    params: config.params,
-    paramNames: Object.keys(PARAMS[config.provider.name]),
+    settings: () => settings.view(),
+    async updateSettings(data: Record<string, unknown>) {
+      try { await settings.update(data); } catch (error) {
+        if (error instanceof SettingsError) fail(400, error.message);
+        throw error;
+      }
+      return settings.view();
+    },
+    /** A short request to a configured model; the provider's error is returned as it came. */
+    async testModel(id: string) {
+      let provider: Provider;
+      try { provider = settings.provider(id); } catch { return fail(400, 'Model not available'); }
+      const name = parseModel(id)!.provider;
+      const small: Params = name === 'anthropic' ? { max_tokens: 1024, effort: 'low' } : name === 'openai' ? { max_output_tokens: 256 } : { max_tokens: 64 };
+      try {
+        const turn = await provider.turn('Reply with the single word OK.', [], [{ role: 'user', parts: [{ type: 'text', text: 'Connection test' }] }], () => {}, { params: small });
+        return { ok: true, reply: turn.parts.map(part => part.type === 'text' ? part.text : '').join('').slice(0, 200) };
+      } catch (error) {
+        return fail(502, error instanceof ProviderError ? error.message : (error as Error).message.slice(0, 300));
+      }
+    },
+    async datasets(url: string) {
+      try { return await settings.datasets(url); } catch (error) { return fail(502, `RAGFlow: ${(error as Error).message.slice(0, 300)}`); }
+    },
+    /** One retrieval with the saved knowledge base settings, for the settings page. */
+    async testKnowledge(question: string) {
+      const knowledge = settings.knowledge();
+      if (!knowledge) fail(409, 'No knowledge base is configured');
+      try { return (await knowledge!.search(question)).map(chunk => ({ document: chunk.document_name, dataset: chunk.dataset_name, similarity: chunk.similarity })); }
+      catch (error) { return fail(502, `RAGFlow: ${(error as Error).message.slice(0, 300)}`); }
+    },
     async start(url: string) {
       syncUrl = url;
       renew();
@@ -523,7 +591,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       clearInterval(timer);
       for (const { vault_id } of db.prepare('SELECT vault_id FROM tabularius_vaults').all() as { vault_id: string }[]) await clients.stop(vault_id);
       await Promise.all(indexing.values());
-      await config.knowledge?.close();
+      await settings.close();
     },
     status, enable, disable, reindex,
     rules(vaultId: string, excluded: string, masks: string) {
@@ -541,7 +609,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     },
     /** The knowledge base belongs to the server, so only an administrator switches it on, for their own vault. */
     setKnowledge(vaultId: string, user: User, enabled: boolean) {
-      if (!config.knowledge) fail(409, 'No knowledge base is configured');
+      if (!settings.knowledgeConfigured()) fail(409, 'No knowledge base is configured');
       if (user.role !== 'admin') fail(403, 'Administrator required');
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
       db.prepare('UPDATE tabularius_vaults SET knowledge=? WHERE vault_id=?').run(Number(enabled), vaultId);
@@ -600,16 +668,46 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       return updated!;
     },
     removeMemory(user: User, id: string) { if (!memories.remove(user.id, id)) fail(404, 'Memory not found'); },
-    setParams(vaultId: string, text: string) {
+    /** A vault's parameters, per provider. */
+    setParams(vaultId: string, value: unknown) {
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
-      try { checkParams(config.provider.name, text); } catch (error) {
-        if (error instanceof ParamsError) fail(400, 'Invalid parameters');
-        throw error;
-      }
-      db.prepare('UPDATE tabularius_vaults SET params=? WHERE vault_id=?').run(text.trim(), vaultId);
+      db.prepare('UPDATE tabularius_vaults SET params=? WHERE vault_id=?').run(JSON.stringify(checkedParams(value)), vaultId);
+    },
+    /** The vault's prompt, set by its owner; it applies to conversations started afterwards. */
+    setPrompt(vaultId: string, prompt: string) {
+      if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
+      db.prepare('UPDATE tabularius_vaults SET prompt=? WHERE vault_id=?').run(prompt, vaultId);
+    },
+    /** The vault's Tabularius.md, masked, to fill the prompt editor; it is no longer read on its own. */
+    async importPrompt(vaultId: string) {
+      const current = row(vaultId);
+      if (!current) fail(404, 'Tabularius is not enabled for this vault');
+      const filter = filterOf(current!);
+      if (filter.excluded('Tabularius.md')) fail(404, 'Tabularius.md is excluded');
+      try { return filter.mask(await readFile(join(clients.working(vaultId), 'Tabularius.md'), 'utf8')); } catch { return fail(404, 'Tabularius.md not found'); }
+    },
+    /** Everything a new conversation in this vault is told, in order, without the memories found for its first question. */
+    preview(vaultId: string) {
+      if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
+      return { fixed: FIXED, server: settings.prompt(), vault: row(vaultId)!.prompt, full: promptOf(vaultId) };
+    },
+    setModel(vaultId: string, model: unknown) {
+      if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
+      if (model !== null && (typeof model !== 'string' || !settings.available(model))) fail(400, 'Model not available');
+      db.prepare('UPDATE tabularius_vaults SET model=? WHERE vault_id=?').run(model as string | null, vaultId);
+    },
+    /** A conversation's model, extra prompt and parameters; they apply from its next answer. */
+    configure(id: string, user: User, data: Record<string, unknown>) {
+      const conversation = conversationFor(id, user);
+      if (data.model !== undefined && (typeof data.model !== 'string' || !settings.available(data.model))) fail(400, 'Model not available');
+      if (data.prompt !== undefined && (typeof data.prompt !== 'string' || data.prompt.length > 8000)) fail(400, 'Invalid prompt');
+      const params = data.params === undefined ? conversation.params : JSON.stringify(checkedParams(data.params));
+      db.prepare('UPDATE tabularius_conversations SET model=?, prompt=?, params=? WHERE id=?')
+        .run((data.model as string | undefined) ?? conversation.model, (data.prompt as string | undefined) ?? conversation.prompt, params, id);
+      return settingsOf(conversationFor(id, user));
     },
     setWeb(vaultId: string, enabled: boolean) {
-      if (!config.web || !(config.provider.nativeWeb || config.web.searxng)) fail(409, 'Web access is not configured');
+      if (!config.web) fail(409, 'Web access is not configured');
       if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
       db.prepare('UPDATE tabularius_vaults SET web=? WHERE vault_id=?').run(Number(enabled), vaultId);
     },
@@ -626,14 +724,20 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     },
     conversation(id: string, user: User) {
       const conversation = conversationFor(id, user);
-      return { id, vaultId: conversation.vault_id, title: conversation.title, messages: transcript(id) };
+      return { id, vaultId: conversation.vault_id, title: conversation.title, ...settingsOf(conversation), messages: transcript(id) };
     },
-    async start_conversation(res: ServerResponse, vaultId: string, user: User, text: string) {
+    /** A new conversation; `options` are what the user chose before the first message (model, extra prompt, parameters). */
+    async start_conversation(res: ServerResponse, vaultId: string, user: User, text: string, options: Record<string, unknown> = {}) {
       const current = row(vaultId);
       if (!current) fail(404, 'Tabularius is not enabled for this vault');
+      if (options.model !== undefined && options.model !== null && (typeof options.model !== 'string' || !settings.available(options.model))) fail(400, 'Model not available');
+      if (options.prompt !== undefined && (typeof options.prompt !== 'string' || options.prompt.length > 8000)) fail(400, 'Invalid prompt');
+      const params = JSON.stringify(options.params === undefined ? {} : checkedParams(options.params));
       const conversation: Conversation = { id: randomUUID(), user_id: user.id, vault_id: vaultId, title: text.replace(/\s+/g, ' ').trim().slice(0, 60),
-        system: await systemFor(vaultId, filterOf(current!), user, text), created_at: Date.now(), updated_at: Date.now() };
-      db.prepare('INSERT INTO tabularius_conversations VALUES(?,?,?,?,?,?,?)').run(conversation.id, user.id, vaultId, conversation.title, conversation.system, conversation.created_at, conversation.updated_at);
+        system: await systemFor(vaultId, filterOf(current!), user, text), created_at: Date.now(), updated_at: Date.now(),
+        model: (options.model as string | undefined) || modelFor({ model: null, vault_id: vaultId }) || null, prompt: (options.prompt as string | undefined) ?? '', params };
+      db.prepare('INSERT INTO tabularius_conversations(id,user_id,vault_id,title,system,created_at,updated_at,model,prompt,params) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(conversation.id, user.id, vaultId, conversation.title, conversation.system, conversation.created_at, conversation.updated_at, conversation.model, conversation.prompt, conversation.params);
       await converse(res, conversation, text);
     },
     async continue_conversation(res: ServerResponse, id: string, user: User, text: string) {

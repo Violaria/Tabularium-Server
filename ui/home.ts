@@ -9,7 +9,7 @@ interface HomeVault {
 interface Home {
   vaults: HomeVault[];
   conversations: { id: string; title: string; vaultId: string; vault: string; updatedAt: number }[];
-  server: { uptimeSeconds: number; activeProxyConnections: number; storage: boolean; provider: { name: string; model: string } | null } | null;
+  server: { uptimeSeconds: number; activeProxyConnections: number; storage: boolean; model: string | null } | null;
 }
 
 const when = (value: number) => ago(value, formatDate, {
@@ -45,7 +45,7 @@ export async function renderHome(content: HTMLElement) {
     ? `<section class="card"><h2>${t('home.conversations')}</h2><ul class="rows">${data.conversations.map(c => `<li><a href="/tabularius/?vault=${c.vaultId}&amp;conversation=${c.id}">${escape(c.title)}</a><span>${escape(c.vault)} · ${escape(when(c.updatedAt))}</span></li>`).join('')}</ul></section>`
     : '';
   const server = data.server
-    ? `<section class="card"><div class="server-line"><strong>${t('home.server')}</strong><span>${t('home.uptime', { duration: uptime(data.server.uptimeSeconds) })}</span><span>${t('home.connections', { n: data.server.activeProxyConnections })}</span><span class="badge ${data.server.storage ? '' : 'warn'}">${data.server.storage ? t('overview.ok') : t('overview.down')}</span>${data.server.provider ? `<span>${escape(data.server.provider.model)}</span>` : ''}<a href="/admin/" data-route>${t('home.toOverview')}</a></div></section>`
+    ? `<section class="card"><div class="server-line"><strong>${t('home.server')}</strong><span>${t('home.uptime', { duration: uptime(data.server.uptimeSeconds) })}</span><span>${t('home.connections', { n: data.server.activeProxyConnections })}</span><span class="badge ${data.server.storage ? '' : 'warn'}">${data.server.storage ? t('overview.ok') : t('overview.down')}</span>${data.server.model ? `<span>${escape(data.server.model)}</span>` : ''}<a href="/admin/" data-route>${t('home.toOverview')}</a></div></section>`
     : '';
   body.innerHTML = vaults + conversations + server;
 }

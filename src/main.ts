@@ -2,10 +2,10 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createGateway } from './server.js';
 import type { SmtpConfig } from './smtp.js';
-import { ragflow } from './tabularius/knowledge.js';
-import { anthropic, embedder, openai, vllm } from './tabularius/providers.js';
+import { embedder } from './tabularius/providers.js';
 import { MODES, type Mode } from './tabularius/index.js';
-import { checkParams } from './tabularius/params.js';
+import { checkParams, type ProviderName } from './tabularius/params.js';
+import type { InitialSettings } from './tabularius/settings.js';
 import type { TabulariusConfig } from './tabularius/index.js';
 
 function required(name: string) {
@@ -24,25 +24,33 @@ const smtp: SmtpConfig | undefined = process.env.TABULARIUM_SMTP_HOST ? {
 } : undefined;
 const database = resolve(process.env.TABULARIUM_DATABASE ?? 'data/tabularium.sqlite');
 await mkdir(dirname(database), { recursive: true });
-// Tabularius, the AI curator, is enabled by choosing a provider; its data lives next to the application database.
-const provider = process.env.TABULARIUS_PROVIDER;
+// Tabularius, the AI curator, is enabled by its secret key; its data lives next to the application database. Providers,
+// models, parameters and the knowledge base are set on the web; the variables below are imported the first time only.
+const provider = process.env.TABULARIUS_PROVIDER as ProviderName | undefined;
 if (provider && !['anthropic', 'openai', 'vllm'].includes(provider)) throw new Error('TABULARIUS_PROVIDER must be anthropic, openai or vllm');
 const list = (name: string) => (process.env[name] ?? '').split(',').map(item => item.trim()).filter(Boolean);
 let tabularius: TabulariusConfig | undefined;
-if (provider) {
+if (process.env.TABULARIUS_SECRET_KEY || provider) {
   const key = Buffer.from(required('TABULARIUS_SECRET_KEY'), 'base64');
   if (key.length !== 32) throw new Error('TABULARIUS_SECRET_KEY must be 32 bytes in base64 (openssl rand -base64 32)');
+  const model = provider === 'anthropic' ? process.env.TABULARIUS_MODEL || 'claude-opus-5-5' : provider ? required('TABULARIUS_MODEL') : '';
+  const initial: InitialSettings = {
+    providers: {
+      ...(process.env.ANTHROPIC_API_KEY || provider === 'anthropic' ? { anthropic: { key: process.env.ANTHROPIC_API_KEY, models: provider === 'anthropic' ? [model] : ['claude-opus-5-5'] } } : {}),
+      ...(process.env.OPENAI_API_KEY || provider === 'openai' ? { openai: { key: process.env.OPENAI_API_KEY, models: provider === 'openai' ? [model] : [] } } : {}),
+      ...(provider === 'vllm' ? { vllm: { url: required('TABULARIUS_VLLM_URL'), key: process.env.TABULARIUS_VLLM_KEY || undefined, models: [model],
+        context: Number(process.env.TABULARIUS_VLLM_CONTEXT || 32768) } } : {}),
+    },
+    defaultModel: provider ? `${provider}/${model}` : undefined,
+    params: provider ? { [provider]: checkParams(provider, process.env.TABULARIUS_MODEL_PARAMS ?? '') } : undefined,
+    knowledge: process.env.TABULARIUS_RAGFLOW_MCP_URL ? { url: process.env.TABULARIUS_RAGFLOW_MCP_URL, datasets: list('TABULARIUS_RAGFLOW_DATASETS') } : undefined,
+  };
   tabularius = {
-    key, root: resolve(dirname(database), 'tabularius'),
+    key, root: resolve(dirname(database), 'tabularius'), initial,
     cli: resolve(process.env.TABULARIUS_CLI || new URL('../cli/index.cjs', import.meta.url).pathname),
-    provider: provider === 'anthropic' ? anthropic(process.env.TABULARIUS_MODEL || 'claude-opus-5-5')
-      : provider === 'openai' ? openai(required('TABULARIUS_MODEL'))
-        : vllm(required('TABULARIUS_MODEL'), required('TABULARIUS_VLLM_URL'), process.env.TABULARIUS_VLLM_KEY || undefined, Number(process.env.TABULARIUS_VLLM_CONTEXT || 32768)),
     embedder: process.env.TABULARIUS_EMBEDDING_MODEL
       ? embedder(process.env.TABULARIUS_EMBEDDING_MODEL, process.env.TABULARIUS_EMBEDDING_URL || undefined, process.env.TABULARIUS_EMBEDDING_KEY || undefined,
         Number(process.env.TABULARIUS_EMBEDDING_BATCH || 64)) : undefined,
-    knowledge: process.env.TABULARIUS_RAGFLOW_MCP_URL
-      ? ragflow(process.env.TABULARIUS_RAGFLOW_MCP_URL, list('TABULARIUS_RAGFLOW_DATASETS')) : undefined,
     web: process.env.TABULARIUS_WEB === 'on' ? {
       options: { allowed: list('TABULARIUS_WEB_ALLOWED_DOMAINS'), blocked: list('TABULARIUS_WEB_BLOCKED_DOMAINS'), maxUses: Number(process.env.TABULARIUS_WEB_MAX_USES || 5) },
       searxng: process.env.TABULARIUS_SEARXNG_URL || undefined, intranet: list('TABULARIUS_INTRANET'),
@@ -53,13 +61,10 @@ if (provider) {
       url: process.env.TABULARIUS_SANDBOX_URL, token: required('TABULARIUM_SANDBOX_TOKEN'),
       images: (process.env.TABULARIUS_SANDBOX_IMAGES || 'python:3.13-slim,node:24-slim,alpine:3').split(',').map(image => image.trim()).filter(Boolean),
     } : undefined,
-    params: checkParams(provider as 'anthropic' | 'openai' | 'vllm', process.env.TABULARIUS_MODEL_PARAMS ?? ''),
   };
   if (!MODES.includes(tabularius.modeLimit)) throw new Error('TABULARIUS_MODE_LIMIT must be read-only, restricted or full');
   const web = tabularius.web;
   if (web?.options.allowed.length && web.options.blocked.length) throw new Error('Set TABULARIUS_WEB_ALLOWED_DOMAINS or TABULARIUS_WEB_BLOCKED_DOMAINS, not both');
-  if (web && provider === 'openai' && web.options.blocked.length) throw new Error("OpenAI's web search supports only TABULARIUS_WEB_ALLOWED_DOMAINS");
-  if (web && provider === 'vllm' && !web.searxng) throw new Error('TABULARIUS_WEB with vllm needs TABULARIUS_SEARXNG_URL');
 }
 const gateway = await createGateway({
   database,

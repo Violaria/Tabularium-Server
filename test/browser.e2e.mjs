@@ -93,7 +93,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await page.getByRole('link', { name: la['account.interface'], exact: true }).click();
     await page.getByLabel(la['language.label']).selectOption('zh');
     await expect(page.getByRole('link', { name: '首页', exact: true })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'AI 管理员', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: '书记员', exact: true })).toBeVisible();
     report.scenarios.push('three-languages-one-selector-in-account-settings');
 
     // Colour theme: sakura until the account chooses another, then kept on the account; notices are toasts.

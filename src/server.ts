@@ -305,7 +305,7 @@ export async function createGateway(config: Config) {
       let storage = false;
       try { const up = await couch.admin('/_up'); storage = up.ok; await up.arrayBuffer(); } catch { /* Shown as not ready. */ }
       server = { uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000), activeProxyConnections: active.size, storage,
-        provider: tabularius ? { name: tabularius.provider.name, model: tabularius.provider.model } : null };
+        model: tabularius ? tabularius.overview().defaultModel || null : null };
     }
     return { vaults: result, conversations, server };
   }
@@ -555,8 +555,23 @@ export async function createGateway(config: Config) {
       const t = tabularius!;
       if (route.length === 1 && method === 'GET') {
         const vaults = db.prepare('SELECT * FROM vaults WHERE owner_id=?').all(user.id) as unknown as Vault[];
-        json(res, 200, { provider: t.provider.name, model: t.provider.model, embeddings: t.embeddings, knowledge: t.knowledge && user.role === 'admin', web: t.web, params: t.params, paramNames: t.paramNames,
+        const overview = t.overview();
+        json(res, 200, { ...overview, knowledge: overview.knowledge && user.role === 'admin', admin: user.role === 'admin',
           modes: user.role === 'admin' ? MODES.slice(0, MODES.indexOf(t.modeLimit) + 1) : ['read-only'], vaults: vaults.map(t.status) }); return;
+      }
+      // AI settings: providers and keys, models, the default prompt and parameters, the knowledge base. Administrators only.
+      if (route[1] === 'settings') {
+        if (user.role !== 'admin') fail(403, 'Administrator required');
+        if (route.length === 2 && method === 'GET') { json(res, 200, t.settings()); return; }
+        if (route.length === 2 && method === 'PUT') {
+          const result = await t.updateSettings(await body(req, 262_144));
+          audit(user.id, 'tabularius.settings', user.id);
+          json(res, 200, result); return;
+        }
+        if (route.length === 3 && route[2] === 'test' && method === 'POST') { json(res, 200, await t.testModel(field(await body(req), 'model', 200))); return; }
+        if (route.length === 3 && route[2] === 'datasets' && method === 'POST') { json(res, 200, await t.datasets(field(await body(req), 'url', 500))); return; }
+        if (route.length === 3 && route[2] === 'knowledge' && method === 'POST') { json(res, 200, await t.testKnowledge(field(await body(req), 'question', 500))); return; }
+        fail(404, 'Route not found');
       }
       if (route[1] === 'vaults' && route.length >= 3) {
         const vault = ownedVault(route[2], user);
@@ -592,7 +607,17 @@ export async function createGateway(config: Config) {
           json(res, 200, t.status(vault)); return;
         }
         if (route.length === 4 && route[3] === 'params' && method === 'PUT') {
-          t.setParams(vault.id, field(await body(req), 'params', 4000, 0));
+          t.setParams(vault.id, (await body(req, 65_536)).params);
+          json(res, 200, t.status(vault)); return;
+        }
+        if (route.length === 4 && route[3] === 'prompt' && method === 'PUT') {
+          t.setPrompt(vault.id, field(await body(req, 131_072), 'prompt', 40_000, 0));
+          json(res, 200, t.status(vault)); return;
+        }
+        if (route.length === 4 && route[3] === 'prompt' && method === 'GET') { json(res, 200, t.preview(vault.id)); return; }
+        if (route.length === 5 && route[3] === 'prompt' && route[4] === 'import' && method === 'POST') { json(res, 200, { prompt: await t.importPrompt(vault.id) }); return; }
+        if (route.length === 4 && route[3] === 'model' && method === 'PUT') {
+          t.setModel(vault.id, (await body(req)).model ?? null);
           json(res, 200, t.status(vault)); return;
         }
         if (route.length === 4 && route[3] === 'mode' && method === 'PUT') {
@@ -603,7 +628,8 @@ export async function createGateway(config: Config) {
         }
         if (route.length === 4 && route[3] === 'conversations' && method === 'GET') { json(res, 200, t.conversations(vault.id, user)); return; }
         if (route.length === 4 && route[3] === 'conversations' && method === 'POST') {
-          await t.start_conversation(res, vault.id, user, field(await body(req, 65_536), 'message', 8000)); return;
+          const data = await body(req, 131_072);
+          await t.start_conversation(res, vault.id, user, field(data, 'message', 8000), { model: data.model, prompt: data.prompt, params: data.params }); return;
         }
       }
       if (route[1] === 'vaults' && route.length === 4 && route[3] === 'proposals' && method === 'GET') {
@@ -659,6 +685,7 @@ export async function createGateway(config: Config) {
       if (route[1] === 'conversations' && route.length >= 3) {
         if (route.length === 3 && method === 'GET') { json(res, 200, t.conversation(route[2], user)); return; }
         if (route.length === 3 && method === 'DELETE') { t.remove_conversation(route[2], user); json(res, 200, { ok: true }); return; }
+        if (route.length === 3 && method === 'PATCH') { json(res, 200, t.configure(route[2], user, await body(req, 131_072))); return; }
         if (route.length === 4 && route[3] === 'messages' && method === 'POST') {
           await t.continue_conversation(res, route[2], user, field(await body(req, 65_536), 'message', 8000)); return;
         }

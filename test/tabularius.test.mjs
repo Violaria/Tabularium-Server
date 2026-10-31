@@ -177,7 +177,12 @@ test('model parameters are checked per provider', async () => {
   assert.deepEqual(checkParams('anthropic', ''), {});
   assert.throws(() => checkParams('anthropic', '{"temperature":0.7}'), ParamsError);
   assert.throws(() => checkParams('openai', '{"reasoning_effort":"huge"}'), /reasoning_effort/);
-  assert.deepEqual(checkParams('vllm', '{"temperature":0.6,"top_k":20,"chat_template_kwargs":{"enable_thinking":false}}').top_k, 20);
+  assert.deepEqual(checkParams('vllm', { temperature: 0.6, top_k: 20, enable_thinking: false, stop: ['</done>'], ignore_eos: true }).top_k, 20, 'vLLM takes custom parameters');
+  assert.throws(() => checkParams('vllm', { chat_template_kwargs: {} }), /cannot be set/, 'fields the server fills in are reserved');
+  assert.throws(() => checkParams('vllm', { stop: ['', 'x'] }), /stop/);
+  assert.throws(() => checkParams('openai', { ignore_eos: true }), /not a parameter/, 'only vLLM takes custom parameters');
+  const { vllmBody } = await import('../dist/tabularius/params.js');
+  assert.deepEqual(vllmBody({ temperature: 0.6, enable_thinking: false }), { temperature: 0.6, chat_template_kwargs: { enable_thinking: false } });
   assert.throws(() => checkParams('vllm', '{"top_k":1.5}'), /top_k/);
   assert.throws(() => checkParams('vllm', '[1]'), /JSON object/);
 });
