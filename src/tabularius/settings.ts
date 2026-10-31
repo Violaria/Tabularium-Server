@@ -17,7 +17,10 @@ import { KNOWLEDGE_DEFAULTS, listDatasets, ragflow, type KnowledgeBase, type Kno
 
 export const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
 /** A model offered here: the provider's identifier, its name for people, and (vLLM) its context length. */
-export interface ModelEntry { id: string; name: string; context?: number }
+/** `vision`: whether the model reads images (the APIs do not say; the administrator marks it). */
+export interface ModelEntry { id: string; name: string; context?: number; vision?: boolean }
+/** Anthropic and OpenAI chat models read images; a local model is marked by the administrator. */
+const visionDefault = (name: ProviderName) => name !== 'vllm';
 interface StoredProvider { key: string | null; hint: string; models: ModelEntry[]; url: string; context: number }
 type Stored = Record<ProviderName, StoredProvider>;
 export interface InitialSettings {
@@ -32,7 +35,7 @@ export interface InitialSettings {
 /** Web lookup: Claude and OpenAI search themselves; other models use SearXNG and the server's fetch. */
 export interface WebSettings { enabled: boolean; searxng: string; allowed: string[]; blocked: string[]; maxUses: number; intranet: string[] }
 /** The highest permission mode, how long a command may run over SSH, and the images the sandbox may run. */
-export interface Limits { modeLimit: Mode; sshTimeout: number; sandboxImages: string[] }
+export interface Limits { modeLimit: Mode; sshTimeout: number; sandboxImages: string[]; attachmentMegabytes: number }
 interface StoredEmbedding { url: string; key: string | null; hint: string; model: string; batch: number }
 /** A named way of answering: a model offered here, its parameters and a prompt added to the vault's. */
 export interface Recipe { id: string; name: string; model: string; params: Params; prompt: string }
@@ -79,7 +82,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
     ? { url: initial.embedding.url ?? '', key: initial.embedding.key ? sealKey(initial.embedding.key) : null, hint: initial.embedding.key ? hintOf(initial.embedding.key) : '',
       model: initial.embedding.model, batch: initial.embedding.batch ?? 64 } satisfies StoredEmbedding : null);
   if (missing('web')) write('web', initial.web ?? { enabled: false, searxng: '', allowed: [], blocked: [], maxUses: 5, intranet: [] });
-  if (missing('limits')) write('limits', { modeLimit: 'read-only', sshTimeout: 60, sandboxImages: ['python:3.13-slim', 'node:24-slim', 'alpine:3'], ...initial.limits } satisfies Limits);
+  if (missing('limits')) write('limits', { modeLimit: 'read-only', sshTimeout: 60, sandboxImages: ['python:3.13-slim', 'node:24-slim', 'alpine:3'], attachmentMegabytes: 20, ...initial.limits } satisfies Limits);
   let embedderCache: { key: string; embedder: Embedder } | undefined;
 
   // The first start with these settings takes the environment's configuration.
@@ -103,14 +106,16 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
   // Lists saved before models carried names hold plain identifiers.
   const stored = () => {
     const all = read<Stored>('providers', { anthropic: blank(), openai: blank(), vllm: blank() });
-    for (const name of PROVIDERS) all[name].models = all[name].models.map(item => typeof item === 'string' ? { id: item, name: displayName(name, item) } : item);
+    for (const name of PROVIDERS) all[name].models = all[name].models.map(item => typeof item === 'string' ? { id: item, name: displayName(name, item) } : item)
+      // Models chosen before image support was marked get the provider's default.
+      .map(item => ({ ...item, vision: item.vision ?? visionDefault(name) }));
     return all;
   };
   /** A provider is usable once it has a key (Anthropic, OpenAI) or an address (vLLM). */
   const usable = (name: ProviderName, item: StoredProvider) => name === 'vllm' ? Boolean(item.url) : Boolean(item.key);
   function models() {
     const all = stored();
-    return PROVIDERS.flatMap(name => usable(name, all[name]) ? all[name].models.map(model => ({ id: `${name}/${model.id}`, provider: name, model: model.id, name: model.name })) : []);
+    return PROVIDERS.flatMap(name => usable(name, all[name]) ? all[name].models.map(model => ({ id: `${name}/${model.id}`, provider: name, model: model.id, name: model.name, vision: model.vision ?? visionDefault(name) })) : []);
   }
   const recipes = () => read<Recipe[]>('recipes', []);
   /** A recipe that can answer now: it exists and its model is offered. */
@@ -128,6 +133,8 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
     return name;
   };
   const knowledgeSettings = () => read<KnowledgeSettings | null>('knowledge', null);
+  // Limits saved before attachments existed get their size limit.
+  const limits = (): Limits => ({ attachmentMegabytes: 20, ...read<Partial<Limits>>('limits', { modeLimit: 'read-only', sshTimeout: 60, sandboxImages: [] }) } as Limits);
 
   return {
     models, recipes, usableRecipe,
@@ -195,7 +202,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
       return embedderCache.embedder;
     },
     web: () => read<WebSettings>('web', { enabled: false, searxng: '', allowed: [], blocked: [], maxUses: 5, intranet: [] }),
-    limits: () => read<Limits>('limits', { modeLimit: 'read-only', sshTimeout: 60, sandboxImages: [] }),
+    limits: () => limits(),
     /** Embedding models offered by the configured service (OpenAI, or the OpenAI-compatible address). */
     async embeddingModels(): Promise<ModelEntry[]> {
       const e = read<StoredEmbedding | null>('embedding', null);
@@ -242,7 +249,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
         knowledge: knowledgeSettings() ?? { url: '', datasets: [], ...KNOWLEDGE_DEFAULTS },
         embedding: (({ key, ...rest }) => ({ ...rest, keySet: Boolean(key) }))(read<StoredEmbedding>('embedding', null as never) ?? { url: '', key: null, hint: '', model: '', batch: 64 }),
         web: read<WebSettings>('web', { enabled: false, searxng: '', allowed: [], blocked: [], maxUses: 5, intranet: [] }),
-        limits: read<Limits>('limits', { modeLimit: 'read-only', sshTimeout: 60, sandboxImages: [] }),
+        limits: limits(),
       };
     },
     /** Saves what the page sent. A key is replaced only when one is given; an empty key removes it. */
@@ -263,10 +270,11 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
           if (item.models !== undefined) {
             const valid = (model: unknown): model is ModelEntry => typeof model === 'object' && model !== null && typeof (model as ModelEntry).id === 'string'
               && /^[^\s/][^\s]{0,127}$/.test((model as ModelEntry).id) && typeof (model as ModelEntry).name === 'string' && (model as ModelEntry).name.length <= 128
-              && ((model as ModelEntry).context === undefined || (Number.isInteger((model as ModelEntry).context) && (model as ModelEntry).context! > 0));
+              && ((model as ModelEntry).context === undefined || (Number.isInteger((model as ModelEntry).context) && (model as ModelEntry).context! > 0))
+              && ((model as ModelEntry).vision === undefined || typeof (model as ModelEntry).vision === 'boolean');
             if (!Array.isArray(item.models) || item.models.length > 100 || !item.models.every(valid)) throw new SettingsError('Invalid model list');
             next.models = (item.models as ModelEntry[]).filter((model, index, list) => list.findIndex(other => other.id === model.id) === index)
-              .map(model => ({ id: model.id, name: model.name.trim() || displayName(name, model.id), ...(model.context ? { context: model.context } : {}) }));
+              .map(model => ({ id: model.id, name: model.name.trim() || displayName(name, model.id), ...(model.context ? { context: model.context } : {}), vision: model.vision ?? visionDefault(name) }));
           }
           if (item.url !== undefined) {
             if (typeof item.url !== 'string' || (item.url && !/^https?:\/\/\S+$/.test(item.url))) throw new SettingsError('Invalid address');
@@ -339,8 +347,9 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
       if (data.limits !== undefined) {
         const l = data.limits as Record<string, unknown>;
         if (!['read-only', 'restricted', 'full'].includes(l.modeLimit as string) || !Number.isInteger(l.sshTimeout) || (l.sshTimeout as number) < 5 || (l.sshTimeout as number) > 3600
-          || !Array.isArray(l.sandboxImages) || !l.sandboxImages.every(image => typeof image === 'string' && /^[\w./:@-]{1,200}$/.test(image))) throw new SettingsError('Invalid limits');
-        limits = { modeLimit: l.modeLimit as Mode, sshTimeout: l.sshTimeout as number, sandboxImages: l.sandboxImages as string[] };
+          || !Array.isArray(l.sandboxImages) || !l.sandboxImages.every(image => typeof image === 'string' && /^[\w./:@-]{1,200}$/.test(image))
+          || !Number.isInteger(l.attachmentMegabytes) || (l.attachmentMegabytes as number) < 1 || (l.attachmentMegabytes as number) > 100) throw new SettingsError('Invalid limits');
+        limits = { modeLimit: l.modeLimit as Mode, sshTimeout: l.sshTimeout as number, sandboxImages: l.sandboxImages as string[], attachmentMegabytes: l.attachmentMegabytes as number };
       }
       db.exec('BEGIN');
       write('providers', all);

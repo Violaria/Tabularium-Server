@@ -31,7 +31,7 @@ function vaultCard(vault: HomeVault) {
     ? `<ul class="rows">${vault.devices.map(d => `<li><span>${escape(d.name)}</span><span>${d.lastSeenAt ? escape(t('home.lastSync', { when: when(d.lastSeenAt) })) : t('home.neverSynced')}</span></li>`).join('')}</ul>`
     : `<p>${t('home.noDevices')}</p>`;
   const recent = vault.tabularius && vault.recent.length
-    ? `<div><h3>${t('home.recent')}</h3><ul class="rows">${vault.recent.map(r => `<li><a href="/notes/?vault=${vault.id}&amp;path=${encodeURIComponent(r.path)}">${escape(r.path.replace(/\.md$/i, ''))}</a><span>${escape(when(r.mtime))}</span></li>`).join('')}</ul></div>`
+    ? `<div><h3>${t('home.recent')}</h3><ul class="rows">${vault.recent.map(r => `<li><a data-route href="/notes/?vault=${vault.id}&amp;path=${encodeURIComponent(r.path)}">${escape(r.path.replace(/\.md$/i, ''))}</a><span>${escape(when(r.mtime))}</span></li>`).join('')}</ul></div>`
     : '';
   return `<section class="card home-vault"><header><h2>${escape(vault.name)}</h2>${status(vault)}</header><div class="facts"><span>${t('home.noteCount', { n: `<strong>${vault.notes}</strong>` })}</span><span>${bytes(vault.size)}</span><span>${vault.tabularius ? t('home.tabulariusOn') : t('home.tabulariusOff')}</span></div><div class="split"><div><h3>${t('home.devices')}</h3>${devices}</div>${recent}</div><div class="actions"><a class="button primary" href="/notes/?vault=${vault.id}">${t('home.openNotes')}</a>${vault.tabularius ? `<a class="button" href="/tabularius/?vault=${vault.id}">${t('home.ask')}</a>` : ''}<a class="button link" href="/account/vaults/${vault.id}" data-route>${t('home.manageDevices')}</a></div></section>`;
 }

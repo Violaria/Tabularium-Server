@@ -1,6 +1,6 @@
 // Tabularius: enable the AI curator for a vault, set what it may send, and talk to it about the notes.
 import { formatDate, hasMessage, serverError, t } from './i18n.js';
-import { api, ApiError, confirmAction, escape, message, run, state, tip } from './core.js';
+import { api, ApiError, bytes, confirmAction, escape, message, notesStyles, run, state, tip } from './core.js';
 import { FormError, paramForm, paramLabel, PROVIDER_NAMES, type Params, type ProviderName, type Rule } from './params.js';
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
@@ -8,11 +8,15 @@ interface VaultStatus {
 }
 type Mode = 'read-only' | 'restricted' | 'full';
 /** A recipe: a model with parameters and a prompt, set up by an administrator. */
-interface RecipeView { id: string; name: string; model: string; modelName: string; provider: ProviderName; params: Params; prompt: string }
+interface RecipeView { id: string; name: string; model: string; modelName: string; vision: boolean; provider: ProviderName; params: Params; prompt: string }
 interface Overview { recipes: RecipeView[]; defaultRecipe: string; rules: Record<ProviderName, Record<string, Rule>>;
-  embeddings: boolean; knowledge: boolean; web: boolean; admin: boolean; modes: Mode[]; vaults: VaultStatus[] }
-/** The open conversation's recipe, extra prompt and adjusted parameters, or what a new conversation will start with. */
-interface ChatSettings { recipe: string; prompt: string; params: Partial<Record<ProviderName, Params>> }
+  embeddings: boolean; knowledge: boolean; web: boolean; admin: boolean; modes: Mode[]; vaults: VaultStatus[]; attachmentMegabytes: number }
+/** The open conversation's recipe, extra prompt, adjusted parameters and web search, or what a new conversation will start with. */
+interface ChatSettings { recipe: string; prompt: string; params: Partial<Record<ProviderName, Params>>; web: boolean }
+/** A file sent with a message. */
+interface AttachmentRef { id: string; name: string; kind: 'image' | 'text' }
+/** A file in the box, before sending: uploading (no id yet), ready, or refused with the reason. */
+interface Pending { key: number; name: string; size: number; image: boolean; preview?: string; id?: string; kind?: 'image' | 'text'; error?: string }
 interface Summary { id: string; title: string; updatedAt: number }
 interface ProposalRef { id: string; title: string; status: string; files?: number }
 interface ToolUse { name: string; input: Record<string, unknown>; proposal?: ProposalRef }
@@ -22,7 +26,7 @@ interface ProposalFile { op: 'create' | 'edit' | 'move' | 'delete'; path: string
 interface ProposalDetail extends ProposalSummary { vaultId: string; files: ProposalFile[] }
 interface Source { url: string; title: string }
 interface Approval { id: string; host: string; command: string; approved?: boolean }
-interface Entry { role: 'user' | 'assistant'; text: string; tools?: ToolUse[]; read?: string[]; sources?: Source[]; approvals?: Approval[]; error?: string }
+interface Entry { role: 'user' | 'assistant'; text: string; attachments?: AttachmentRef[]; tools?: ToolUse[]; read?: string[]; sources?: Source[]; approvals?: Approval[]; error?: string }
 interface Host { id: string; name: string; address: string; port: number; username: string; policy: 'allowed' | 'authorize' | 'forbidden'; commands: string; fingerprint: string | null; publicKey: string }
 interface CommandRecord { id: string; host: string | null; user: string | null; command: string; mode: string; status: string; exitCode: number | null; reason: string | null; createdAt: number }
 
@@ -39,11 +43,13 @@ let conversations: Summary[] = [];
 let conversationId: string | undefined;
 let entries: Entry[] = [];
 let busy = false;
-let chat: ChatSettings = { recipe: '', prompt: '', params: {} };
+let chat: ChatSettings = { recipe: '', prompt: '', params: {}, web: false };
+let pending: Pending[] = [];
+let pendingKey = 0;
 const recipeOf = (id: string | null | undefined) => overview!.recipes.find(recipe => recipe.id === id);
 /** A new conversation starts with the vault's default recipe, else the server's. */
 function newChat() {
-  chat = { recipe: recipeOf(vault()?.recipe)?.id ?? overview!.defaultRecipe, prompt: '', params: {} };
+  chat = { recipe: recipeOf(vault()?.recipe)?.id ?? overview!.defaultRecipe, prompt: '', params: {}, web: false };
 }
 /** Recipes as select options with their model's name; `empty` adds a first option with the value ''. */
 const recipeOptions = (selected: string, empty?: string) => (empty === undefined ? '' : `<option value="" ${selected ? '' : 'selected'}>${escape(empty)}</option>`)
@@ -60,21 +66,16 @@ function form(id: string, action: (data: FormData) => Promise<void>) {
   });
 }
 
-/** Answer text: paragraphs, fenced code, inline code, and [[note]] citations linked to the web notes page. */
-function render(text: string) {
-  const link = (path: string) => `<a class="cite" href="/notes/?vault=${encodeURIComponent(vaultId)}&amp;path=${encodeURIComponent(path)}">${escape(path)}</a>`;
-  // Citations are found in the escaped text; their paths are turned back into the text as written.
-  const entities: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
-  const unescape = (value: string) => value.replace(/&(?:amp|lt|gt|quot|#39);/g, entity => entities[entity]);
-  const inline = (value: string) => escape(value)
-    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-    .replace(/\[\[([^\]\n|]+?)(?:\|[^\]\n]*)?\]\]/g, (_, path: string) => link(unescape(path)));
-  return text.split(/(```[^\n]*\n[\s\S]*?(?:```|$))/).map(block => {
-    const fence = /^```[^\n]*\n([\s\S]*?)(?:```)?$/.exec(block);
-    if (fence) return `<pre><code>${escape(fence[1])}</code></pre>`;
-    return block.split(/\n{2,}/).map(p => p.trim()).filter(Boolean).map(p => `<p>${inline(p).replace(/\n/g, '<br>')}</p>`).join('');
-  }).join('');
+/** The renderer web notes uses, built with it (answer-markdown.js), so answers read like notes. */
+interface AnswerModule {
+  renderAnswer(text: string, cite: (path: string) => string, copy: string): string;
+  renderDiagrams(root: ParentNode): Promise<void>;
+  copyCode(event: MouseEvent, copied: string): boolean;
 }
+let answers: AnswerModule;
+/** Answer text as markdown; [[note]] citations link to the note in web notes. */
+const render = (text: string) =>
+  answers.renderAnswer(text, path => `/notes/?vault=${encodeURIComponent(vaultId)}&path=${encodeURIComponent(path)}`, t('notes.copyCode'));
 function toolLabel(tool: ToolUse) {
   const value = (key: string) => escape(String(tool.input[key] ?? ''));
   if (tool.name === 'search_notes') return t('tabularius.toolSearch', { query: value('query') });
@@ -102,7 +103,7 @@ const statusBadge = (status: string) => `<span class="badge${status === 'pending
 /** Approvals already answered in this page: a redraw of the streaming answer keeps their buttons off. */
 const answered = new Set<string>();
 function entryHtml(entry: Entry) {
-  if (entry.role === 'user') return `<div class="turn user"><p>${escape(entry.text).replace(/\n/g, '<br>')}</p></div>`;
+  if (entry.role === 'user') return `<div class="turn user">${entry.attachments?.length ? `<div class="sent-attachments">${entry.attachments.map(sentAttachment).join('')}</div>` : ''}${entry.text ? `<p>${escape(entry.text).replace(/\n/g, '<br>')}</p>` : ''}</div>`;
   const tools = (entry.tools ?? []).map(tool => `<li>${toolLabel(tool)}</li>`).join('');
   const read = entry.read?.length ? `<div class="read"><small>${t('tabularius.readNotes')}</small>${render(entry.read.map(path => `[[${path}]]`).join('  '))}</div>` : '';
   const web = (entry.sources ?? []).filter(source => /^https?:/.test(source.url));
@@ -111,7 +112,7 @@ function entryHtml(entry: Entry) {
   const approvals = (entry.approvals ?? []).map(a => `<div class="notice approval"><p>${t('tabularius.approvalAsk', { host: escape(a.host) })}</p><pre class="mono">${escape(a.command)}</pre>
     ${a.approved === undefined ? `<div class="actions"><button class="primary" data-approve="${escape(a.id)}" ${answered.has(a.id) ? 'disabled' : ''}>${t('tabularius.approve')}</button><button data-deny="${escape(a.id)}" ${answered.has(a.id) ? 'disabled' : ''}>${t('tabularius.deny')}</button></div>`
       : `<span class="badge${a.approved ? '' : ' warn'}">${a.approved ? t('tabularius.approved') : t('tabularius.denied')}</span>`}</div>`).join('');
-  return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}${approvals}<div class="answer">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}${sources}</div>`;
+  return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}${approvals}<div class="answer md-body">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}${sources}</div>`;
 }
 
 async function load() {
@@ -157,7 +158,7 @@ function shell(content: string) {
 }
 async function openConversation(id: string) {
   const loaded = await api<{ id: string; messages: Entry[] } & ChatSettings>(`/tabularius/conversations/${encodeURIComponent(id)}`);
-  view = 'chat'; conversationId = loaded.id; entries = loaded.messages; chat = { recipe: loaded.recipe, prompt: loaded.prompt, params: loaded.params ?? {} }; draw();
+  view = 'chat'; conversationId = loaded.id; entries = loaded.messages; chat = { recipe: loaded.recipe, prompt: loaded.prompt, params: loaded.params ?? {}, web: loaded.web }; draw();
 }
 /** Saves the conversation's settings, or keeps them for the first message of a new conversation. */
 async function saveChat(next: Partial<ChatSettings>) {
@@ -165,7 +166,7 @@ async function saveChat(next: Partial<ChatSettings>) {
   chat = { ...chat, ...next };
   if (conversationId) {
     const saved = await api<ChatSettings>(`/tabularius/conversations/${encodeURIComponent(conversationId)}`, 'PATCH', next);
-    chat = { recipe: saved.recipe, prompt: saved.prompt, params: saved.params ?? {} };
+    chat = { recipe: saved.recipe, prompt: saved.prompt, params: saved.params ?? {}, web: saved.web };
   }
   // Adjustments made for another provider do not travel with a switch of recipe.
   const after = recipeOf(chat.recipe);
@@ -175,12 +176,93 @@ async function saveChat(next: Partial<ChatSettings>) {
   }
 }
 /** The conversation settings dialog: an extra prompt, and adjustments to the recipe's parameters for this conversation. */
+/** Web search can be switched on for a conversation when the server has web access and the vault allows it. */
+const webAllowed = () => Boolean(overview?.web && vault()?.web);
+
+const ATTACH_ICON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>';
+const FILE_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.8h5.2l3 3v9c0 .4-.3.7-.7.7H4c-.4 0-.7-.3-.7-.7V2.5c0-.4.3-.7.7-.7z"/><path d="M9 1.8v3.2h3.2"/></svg>';
+const MAX_FILES = 10;
+/** Pictures go to the model at up to this many pixels on their long side. */
+const LONG_SIDE = 1568;
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+/** An image no larger than LONG_SIDE: kept when it already fits, else redrawn (PNG stays PNG, others become JPEG). */
+async function shrink(file: File): Promise<{ blob: Blob; name: string }> {
+  let bitmap: ImageBitmap;
+  try { bitmap = await createImageBitmap(file); } catch { throw new Error(t('tabularius.imageUnreadable')); }
+  const scale = Math.min(1, LONG_SIDE / Math.max(bitmap.width, bitmap.height));
+  if (scale === 1 && IMAGE_TYPES.includes(file.type)) { bitmap.close(); return { blob: file, name: file.name }; }
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const png = file.type === 'image/png';
+  const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(result => result ? resolve(result) : reject(new Error(t('tabularius.imageUnreadable'))), png ? 'image/png' : 'image/jpeg', 0.85));
+  return { blob, name: png ? file.name : file.name.replace(/\.[^.]*$/, '') + '.jpg' };
+}
+/** Uploads one file for the next message; the card shows its progress, and the reason when it is refused. */
+async function upload(item: Pending, file: File) {
+  try {
+    let blob: Blob = file;
+    if (item.image) {
+      if (!recipeOf(chat.recipe)?.vision) throw new Error(t('tabularius.noVision'));
+      const shrunk = await shrink(file);
+      blob = shrunk.blob; item.name = shrunk.name; item.size = blob.size; item.preview = URL.createObjectURL(blob);
+      drawPending();
+    }
+    if (blob.size > overview!.attachmentMegabytes * 1048576) throw new Error(t('tabularius.attachmentTooLarge', { size: overview!.attachmentMegabytes }));
+    const response = await fetch(`/api/v1/tabularius/vaults/${encodeURIComponent(vaultId)}/attachments`, {
+      method: 'POST', credentials: 'same-origin', body: blob,
+      headers: { 'content-type': 'application/octet-stream', 'x-file-name': encodeURIComponent(item.name), 'x-csrf-token': state.session!.csrf },
+    });
+    const data = await response.json() as { id?: string; kind?: 'image' | 'text'; error?: string };
+    if (!response.ok) throw new Error(response.status === 413 ? t('tabularius.attachmentTooLarge', { size: overview!.attachmentMegabytes }) : serverError(data.error ?? ''));
+    item.id = data.id; item.kind = data.kind;
+  } catch (error) {
+    item.error = error instanceof Error ? error.message : String(error);
+  }
+  drawPending();
+}
+function addFiles(files: File[]) {
+  for (const file of files) {
+    if (pending.length >= MAX_FILES) { message(t('tabularius.tooManyAttachments', { count: MAX_FILES }), true); break; }
+    const item: Pending = { key: ++pendingKey, name: file.name || 'image.png', size: file.size, image: file.type.startsWith('image/') };
+    pending.push(item);
+    void upload(item, file);
+  }
+  drawPending();
+}
+function dropPending(key: number) {
+  const item = pending.find(entry => entry.key === key);
+  if (item?.preview) URL.revokeObjectURL(item.preview);
+  pending = pending.filter(entry => entry.key !== key);
+  drawPending();
+}
+const pendingHtml = () => pending.map(item => `<div class="attachment${item.error ? ' failed' : item.id ? '' : ' loading'}" title="${escape(item.error ?? item.name)}">
+  ${item.preview ? `<img src="${item.preview}" alt="">` : `<span class="attachment-icon">${FILE_ICON}</span>`}<span class="attachment-text"><span class="attachment-name">${escape(item.name)}</span>
+  <small>${item.error ? escape(item.error) : item.id ? bytes(item.size) : t('tabularius.uploading')}</small></span>
+  <button type="button" class="attachment-remove" data-remove="${item.key}" aria-label="${t('tabularius.removeAttachment')}" title="${t('tabularius.removeAttachment')}">×</button></div>`).join('');
+/** Redraws only the cards, so typing in the box is not disturbed while files upload. */
+function drawPending() {
+  const box = document.getElementById('attachments');
+  if (box) box.innerHTML = pendingHtml();
+}
+/** A sent file on its message: images as pictures, other files by name; both open from the server. */
+const sentAttachment = (item: AttachmentRef) => {
+  const href = `/api/v1/tabularius/attachments/${encodeURIComponent(item.id)}`;
+  return item.kind === 'image'
+    ? `<a class="sent-image" href="${href}" target="_blank" rel="noopener" title="${escape(item.name)}"><img src="${href}" alt="${escape(item.name)}" loading="lazy"></a>`
+    : `<a class="attachment" href="${href}" target="_blank" rel="noopener"><span class="attachment-icon">${FILE_ICON}</span><span class="attachment-text"><span class="attachment-name">${escape(item.name)}</span></span></a>`;
+};
+
 function chatSettings() {
   const recipe = recipeOf(chat.recipe);
   const provider = recipe?.provider;
   const dialog = document.createElement('dialog');
   dialog.className = 'dialog chat-settings';
-  dialog.innerHTML = `<form method="dialog" class="stack"><h2>${t('tabularius.chatSettings')}</h2><label><span>${t('tabularius.chatPrompt')}${tip(t('tabularius.chatPromptHint'))}</span><textarea name="prompt" rows="4">${escape(chat.prompt)}</textarea></label>
+  dialog.innerHTML = `<form method="dialog" class="stack"><h2>${t('tabularius.chatSettings')}</h2>
+    ${webAllowed() ? `<label class="check"><input type="checkbox" name="web" ${chat.web ? 'checked' : ''}> ${t('tabularius.webSearch')}${tip(t('tabularius.webSearchHint'))}</label>` : ''}
+    <label><span>${t('tabularius.chatPrompt')}${tip(t('tabularius.chatPromptHint'))}</span><textarea name="prompt" rows="4">${escape(chat.prompt)}</textarea></label>
     <h3>${t('tabularius.paramsFor', { recipe: escape(recipe?.name ?? ''), model: escape(recipe?.modelName ?? '') })}${tip(t('tabularius.paramsForHint'))}</h3><div class="chat-params"></div>
     <div class="buttons"><button type="button" data-cancel>${t('dialog.cancel')}</button><button type="submit" class="primary">${t('common.save')}</button></div></form>`;
   document.body.append(dialog);
@@ -193,7 +275,8 @@ function chatSettings() {
     let params: Params;
     try { params = read(); } catch (error) { if (error instanceof FormError) { message(error.message, true); return; } throw error; }
     void run(async () => {
-      await saveChat({ prompt: String(new FormData(dialog.querySelector('form')!).get('prompt')), params: { ...chat.params, ...(provider ? { [provider]: params } : {}) } });
+      const form = new FormData(dialog.querySelector('form')!);
+      await saveChat({ prompt: String(form.get('prompt')), params: { ...chat.params, ...(provider ? { [provider]: params } : {}) }, ...(webAllowed() ? { web: form.get('web') === 'on' } : {}) });
       close(); draw(); message(t('tabularius.saved'));
     });
   });
@@ -220,7 +303,7 @@ function drawEnable(current: VaultStatus) {
   shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.enableTitle', { name: escape(current.name) })}</h1></div></header>
     <div class="card"><p>${t('tabularius.enableWarning', { provider: escape(recipeOf(overview!.defaultRecipe)?.modelName ?? t('tabularius.noModel')) })}</p>
     <form id="enable" class="stack"><label class="check"><input type="checkbox" name="confirm" required> ${t('tabularius.enableConfirm')}</label>
-    <label>${t('tabularius.passphrase')}<input name="passphrase" type="password" autocomplete="off" required></label>
+    <label>${t('tabularius.passphrase')}<input name="passphrase" type="password" data-bwignore data-1p-ignore data-lpignore="true" autocomplete="off" required></label>
     ${rulesFields('', '')}
     <button class="primary" type="submit">${t('tabularius.enable')}</button></form></div>`);
   form('enable', async data => {
@@ -239,6 +322,7 @@ function syncPill(current: VaultStatus) {
   const counts = t('tabularius.counts', { notes: current.notes ?? 0, chunks: current.chunks ?? 0 });
   return `<span class="sync-pill ${kind}" role="status" title="${escape(current.indexError ? t('tabularius.indexError', { error: current.indexError }) : counts)}"><span class="dot" aria-hidden="true"></span><strong>${escape(label)}</strong><span class="sep" aria-hidden="true"></span><span>${escape(counts)}</span></span>`;
 }
+const GEAR_ICON = '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/><circle cx="10" cy="10" r="5.3"/></svg>';
 const SEND_ICON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4M4.5 9.5 10 4l5.5 5.5"/></svg>';
 
 function statusText(current: VaultStatus) {
@@ -422,15 +506,20 @@ function drawProposal(detail: ProposalDetail) {
 
 function drawChat(current: VaultStatus) {
   const title = conversations.find(c => c.id === conversationId)?.title ?? (entries.length ? t('tabularius.newChat') : '');
-  const composer = `<form id="ask" class="composer"><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${escape(t('tabularius.ask'))}" aria-label="${escape(t('tabularius.ask'))}" title="${escape(t('tabularius.askHint'))}" required ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></form>`;
+  // The recipe and this conversation's settings sit in the box itself, with the send button.
+  const picker = overview!.recipes.length ? `<button id="chat-settings" type="button" class="icon-button" aria-label="${t('tabularius.chatSettings')}" title="${t('tabularius.chatSettings')}">${GEAR_ICON}</button><select id="chat-recipe" class="bare" aria-label="${t('tabularius.recipe')}" title="${escape(recipeOf(chat.recipe)?.modelName ?? '')}">${recipeOptions(chat.recipe, chat.recipe ? undefined : t('tabularius.noModel'))}</select>` : '';
+  const attach = `<button id="attach" type="button" class="icon-button" aria-label="${t('tabularius.attach')}" title="${t('tabularius.attachHint')}">${ATTACH_ICON}</button><input id="attach-input" type="file" multiple hidden>`;
+  const webPill = chat.web && webAllowed() ? `<span class="composer-pill">${t('tabularius.webPill')}</span>` : '';
+  const composer = `<form id="ask" class="composer"><div id="attachments" class="attachments">${pendingHtml()}</div><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${escape(t('tabularius.ask'))}" aria-label="${escape(t('tabularius.ask'))}" title="${escape(t('tabularius.askHint'))}" ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><div class="composer-tools">${attach}${picker}${webPill}</div><div class="composer-tools"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></div></form>`;
   // A new conversation starts in the middle of the page; once it has messages the box moves below them.
-  const picker = overview!.recipes.length ? `<select id="chat-recipe" class="compact" aria-label="${t('tabularius.recipe')}" title="${escape(recipeOf(chat.recipe)?.modelName ?? '')}">${recipeOptions(chat.recipe, chat.recipe ? undefined : t('tabularius.noModel'))}</select><button id="chat-settings" type="button">${t('tabularius.chatSettings')}</button>` : '';
-  shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${picker}${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
+  shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
     ${current.indexError ? `<p class="notice error">${t('tabularius.indexError', { error: escape(current.indexError) })}</p>` : ''}
     ${entries.length ? `<section id="log" class="log" aria-live="polite">${entries.map(entryHtml).join('')}</section><div class="chat-bottom">${composer}</div>`
     : `<div class="chat-start"><div class="chat-start-inner"><h2 class="chat-hello">Tabularius</h2>${composer}</div></div><div id="log" hidden></div>`}`);
   const log = document.getElementById('log')!;
   log.scrollTop = log.scrollHeight;
+  // Diagrams are drawn once an answer is complete; while it streams their source shows.
+  if (!busy) void answers.renderDiagrams(log);
   document.getElementById('chat-recipe')?.addEventListener('change', event => void run(async () => { await saveChat({ recipe: (event.target as HTMLSelectElement).value }); draw(); }));
   document.getElementById('chat-settings')?.addEventListener('click', chatSettings);
   document.getElementById('delete')?.addEventListener('click', () => void run(async () => {
@@ -443,26 +532,50 @@ function drawChat(current: VaultStatus) {
     // Enter sends and Shift+Enter starts a new line; Enter that confirms an input method's composition does neither.
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); (textarea.form as HTMLFormElement).requestSubmit(); }
   });
-  document.getElementById('ask')!.addEventListener('submit', event => {
+  const form = document.getElementById('ask') as HTMLFormElement;
+  const input = document.getElementById('attach-input') as HTMLInputElement;
+  document.getElementById('attach')!.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => { addFiles([...input.files ?? []]); input.value = ''; });
+  // Files dropped on the box or pasted into it are added like chosen ones.
+  form.addEventListener('dragover', event => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); form.classList.add('dropping'); } });
+  form.addEventListener('dragleave', () => form.classList.remove('dropping'));
+  form.addEventListener('drop', event => { event.preventDefault(); form.classList.remove('dropping'); addFiles([...event.dataTransfer?.files ?? []]); });
+  textarea.addEventListener('paste', event => {
+    const files = [...event.clipboardData?.files ?? []];
+    if (files.length) { event.preventDefault(); addFiles(files); }
+  });
+  document.getElementById('attachments')!.addEventListener('click', event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]');
+    if (button) dropPending(Number(button.dataset.remove));
+  });
+  form.addEventListener('submit', event => {
     event.preventDefault();
     const text = textarea.value.trim();
-    if (text && !busy) void run(() => ask(text));
+    if (busy || (!text && !pending.length)) return;
+    if (pending.some(item => !item.id && !item.error)) { message(t('tabularius.waitUploads'), true); return; }
+    if (pending.some(item => item.error)) { message(t('tabularius.removeFailed'), true); return; }
+    if (pending.some(item => item.kind === 'image') && !recipeOf(chat.recipe)?.vision) { message(t('tabularius.noVision'), true); return; }
+    const sent = pending.map(item => ({ id: item.id!, name: item.name, kind: item.kind! }));
+    for (const item of pending) if (item.preview) URL.revokeObjectURL(item.preview);
+    pending = [];
+    void run(() => ask(text, sent));
   });
   if (!busy) textarea.focus();
 }
 
 /** Sends a message and renders the streamed reply as it arrives. */
-async function ask(text: string) {
+async function ask(text: string, attachments: AttachmentRef[]) {
   busy = true;
   const answer: Entry = { role: 'assistant', text: '', tools: [] };
-  entries.push({ role: 'user', text }, answer);
+  entries.push({ role: 'user', text, ...(attachments.length ? { attachments } : {}) }, answer);
   draw();
   const target = () => document.querySelector('#log .turn.assistant:last-child');
   const update = () => { const node = target(); if (node) node.outerHTML = entryHtml({ ...answer, text: answer.text || t('tabularius.working') }); const log = document.getElementById('log'); if (log) log.scrollTop = log.scrollHeight; };
   update();
   try {
     const response = await fetch(conversationId ? `/api/v1/tabularius/conversations/${encodeURIComponent(conversationId)}/messages` : `/api/v1/tabularius/vaults/${encodeURIComponent(vaultId)}/conversations`, {
-      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': state.session!.csrf }, body: JSON.stringify(conversationId ? { message: text } : { message: text, recipe: chat.recipe || undefined, prompt: chat.prompt, params: chat.params }),
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': state.session!.csrf }, body: JSON.stringify({ message: text, attachments: attachments.map(item => item.id),
+        ...(conversationId ? {} : { recipe: chat.recipe || undefined, prompt: chat.prompt, params: chat.params, web: webAllowed() && chat.web }) }),
     });
     if (!response.ok) throw new ApiError(response.status, serverError((await response.json()).error));
     const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
@@ -501,6 +614,7 @@ async function ask(text: string) {
 
 // Approval buttons appear inside a streaming answer, which is re-rendered as it grows, so clicks are handled here.
 document.addEventListener('click', event => {
+  if ((event.target as HTMLElement).closest('#log') && answers.copyCode(event, t('notes.codeCopied'))) return;
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-approve],[data-deny]');
   if (!button) return;
   const id = button.dataset.approve ?? button.dataset.deny!;
@@ -513,6 +627,8 @@ document.addEventListener('click', event => {
 /** Draws Tabularius into the shell's content area; `?vault=` and `?conversation=` select what opens. */
 export async function renderTabularius(content: HTMLElement) {
   app = content;
+  notesStyles();
+  answers ??= await import('/notes/assets/answer-markdown.js' as string) as AnswerModule;
   const query = new URLSearchParams(location.search);
   if (query.get('vault')) vaultId = query.get('vault')!;
   view = 'chat';

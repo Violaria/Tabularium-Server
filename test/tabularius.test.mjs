@@ -241,3 +241,87 @@ test('commands are checked by permission mode', async () => {
   assert.equal(refuse('full', 'apt-get upgrade -y && reboot', ''), undefined);
   assert.match(refuse('full', '  ', ''), /empty/);
 });
+
+test('attachments: images by their first bytes, text files, PDFs with and without text', async () => {
+  const { examine, imageType, TEXT_LIMIT } = await import('../dist/tabularius/attachments.js');
+  assert.equal(imageType(Buffer.from('89504e470d0a1a0a0000', 'hex')), 'image/png');
+  assert.equal(imageType(Buffer.from('ffd8ffe000', 'hex')), 'image/jpeg');
+  assert.equal(imageType(Buffer.from('GIF89a....')), 'image/gif');
+  assert.equal(imageType(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBPVP8 ')])), 'image/webp');
+  // An image is what its bytes say, whatever it is called.
+  assert.deepEqual(await examine(Buffer.from('89504e470d0a1a0a0000', 'hex')), { kind: 'image', mime: 'image/png' });
+  assert.deepEqual(await examine(Buffer.from('﻿host: a\npassword: hunter2\n')), { kind: 'text', mime: 'text/plain', text: 'host: a\npassword: hunter2\n' });
+  await assert.rejects(examine(Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0xff])), /Not a text file/);
+  await assert.rejects(examine(Buffer.alloc(0)), /empty/);
+  const long = await examine(Buffer.from('字'.repeat(TEXT_LIMIT + 10)));
+  assert.match(long.text, /\[Truncated: the file has 200010 characters\.\]$/);
+  // Minimal PDFs: one with a line of text, one with only a drawing, and a broken one.
+  const pdf = stream => {
+    const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+      `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'];
+    let out = '%PDF-1.4\n'; const offsets = [];
+    objects.forEach((object, i) => { offsets.push(out.length); out += `${i + 1} 0 obj\n${object}\nendobj\n`; });
+    const xref = out.length;
+    out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map(o => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+    return Buffer.from(`${out}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`, 'latin1');
+  };
+  assert.deepEqual(await examine(pdf('BT /F1 18 Tf 20 100 Td (Hello attachment) Tj ET')), { kind: 'text', mime: 'application/pdf', text: '[Page 1]\nHello attachment' });
+  await assert.rejects(examine(pdf('0 0 1 rg 10 10 50 50 re f')), /no text layer/);
+  await assert.rejects(examine(Buffer.from('%PDF-1.4 broken')), /cannot be read/);
+});
+
+test('sealed attachment bytes come back unchanged', async () => {
+  const { openBytes } = await import('../dist/tabularius/client.js');
+  const key = randomBytes(32);
+  const bytes = randomBytes(4096);
+  assert(openBytes(key, seal(key, bytes)).equals(bytes));
+  assert.equal(open(key, seal(key, '文字')), '文字');
+});
+
+test('images count as a fixed number of tokens when the vLLM history is fitted', async () => {
+  const { fit } = await import('../dist/tabularius/providers.js');
+  const image = { type: 'image', mime: 'image/png', data: 'A'.repeat(300_000) };
+  // A large encoded picture alone does not push the earlier exchange out of a 6,000-token window.
+  const messages = [
+    { role: 'user', parts: [{ type: 'text', text: 'first' }] }, { role: 'assistant', parts: [{ type: 'text', text: 'answer' }] },
+    { role: 'user', parts: [image, { type: 'text', text: 'second' }] },
+  ];
+  assert.equal(fit(messages, 6000).length, 3);
+});
+
+test('each provider gets pictures in its own format and files as text', async () => {
+  const { startMockProviders } = await import('../../../tests/tabularius/mock-providers.mjs');
+  const { anthropic, openai, vllm } = await import('../dist/tabularius/providers.js');
+  const mock = await startMockProviders();
+  process.env.ANTHROPIC_BASE_URL = mock.url; process.env.OPENAI_BASE_URL = `${mock.url}/v1`;
+  try {
+    const messages = [{ role: 'user', parts: [{ type: 'image', mime: 'image/png', data: 'iVBORw0K' }, { type: 'text', text: 'Attached file: a.log\n\nline' }, { type: 'text', text: '紫藤服务器' }] }];
+    await anthropic('claude-opus-5-5', 'k').turn('system', [], messages, () => {});
+    assert.deepEqual(mock.requests.anthropic.at(-1).body.messages[0].content.slice(0, 2), [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } }, { type: 'text', text: 'Attached file: a.log\n\nline' }]);
+    await openai('gpt-test', 'k').turn('system', [], messages, () => {});
+    assert.deepEqual(mock.requests.openai.at(-1).body.input.slice(0, 2), [
+      { role: 'user', content: [{ type: 'input_image', image_url: 'data:image/png;base64,iVBORw0K', detail: 'auto' }] }, { role: 'user', content: 'Attached file: a.log\n\nline' }]);
+    await vllm('esmeralda', `${mock.url}/vllm/v1`).turn('system', [], messages, () => {});
+    assert.deepEqual(mock.requests.vllm.at(-1).body.messages.slice(1, 3), [
+      { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0K' } }] }, { role: 'user', content: 'Attached file: a.log\n\nline' }]);
+  } finally {
+    delete process.env.ANTHROPIC_BASE_URL; delete process.env.OPENAI_BASE_URL;
+    await mock.close();
+  }
+});
+
+test('deleting a conversation deletes its attachments', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tabularium-attachments-'));
+  const db = openStore(join(dir, 'app.sqlite'));
+  try {
+    db.prepare("INSERT INTO users(id, username, password_hash, role) VALUES('u', 'alice', 'x', 'user')").run();
+    db.prepare("INSERT INTO vaults(id, owner_id, name, database_name, state) VALUES('v', 'u', 'notes', 'db', 'ready')").run();
+    db.prepare("INSERT INTO tabularius_conversations(id, user_id, vault_id, title, system, created_at, updated_at) VALUES('c', 'u', 'v', 't', '', 0, 0)").run();
+    const add = (id, conversation) => db.prepare("INSERT INTO tabularius_attachments(id, user_id, vault_id, conversation_id, name, mime, kind, size, data, created_at) VALUES(?, 'u', 'v', ?, 'a.txt', 'text/plain', 'text', 1, x'00', 0)").run(id, conversation);
+    add('sent', 'c'); add('unsent', null);
+    db.prepare("DELETE FROM tabularius_conversations WHERE id='c'").run();
+    assert.deepEqual(db.prepare('SELECT id FROM tabularius_attachments').all().map(row => row.id), ['unsent']);
+  } finally { db.close(); await rm(dir, { recursive: true }); }
+});

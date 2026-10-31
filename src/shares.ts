@@ -236,19 +236,34 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
     fail(404, 'Route not found');
   }
 
+  /**
+   * The viewer page in its owner's colour theme, as their own pages show it: the theme on the page element, and a custom
+   * theme's recipe as data the viewer applies (the page allows no inline styles).
+   */
+  function themed(page: Buffer, theme: string | null, recipe: string | null) {
+    const shown = theme === 'custom' && !recipe ? 'sakura' : theme || 'sakura';
+    const parsed = shown === 'custom' ? JSON.parse(recipe!) as { accent: string; tint: number; side: string } : undefined;
+    const attributes = (shown === 'forest' ? '' : ` data-theme="${shown}"`)
+      + (parsed ? ` data-recipe-accent="${parsed.accent}" data-recipe-tint="${parsed.tint}" data-side="${parsed.side}"` : '');
+    return page.toString('utf8').replace('<html lang="en" data-theme="sakura">', `<html lang="en"${attributes}>`);
+  }
+
   return {
     /** Handles a share route; returns false when the path is not one. */
     async handle(req: IncomingMessage, res: ServerResponse, path: string, route: string[], method: string) {
       if (path.startsWith('/s/') && ['GET', 'HEAD'].includes(method)) {
         // The viewer page: its own scripts only; the content is fetched and rendered by the script.
-        let share: Share | undefined;
-        try { share = db.prepare('SELECT * FROM shares WHERE slug=?').get(decodeURIComponent(path.slice(3)).normalize('NFC')) as unknown as Share | undefined; } catch { /* the page reports it */ }
+        let share: (Share & { theme: string | null; theme_recipe: string | null }) | undefined;
+        try {
+          share = db.prepare('SELECT s.*, u.theme, u.theme_recipe FROM shares s JOIN users u ON u.id=s.owner_id WHERE s.slug=?')
+            .get(decodeURIComponent(path.slice(3)).normalize('NFC')) as unknown as typeof share;
+        } catch { /* the page reports it */ }
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
           ...(share?.indexable && state(share) === 'active' ? {} : { 'x-robots-tag': 'noindex, nofollow' }),
           'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
         });
-        res.end(method === 'HEAD' ? undefined : viewer);
+        res.end(method === 'HEAD' ? undefined : themed(viewer, share?.theme ?? null, share?.theme_recipe ?? null));
         return true;
       }
       if (route[0] === 'shares' || (route[0] === 'public' && route[1] === 'shares')) {

@@ -12,12 +12,15 @@ function typeOf(file: string) {
 /** The page of the share viewer (/s/<address>); the share routes serve it with their own headers. */
 export const loadViewer = () => readFile(new URL('./public/share.html', import.meta.url));
 
+/** Web notes files with fixed names (entries other pages import); the rest carry content hashes. */
+const FIXED = /\/(notes-module|share-viewer|answer-markdown)\./;
+
 export async function loadConsole() {
   const assets = new Map<string, { data: Buffer; type: string }>();
   for (const [path, file, type] of [
     // One application page for home, administration and account settings; its scripts and styles live under /app/.
     ['/app/app.html', 'app.html', 'text/html; charset=utf-8'],
-    ...['app', 'core', 'home', 'admin', 'account', 'shares', 'ai', 'params', 'server-settings', 'backups', 'tabularius', 'i18n', 'messages'].map(name => [`/app/${name}.js`, `${name}.js`, 'text/javascript; charset=utf-8']),
+    ...['app', 'core', 'mark', 'home', 'admin', 'account', 'shares', 'ai', 'params', 'server-settings', 'backups', 'tabularius', 'i18n', 'messages'].map(name => [`/app/${name}.js`, `${name}.js`, 'text/javascript; charset=utf-8']),
     ['/app/app.css', 'app.css', 'text/css; charset=utf-8'],
     ['/app/icon.svg', 'icon.svg', 'image/svg+xml'],
     ['/sw.js', 'sw.js', 'text/javascript; charset=utf-8'],
@@ -38,8 +41,8 @@ export async function loadConsole() {
     res.writeHead(200, {
       'content-type': asset.type, 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
       // Hashed web notes files are cached for long; the fixed-name notes entry and the service worker are revalidated.
-      'cache-control': path.startsWith('/notes/assets/') && !path.includes('/notes-module.') && !path.includes('/share-viewer.') ? 'public, max-age=31536000, immutable'
-        : path === '/sw.js' || path.includes('/notes-module.') || path.includes('/share-viewer.') ? 'no-cache' : 'no-store',
+      'cache-control': path.startsWith('/notes/assets/') && !FIXED.test(path) ? 'public, max-age=31536000, immutable'
+        : path === '/sw.js' || FIXED.test(path) ? 'no-cache' : 'no-store',
       // The application page runs the web notes sync core: it compiles WebAssembly, shows images from blob: URLs and uses inline styles.
       'content-security-policy': application
         ? "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"

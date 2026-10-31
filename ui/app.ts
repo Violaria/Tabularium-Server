@@ -1,7 +1,7 @@
 // The Tabularium web application: one sign-in, one shell, and the modules home, web notes, Tabularius, administration
 // and account settings. Every path of the application loads this page; the path selects the module.
 import { t, type Language } from './i18n.js';
-import { api, ApiError, applyTheme, markShapes, captureLinks, chooseAction, connect, escape, form, icon, input, message, navigate, run, state, storedTheme, clearMessage, tip, type Session } from './core.js';
+import { api, ApiError, applyTheme, markShapes, notesStyles, captureLinks, chooseAction, connect, escape, form, icon, input, message, navigate, run, state, storedTheme, clearMessage, tip, type Session } from './core.js';
 import { renderHome } from './home.js';
 import { renderAdmin } from './admin.js';
 import { renderAccount } from './account.js';
@@ -14,7 +14,7 @@ const brand = () => `<div class="brand">${mark()}</div>`;
 type Module = 'home' | 'notes' | 'tabularius' | 'admin' | 'account';
 
 /** Web notes: a separate bundle with the sync core, loaded when the module first opens. */
-interface NotesModule { mount(target: HTMLElement): void; changeLanguage(next: Language): void; unmount(): Promise<void>; clearAccount(userId: string): Promise<void> }
+interface NotesModule { mount(target: HTMLElement): void; changeLanguage(next: Language): void; unmount(): Promise<void>; clearAccount(userId: string): Promise<void>; forgetUnlocked(): void }
 /** How many vaults web notes keeps in this browser for an account (records in its IndexedDB), without loading the module. */
 async function localVaults(userId: string) {
   if (!(await indexedDB.databases()).some(db => db.name === 'tabularium-notes')) return 0;
@@ -33,11 +33,7 @@ async function localVaults(userId: string) {
 let notes: NotesModule | undefined;
 let notesMounted = false;
 async function openNotes(content: HTMLElement) {
-  if (!document.querySelector('link[data-notes]')) {
-    const style = document.createElement('link');
-    style.rel = 'stylesheet'; style.href = '/notes/assets/notes-module.css'; style.dataset.notes = '';
-    document.head.append(style);
-  }
+  notesStyles();
   notes ??= await import('/notes/assets/notes-module.js' as string) as NotesModule;
   content.replaceChildren();
   notes.mount(content);
@@ -108,6 +104,9 @@ function frame(current: Module) {
           await notes.clearAccount(user.id);
         }
       }
+      // Web notes stops before the session ends, and the passphrase kept in this page goes with it.
+      await leaveNotes();
+      notes?.forgetUnlocked();
       await api('/web-session', 'DELETE'); state.session = undefined; history.pushState(null, '', '/'); signIn();
     }));
   }

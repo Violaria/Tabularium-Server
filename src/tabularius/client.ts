@@ -11,17 +11,21 @@ const exec = promisify(execFile);
 const ENCRYPTED_META_PREFIX = '/\\:';
 
 /** AES-256-GCM with the server's Tabularius key: iv, tag and ciphertext in one blob. */
-export function seal(key: Buffer, value: string) {
+export function seal(key: Buffer, value: string | Uint8Array) {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const data = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  const data = Buffer.concat([cipher.update(typeof value === 'string' ? Buffer.from(value, 'utf8') : value), cipher.final()]);
   return Buffer.concat([iv, cipher.getAuthTag(), data]);
 }
-export function open(key: Buffer, blob: Uint8Array) {
+/** The sealed bytes as they were (attachments); `open` reads them as UTF-8 text. */
+export function openBytes(key: Buffer, blob: Uint8Array) {
   const buffer = Buffer.from(blob);
   const decipher = createDecipheriv('aes-256-gcm', key, buffer.subarray(0, 12));
   decipher.setAuthTag(buffer.subarray(12, 28));
-  return Buffer.concat([decipher.update(buffer.subarray(28)), decipher.final()]).toString('utf8');
+  return Buffer.concat([decipher.update(buffer.subarray(28)), decipher.final()]);
+}
+export function open(key: Buffer, blob: Uint8Array) {
+  return openBytes(key, blob).toString('utf8');
 }
 
 export class WrongPassphrase extends Error {}

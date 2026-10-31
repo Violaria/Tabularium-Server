@@ -181,7 +181,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     report.scenarios.push('owner-opens-and-ends-rebuild-window');
 
     await alice.goto(url + '/account/kindle');
-    await expect(alice.getByText('服务器尚未配置发信，请联系管理员。')).toBeVisible();
+    await expect(alice.getByText('服务器尚未配置推送，请联系管理员。')).toBeVisible();
     await alice.getByLabel('Kindle 地址', { exact: true }).fill('alice@gmail.com');
     await alice.getByRole('button', { name: '保存' }).click();
     await expect(alice.getByText('请填写 Kindle 的推送邮箱地址。')).toBeVisible();

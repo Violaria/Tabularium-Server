@@ -309,6 +309,24 @@ export function openStore(path: string) {
   `);
     version = 16;
   }
-  if (version !== 16) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 16) {
+    // Conversation attachments, sealed with the Tabularius key (the file and the text taken from it), and web search
+    // chosen per conversation. An attachment belongs to a conversation once its message is sent.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE tabularius_attachments (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL REFERENCES vaults(id),
+      conversation_id TEXT REFERENCES tabularius_conversations(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, mime TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('image','text')), size INTEGER NOT NULL,
+      data BLOB NOT NULL, text BLOB, created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX tabularius_attachments_conversation ON tabularius_attachments(conversation_id);
+    ALTER TABLE tabularius_conversations ADD COLUMN web INTEGER NOT NULL DEFAULT 0;
+    PRAGMA user_version=17;
+    COMMIT;
+  `);
+    version = 17;
+  }
+  if (version !== 17) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

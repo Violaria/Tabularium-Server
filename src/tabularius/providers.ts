@@ -6,9 +6,13 @@ import type { WebOptions } from './web.js';
 
 // Conversations are stored in a small neutral form so they survive a change of provider. An assistant turn also keeps the
 // provider's own content (Anthropic thinking, fallback and web blocks; OpenAI response items), replayed verbatim to the same
-// provider. `web` (a search or fetch the provider ran) and `source` (a cited page) are for display only.
+// provider. `web` (a search or fetch the provider ran) and `source` (a cited page) are for display only. A user message
+// stores its attachments as `attachment` references; before a request they are expanded into `image` parts (base64) and
+// text, which are never stored.
 export type Part =
   | { type: 'text'; text: string }
+  | { type: 'attachment'; id: string; name: string; kind: 'image' | 'text' }
+  | { type: 'image'; mime: string; data: string }
   | { type: 'tool_call'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; id: string; content: string }
   | { type: 'web'; name: string; input: Record<string, unknown> }
@@ -50,6 +54,7 @@ export function anthropic(model: string, apiKey?: string): Provider {
   const client = new Anthropic({ ...(apiKey ? { apiKey } : {}) });
   const toBlocks = (message: Message): Anthropic.Beta.BetaContentBlockParam[] => message.parts.flatMap((part): Anthropic.Beta.BetaContentBlockParam[] =>
     part.type === 'text' ? [{ type: 'text', text: part.text }]
+      : part.type === 'image' ? [{ type: 'image', source: { type: 'base64', media_type: part.mime as 'image/png', data: part.data } }]
       : part.type === 'tool_call' ? [{ type: 'tool_use', id: part.id, name: part.name, input: part.input }]
         : part.type === 'tool_result' ? [{ type: 'tool_result', tool_use_id: part.id, content: part.content }] : []);
   // Server-side web tools: the API searches and fetches; domain rules and use limits travel with the tool definitions.
@@ -127,7 +132,8 @@ export function openai(model: string, apiKey?: string): Provider {
     }
     return message.parts.flatMap((part): OpenAI.Responses.ResponseInputItem[] => part.type === 'tool_result'
       ? [{ type: 'function_call_output', call_id: part.id, output: part.content }]
-      : part.type === 'text' ? [{ role: 'user', content: part.text }] : []);
+      : part.type === 'text' ? [{ role: 'user', content: part.text }]
+        : part.type === 'image' ? [{ role: 'user', content: [{ type: 'input_image', image_url: `data:${part.mime};base64,${part.data}`, detail: 'auto' }] }] : []);
   };
   return {
     name: 'openai', model, nativeWeb: true,
@@ -206,7 +212,8 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
     }
     return message.parts.flatMap((part): OpenAI.Chat.ChatCompletionMessageParam[] => part.type === 'tool_result'
       ? [{ role: 'tool', tool_call_id: part.id, content: part.content }]
-      : part.type === 'text' ? [{ role: 'user', content: part.text }] : []);
+      : part.type === 'text' ? [{ role: 'user', content: part.text }]
+        : part.type === 'image' ? [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:${part.mime};base64,${part.data}` } }] }] : []);
   };
   return {
     name: 'vllm', model, nativeWeb: false,
@@ -257,6 +264,8 @@ const ANSWER_NOW = 'The tool limit for this answer is reached. Answer now with w
 
 // About three characters per token, a cautious average for mixed Chinese and English.
 const estimate = (text: string) => Math.ceil(text.length / 3);
+// A picture of up to 1568 pixels on its long side, generously.
+const IMAGE_TOKENS = 1600;
 
 /**
  * Keeps the history within three quarters of `budget` tokens by dropping whole exchanges from the start. An exchange runs
@@ -264,8 +273,10 @@ const estimate = (text: string) => Math.ceil(text.length / 3);
  * is always kept.
  */
 export function fit(messages: Message[], budget: number): Message[] {
-  const size = (message: Message) => estimate(JSON.stringify(message.parts)) + estimate(JSON.stringify(message.native?.content ?? ''));
-  const starts = messages.flatMap((message, i) => message.role === 'user' && message.parts.some(part => part.type === 'text') ? [i] : []);
+  // An image costs about the same whatever its encoded length: a fixed estimate instead of its base64 size.
+  const size = (message: Message) => message.parts.reduce((sum, part) => sum + (part.type === 'image' ? IMAGE_TOKENS : estimate(JSON.stringify(part))), 0)
+    + estimate(JSON.stringify(message.native?.content ?? ''));
+  const starts = messages.flatMap((message, i) => message.role === 'user' && message.parts.some(part => part.type === 'text' || part.type === 'image') ? [i] : []);
   let total = messages.reduce((sum, message) => sum + size(message), 0);
   let from = 0;
   for (const start of starts.slice(1)) {

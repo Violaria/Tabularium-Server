@@ -1,5 +1,7 @@
 // Shared pieces of the web application: session, API calls, notices, forms, the confirmation dialog and navigation.
 import { serverError, t } from './i18n.js';
+import { paintIcon } from './mark.js';
+export { markShapes } from './mark.js';
 
 /** A colour scheme built from a few choices: the main colour, how strongly it tints the pages, and the sidebar. */
 export interface Recipe { accent: string; tint: number; side: 'light' | 'dark' }
@@ -17,22 +19,12 @@ export const RECIPES: Record<'sakura' | 'lavender', Recipe> = {
   sakura: { accent: '#d63c78', tint: 22, side: 'light' },
   lavender: { accent: '#7653d9', tint: 20, side: 'light' },
 };
-/** The Tabularium mark: the arcade of the Roman record office, drawn in `fill` (the current colour when not given). */
-export const markShapes = (fill = 'currentColor') => `<g fill="${fill}"><rect x="10" y="12" width="44" height="7" rx="1.5"/>`
-  + '<path fill-rule="evenodd" d="M12 22h40v24H12zM16 46V31a4 4 0 0 1 8 0v15zM28 46V31a4 4 0 0 1 8 0v15zM40 46V31a4 4 0 0 1 8 0v15z"/>'
-  + '<rect x="8" y="48" width="48" height="5" rx="1.5"/></g>';
-/** The browser tab's icon in the colours of the theme in use, as the mark in the sidebar shows them. */
-function paintIcon() {
-  const probe = document.createElement('span');
-  probe.style.cssText = 'position:absolute;visibility:hidden;color:var(--mark-bg);background-color:var(--mark-text)';
-  document.documentElement.append(probe);
-  const { color: background, backgroundColor: foreground } = getComputedStyle(probe);
-  probe.remove();
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="${background}"/>${markShapes(foreground)}</svg>`;
-  let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-  if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.append(link); }
-  link.type = 'image/svg+xml';
-  link.href = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+/** The web notes style sheet: notes, and the note-like Tabularius answers, use it. */
+export function notesStyles() {
+  if (document.querySelector('link[data-notes]')) return;
+  const style = document.createElement('link');
+  style.rel = 'stylesheet'; style.href = '/notes/assets/notes-module.css'; style.dataset.notes = '';
+  document.head.append(style);
 }
 const THEME_KEY = 'tabularium-theme';
 /**

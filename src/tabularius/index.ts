@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Couch } from '../couch.js';
 import { digest, token, type User, type Vault } from '../store.js';
-import { createClients, inspect, open, seal, WrongPassphrase } from './client.js';
+import { createClients, inspect, open, openBytes, seal, WrongPassphrase } from './client.js';
 import { checkMasks, createFilter, type Filter } from './filter.js';
 import { checkParams, PARAMS, ParamsError, type Params, type ProviderName } from './params.js';
 import { createSettings, parseModel, PROVIDERS, SettingsError, type InitialSettings } from './settings.js';
@@ -17,6 +17,7 @@ import { CONVERSATION_PROMPT, FIXED, FIXED_PART, MEMORIES, MODEL_PROMPT, RECIPE_
 import { ProviderError, type Message, type Part, type Provider, type Tool } from './providers.js';
 import { apply, build, ProposalError, type Change } from './proposals.js';
 import { forget, notes, search, update, type Embedder } from './search.js';
+import { AttachmentError, examine, PER_MESSAGE } from './attachments.js';
 
 export type Mode = 'read-only' | 'restricted' | 'full';
 export const MODES: Mode[] = ['read-only', 'restricted', 'full'];
@@ -38,7 +39,8 @@ interface Answer { read: Set<string>; sources: Map<string, string>; found: Map<s
 interface Row { vault_id: string; device_id: string; device_secret: Uint8Array; passphrase: Uint8Array; tweaks: string; enabled_at: number; excluded: string; masks: string; knowledge: number; embedding_model: string | null; web: number; mode: Mode; params: string; prompt: string; model: string | null; recipe: string | null }
 interface Host { id: string; name: string; address: string; port: number; username: string; policy: 'allowed' | 'authorize' | 'forbidden'; commands: string; fingerprint: string | null; private_key: Uint8Array; public_key: string; created_at: number }
 interface Proposal { id: string; conversation_id: string; call_id: string; vault_id: string; user_id: string; title: string; summary: string; status: 'pending' | 'applied' | 'discarded'; error: string | null; created_at: number; decided_at: number | null }
-interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number; model: string | null; prompt: string; params: string; recipe: string | null }
+interface Conversation { id: string; user_id: string; vault_id: string; title: string; system: string; created_at: number; updated_at: number; model: string | null; prompt: string; params: string; recipe: string | null; web: number }
+interface Attachment { id: string; user_id: string; vault_id: string; conversation_id: string | null; name: string; mime: string; kind: 'image' | 'text'; size: number; data: Uint8Array; text: Uint8Array | null; created_at: number }
 
 const RENEW_BEFORE_MS = 15 * 86_400_000;
 const MAX_TOOL_ROUNDS = 8;
@@ -231,6 +233,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     await clients.stop(vaultId);
     db.exec('BEGIN');
     db.prepare('UPDATE devices SET revoked=1 WHERE id=?').run(current!.device_id);
+    db.prepare('DELETE FROM tabularius_attachments WHERE vault_id=?').run(vaultId);
     db.prepare('DELETE FROM tabularius_messages WHERE conversation_id IN (SELECT id FROM tabularius_conversations WHERE vault_id=?)').run(vaultId);
     db.prepare('DELETE FROM tabularius_conversations WHERE vault_id=?').run(vaultId);
     forget(db, vaultId);
@@ -263,7 +266,11 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     db.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now(), actorId, action, targetId);
   }
   const hasHosts = () => Boolean(db.prepare('SELECT 1 FROM tabularius_hosts LIMIT 1').get());
-  const webOn = (vaultId: string, provider: Provider) => { const web = webConfig(); return Boolean(web && row(vaultId)?.web && (provider.nativeWeb || web.searxng)); };
+  // The server has web access, the vault allows it, and this conversation has it switched on.
+  const webOn = (conversation: Conversation, provider: Provider) => {
+    const web = webConfig();
+    return Boolean(web && row(conversation.vault_id)?.web && conversation.web && (provider.nativeWeb || web.searxng));
+  };
   /** URLs the user or a tool result has shown in this conversation; outside the full mode only these can be fetched. */
   function seenUrls(conversationId: string) {
     const seen = new Set<string>();
@@ -278,7 +285,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     const vaultId = conversation.vault_id;
     const root = clients.working(vaultId);
     const web = webConfig();
-    if ((call.name === 'web_search' || call.name === 'fetch_url') && web?.searxng && !provider.nativeWeb && webOn(vaultId, provider)) {
+    if ((call.name === 'web_search' || call.name === 'fetch_url') && web?.searxng && !provider.nativeWeb && webOn(conversation, provider)) {
       audit(conversation.user_id, 'tabularius.web', conversation.id);
       if (call.name === 'web_search') {
         if (typeof call.input.query !== 'string' || !call.input.query.trim()) return 'Error: query must be a non-empty string.';
@@ -477,14 +484,53 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     }).join('\n\n');
   }
 
-  /** Runs one user message through the model and its tool calls, streaming server-sent events. */
-  async function converse(res: ServerResponse, conversation: Conversation, text: string) {
+  /**
+   * The attachments a message may carry: the user's own, uploaded in this vault and not sent yet, at most PER_MESSAGE, and
+   * images only when the conversation's model reads them. Checked before anything is stored or streamed.
+   */
+  function attachmentsFor(ids: unknown, user: User, conversation: Pick<Conversation, 'recipe' | 'vault_id'>, text: string) {
+    if (ids !== undefined && (!Array.isArray(ids) || !ids.every(id => typeof id === 'string'))) fail(400, 'Invalid attachments');
+    const list = (ids as string[] | undefined) ?? [];
+    if (list.length > PER_MESSAGE) fail(400, `At most ${PER_MESSAGE} attachments per message`);
+    if (!text.trim() && !list.length) fail(400, 'Invalid message');
+    const found = list.map(id => db.prepare('SELECT id, name, kind FROM tabularius_attachments WHERE id=? AND user_id=? AND vault_id=? AND conversation_id IS NULL')
+      .get(id, user.id, conversation.vault_id) as { id: string; name: string; kind: 'image' | 'text' } | undefined);
+    if (found.some(item => !item)) fail(404, 'Attachment not found');
+    const recipe = recipeFor(conversation);
+    if (found.some(item => item!.kind === 'image') && recipe && !settings.models().find(model => model.id === recipe.model)?.vision)
+      fail(400, 'The model of this recipe does not read images; choose a recipe whose model does');
+    return found as { id: string; name: string; kind: 'image' | 'text' }[];
+  }
+  /**
+   * The conversation as the model gets it: attachment references become images (when the model reads them) or the file's
+   * text, masked like notes, under its name.
+   */
+  function expand(messages: Message[], conversationId: string, filter: Filter, vision: boolean): Message[] {
+    const stored = new Map((db.prepare('SELECT * FROM tabularius_attachments WHERE conversation_id=?').all(conversationId) as unknown as Attachment[]).map(a => [a.id, a]));
+    return messages.map(message => message.role !== 'user' || !message.parts.some(part => part.type === 'attachment') ? message : {
+      ...message,
+      parts: message.parts.flatMap((part): Part[] => {
+        if (part.type !== 'attachment') return [part];
+        const item = stored.get(part.id);
+        if (!item) return [{ type: 'text', text: `[Attachment ${part.name}: no longer available]` }];
+        if (item.kind === 'image') return vision ? [{ type: 'image', mime: item.mime, data: openBytes(config.key, item.data).toString('base64') }]
+          : [{ type: 'text', text: `[Image ${item.name}: the current model does not read images]` }];
+        return [{ type: 'text', text: `Attached file: ${item.name}\n\n${filter.mask(open(config.key, item.text!))}` }];
+      }),
+    });
+  }
+
+  /** Runs one user message (with its checked attachments) through the model and its tool calls, streaming server-sent events. */
+  async function converse(res: ServerResponse, conversation: Conversation, text: string, attachments: { id: string; name: string; kind: 'image' | 'text' }[]) {
     const current = row(conversation.vault_id)!;
     const filter = filterOf(current);
+    for (const item of attachments) db.prepare('UPDATE tabularius_attachments SET conversation_id=? WHERE id=?').run(conversation.id, item.id);
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
     const send = (event: string, data: unknown) => { if (!res.destroyed) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
     send('conversation', { id: conversation.id, title: conversation.title });
-    append(conversation.id, { role: 'user', parts: [{ type: 'text', text }] });
+    // Files before the question, as the providers recommend for images.
+    append(conversation.id, { role: 'user', parts: [...attachments.map(item => ({ type: 'attachment' as const, id: item.id, name: item.name, kind: item.kind })),
+      ...(text.trim() ? [{ type: 'text' as const, text }] : [])] });
     const answer: Answer = { read: new Set(), sources: new Map(), found: new Map(), searches: 0, fetches: 0 };
     try {
       const recipe = recipeFor(conversation);
@@ -499,10 +545,11 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       for (let round = 0; ; round++) {
         // The last round answers without tools, so a model that keeps searching still gives an answer.
         const final = round >= MAX_TOOL_ROUNDS;
-        const web = webOn(conversation.vault_id, provider);
+        const web = webOn(conversation, provider);
         const tools = [...TOOLS, ...MEMORY_TOOLS, ...(hasHosts() && adminVault(conversation.vault_id) ? SSH_TOOLS : []), ...(sandbox() ? [sandboxTool(sandbox()!.images)] : []), ...(settings.knowledgeConfigured() && row(conversation.vault_id)?.knowledge ? [KNOWLEDGE_TOOL] : []),
           ...(web && !provider.nativeWeb ? WEB_TOOLS : [])];
-        const turn = await provider.turn(system, tools, loadMessages(conversation.id), delta => send('text', { text: delta }), {
+        const vision = Boolean(settings.models().find(item => item.id === model)?.vision);
+        const turn = await provider.turn(system, tools, expand(loadMessages(conversation.id), conversation.id, filter, vision), delta => send('text', { text: delta }), {
           web: web && provider.nativeWeb ? webConfig()!.options : undefined, params, answerOnly: final,
         });
         append(conversation.id, { role: 'assistant', ...turn });
@@ -538,14 +585,17 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     if (!conversation) fail(404, 'Conversation not found');
     return conversation!;
   }
+  /** A message as the page shows it. */
+  interface Shown { role: 'user' | 'assistant'; text: string; attachments?: { id: string; name: string; kind: 'image' | 'text' }[]; tools?: unknown[]; sources?: { url: string; title: string }[] }
   /** The visible transcript: user questions, assistant text, and the tools used in between, with proposals by tool call. */
   function transcript(conversationId: string) {
     const proposals = new Map((db.prepare('SELECT call_id, id, title, status FROM tabularius_proposals WHERE conversation_id=?').all(conversationId) as { call_id: string; id: string; title: string; status: string }[])
       .map(p => [p.call_id, { id: p.id, title: p.title, status: p.status }]));
-    return loadMessages(conversationId).flatMap(message => {
+    const entries = loadMessages(conversationId).flatMap((message): Shown[] => {
       if (message.role === 'user') {
         const text = message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
-        return text ? [{ role: 'user', text }] : [];
+        const attachments = message.parts.flatMap(part => part.type === 'attachment' ? [{ id: part.id, name: part.name, kind: part.kind }] : []);
+        return text || attachments.length ? [{ role: 'user', text, ...(attachments.length ? { attachments } : {}) }] : [];
       }
       return [{ role: 'assistant', text: message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''),
         tools: message.parts.flatMap(part => part.type === 'tool_call'
@@ -553,6 +603,14 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
           : part.type === 'web' ? [{ name: part.name, input: part.input }] : []),
         sources: message.parts.flatMap(part => part.type === 'source' ? [{ url: part.url, title: part.title }] : []) }];
     });
+    // One answer is stored as one assistant message per tool round: shown as one, with its tools in order.
+    return entries.reduce<Shown[]>((merged, entry) => {
+      const last = merged.at(-1);
+      if (entry.role === 'assistant' && last?.role === 'assistant') {
+        merged[merged.length - 1] = { ...last, text: last.text + entry.text, tools: [...last.tools!, ...entry.tools!], sources: [...last.sources!, ...entry.sources!] };
+      } else merged.push(entry);
+      return merged;
+    }, []);
   }
 
   /** Parameters per provider, each checked against that provider's rules. */
@@ -568,10 +626,10 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     }
     return checked;
   }
-  const settingsOf = (conversation: Conversation) => ({ recipe: recipeFor(conversation)?.id ?? '', prompt: conversation.prompt, params: JSON.parse(conversation.params || '{}') as unknown });
+  const settingsOf = (conversation: Conversation) => ({ recipe: recipeFor(conversation)?.id ?? '', prompt: conversation.prompt, params: JSON.parse(conversation.params || '{}') as unknown, web: Boolean(conversation.web) });
   /** Recipes as every user sees them: without nothing secret, with the model's name. */
   const recipeList = () => settings.recipes().filter(recipe => settings.available(recipe.model))
-    .map(recipe => ({ ...recipe, modelName: settings.models().find(model => model.id === recipe.model)!.name, provider: parseModel(recipe.model)!.provider }));
+    .map(recipe => { const model = settings.models().find(item => item.id === recipe.model)!; return { ...recipe, modelName: model.name, vision: model.vision, provider: parseModel(recipe.model)!.provider }; });
   function proposalFor(id: string, user: User) {
     const proposal = db.prepare('SELECT * FROM tabularius_proposals WHERE id=? AND user_id=?').get(id, user.id) as unknown as Proposal | undefined;
     if (!proposal) fail(404, 'Proposal not found');
@@ -585,7 +643,8 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     /** What every user's Tabularius page needs: the recipes with the default one, and the parameter rules. */
     overview() {
       return { recipes: recipeList(), defaultRecipe: settings.defaultRecipe(), rules: PARAMS,
-        embeddings: Boolean(settings.embedder()), knowledge: settings.knowledgeConfigured(), web: Boolean(webConfig()), webSearch: Boolean(webConfig()?.searxng) };
+        embeddings: Boolean(settings.embedder()), knowledge: settings.knowledgeConfigured(), web: Boolean(webConfig()), webSearch: Boolean(webConfig()?.searxng),
+        attachmentMegabytes: settings.limits().attachmentMegabytes };
     },
     modeLimit: () => settings.limits().modeLimit,
     async embeddingModels() {
@@ -750,9 +809,11 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       // null goes back to following the vault's recipe.
       if (data.recipe !== undefined && data.recipe !== null && (typeof data.recipe !== 'string' || !settings.usableRecipe(data.recipe))) fail(400, 'Recipe not available');
       if (data.prompt !== undefined && (typeof data.prompt !== 'string' || data.prompt.length > 8000)) fail(400, 'Invalid prompt');
+      if (data.web !== undefined && typeof data.web !== 'boolean') fail(400, 'Invalid web search');
       const params = data.params === undefined ? conversation.params : JSON.stringify(checkedParams(data.params));
-      db.prepare('UPDATE tabularius_conversations SET recipe=?, prompt=?, params=? WHERE id=?')
-        .run(data.recipe === undefined ? conversation.recipe : data.recipe as string | null, (data.prompt as string | undefined) ?? conversation.prompt, params, id);
+      db.prepare('UPDATE tabularius_conversations SET recipe=?, prompt=?, params=?, web=? WHERE id=?')
+        .run(data.recipe === undefined ? conversation.recipe : data.recipe as string | null, (data.prompt as string | undefined) ?? conversation.prompt, params,
+          data.web === undefined ? conversation.web : Number(data.web), id);
       return settingsOf(conversationFor(id, user));
     },
     setWeb(vaultId: string, enabled: boolean) {
@@ -781,19 +842,48 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       if (!current) fail(404, 'Tabularius is not enabled for this vault');
       if (options.recipe !== undefined && options.recipe !== null && (typeof options.recipe !== 'string' || !settings.usableRecipe(options.recipe))) fail(400, 'Recipe not available');
       if (options.prompt !== undefined && (typeof options.prompt !== 'string' || options.prompt.length > 8000)) fail(400, 'Invalid prompt');
+      if (options.web !== undefined && typeof options.web !== 'boolean') fail(400, 'Invalid web search');
       const params = JSON.stringify(options.params === undefined ? {} : checkedParams(options.params));
-      const conversation: Conversation = { id: randomUUID(), user_id: user.id, vault_id: vaultId, title: text.replace(/\s+/g, ' ').trim().slice(0, 60),
-        system: await systemFor(vaultId, filterOf(current!), user, text), created_at: Date.now(), updated_at: Date.now(),
-        model: null, recipe: (options.recipe as string | undefined) || null, prompt: (options.prompt as string | undefined) ?? '', params };
-      db.prepare('INSERT INTO tabularius_conversations(id,user_id,vault_id,title,system,created_at,updated_at,recipe,prompt,params) VALUES(?,?,?,?,?,?,?,?,?,?)')
-        .run(conversation.id, user.id, vaultId, conversation.title, conversation.system, conversation.created_at, conversation.updated_at, conversation.recipe, conversation.prompt, conversation.params);
-      await converse(res, conversation, text);
+      const recipe = (options.recipe as string | undefined) || null;
+      const attachments = attachmentsFor(options.attachments, user, { recipe, vault_id: vaultId }, text);
+      // A message of attachments alone is titled after its first file.
+      const title = (text.trim() || attachments[0].name).replace(/\s+/g, ' ').trim().slice(0, 60);
+      const conversation: Conversation = { id: randomUUID(), user_id: user.id, vault_id: vaultId, title,
+        system: await systemFor(vaultId, filterOf(current!), user, text || title), created_at: Date.now(), updated_at: Date.now(),
+        model: null, recipe, prompt: (options.prompt as string | undefined) ?? '', params, web: Number(options.web ?? false) };
+      db.prepare('INSERT INTO tabularius_conversations(id,user_id,vault_id,title,system,created_at,updated_at,recipe,prompt,params,web) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+        .run(conversation.id, user.id, vaultId, conversation.title, conversation.system, conversation.created_at, conversation.updated_at, conversation.recipe, conversation.prompt, conversation.params, conversation.web);
+      await converse(res, conversation, text, attachments);
     },
-    async continue_conversation(res: ServerResponse, id: string, user: User, text: string) {
+    async continue_conversation(res: ServerResponse, id: string, user: User, text: string, ids?: unknown) {
       const conversation = conversationFor(id, user);
       if (!row(conversation.vault_id)) fail(404, 'Tabularius is not enabled for this vault');
-      await converse(res, conversation, text);
+      await converse(res, conversation, text, attachmentsFor(ids, user, conversation, text));
     },
+    /**
+     * Stores an uploaded file for the next message: images as they are, text files and PDFs with their text. Files uploaded
+     * more than a day ago and never sent go at the same time.
+     */
+    async upload(vaultId: string, user: User, name: string, data: Buffer) {
+      if (!row(vaultId)) fail(404, 'Tabularius is not enabled for this vault');
+      let found;
+      try { found = await examine(data); } catch (error) {
+        if (error instanceof AttachmentError) fail(400, error.message);
+        throw error;
+      }
+      db.prepare('DELETE FROM tabularius_attachments WHERE conversation_id IS NULL AND created_at<?').run(Date.now() - 86_400_000);
+      const item = { id: randomUUID(), name, kind: found.kind, mime: found.mime, size: data.length };
+      db.prepare('INSERT INTO tabularius_attachments(id,user_id,vault_id,conversation_id,name,mime,kind,size,data,text,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+        .run(item.id, user.id, vaultId, null, name, found.mime, found.kind, data.length, seal(config.key, data), found.kind === 'text' ? seal(config.key, Buffer.from(found.text)) : null, Date.now());
+      return item;
+    },
+    /** An attachment's file, for its owner only. */
+    attachment(id: string, user: User) {
+      const item = db.prepare('SELECT * FROM tabularius_attachments WHERE id=? AND user_id=?').get(id, user.id) as unknown as Attachment | undefined;
+      if (!item) fail(404, 'Attachment not found');
+      return { name: item!.name, mime: item!.mime, data: openBytes(config.key, item!.data) };
+    },
+    attachmentLimit: () => settings.limits().attachmentMegabytes * 1024 * 1024,
     proposals(vaultId: string, user: User) {
       return (db.prepare('SELECT * FROM tabularius_proposals WHERE vault_id=? AND user_id=? ORDER BY created_at DESC').all(vaultId, user.id) as unknown as Proposal[]).map(summaryOf);
     },

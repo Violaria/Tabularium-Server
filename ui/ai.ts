@@ -5,7 +5,7 @@ import { t } from './i18n.js';
 import { api, ApiError, confirmAction, escape, message, run, tip } from './core.js';
 import { FormError, modelName, modelOptions, paramForm, PROVIDER_NAMES as NAMES, type ModelOption, type Params, type ProviderName, type Rule } from './params.js';
 
-interface ModelEntry { id: string; name: string; context?: number }
+interface ModelEntry { id: string; name: string; context?: number; vision?: boolean }
 interface ProviderView { configured: boolean; keySet: boolean; keyHint: string; models: ModelEntry[]; url: string }
 interface Knowledge { url: string; datasets: string[]; limit: number; threshold: number; weight: number; keyword: boolean; topK: number; rerank: string }
 interface RecipeView { id?: string; name: string; model: string; params: Params; prompt: string }
@@ -14,7 +14,7 @@ interface SettingsView {
   providers: Record<ProviderName, ProviderView>; knowledge: Knowledge;
   embedding: { url: string; keySet: boolean; hint: string; model: string; batch: number };
   web: { enabled: boolean; searxng: string; allowed: string[]; blocked: string[]; maxUses: number; intranet: string[] };
-  limits: { modeLimit: 'read-only' | 'restricted' | 'full'; sshTimeout: number; sandboxImages: string[] };
+  limits: { modeLimit: 'read-only' | 'restricted' | 'full'; sshTimeout: number; sandboxImages: string[]; attachmentMegabytes: number };
 }
 interface Overview { rules: Record<ProviderName, Record<string, Rule>> }
 const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
@@ -41,26 +41,30 @@ export async function renderAiSettings(body: HTMLElement) {
     return `<details class="llm-recipe llm-provider" data-provider="${name}"${openProviders.has(name) ? ' open' : ''}><summary><strong>${NAMES[name]}</strong><span class="muted">${summary}</span></summary>
       <form class="stack" data-key>
         <div class="recipe-fields">${name === 'vllm' ? `<label><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" value="${escape(item.url)}" placeholder="http://vllm:8000/v1"></label>` : ''}
-          <label>${name === 'vllm' ? `<span>${t('ai.keyOptional')}${tip(t('ai.keyOptionalHint'))}</span>` : t('ai.key')}<input type="password" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label></div>
+          <label>${name === 'vllm' ? `<span>${t('ai.keyOptional')}${tip(t('ai.keyOptionalHint'))}</span>` : t('ai.key')}<input type="password" data-bwignore data-1p-ignore data-lpignore="true" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label></div>
         <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" data-test-provider>${t('ai.testConnection')}</button><span class="test-status" aria-live="polite"></span>
           <span class="actions-end">${item.keySet ? `<button type="button" data-clear-key>${t('ai.clearKey')}</button>` : ''}<button type="button" class="danger" data-remove-provider>${t('ai.removeProvider')}</button></span></div>
       </form>
       <fieldset class="model-list"><legend>${t('ai.models')}${tip(t('ai.modelsHint'))}</legend>
-        <div data-models>${item.models.length ? modelRows(item.models, item.models) : `<small>${t('ai.noModelsChosen')}</small>`}</div>
+        <div data-models>${item.models.length ? modelRows(name, item.models, item.models) : `<small>${t('ai.noModelsChosen')}</small>`}</div>
         <div class="actions"><button type="button" data-fetch>${t('ai.fetchModels')}</button><button type="button" data-test-models>${t('ai.testModels')}</button>
           <span class="actions-end"><button class="primary" type="button" data-save-models>${t('ai.saveModels')}</button></span></div></fieldset></details>`;
   };
-  /** Model ticks: `offered` as listed (or the chosen ones before the list is fetched), ticked when chosen; a test result shows at the row's end. */
-  const modelRows = (offered: ModelEntry[], chosen: ModelEntry[]) => offered.map(model => {
-    const on = chosen.some(item => item.id === model.id);
-    return `<div class="model-row" data-model="${escape(model.id)}"><label class="check"><input type="checkbox" name="model" value="${escape(model.id)}" data-name="${escape(model.name)}"${model.context ? ` data-context="${model.context}"` : ''} ${on ? 'checked' : ''}> <span>${escape(model.name)}${model.name !== model.id ? ` <small class="mono">${escape(model.id)}</small>` : ''}</span></label><span class="model-test" aria-live="polite"></span></div>`;
+  /**
+   * Model ticks: `offered` as listed (or the chosen ones before the list is fetched), ticked when chosen, each with whether it
+   * reads images (Anthropic and OpenAI models do by default, local ones are marked here); a test result shows at the row's end.
+   */
+  const modelRows = (name: ProviderName, offered: ModelEntry[], chosen: ModelEntry[]) => offered.map(model => {
+    const picked = chosen.find(item => item.id === model.id);
+    const vision = picked?.vision ?? name !== 'vllm';
+    return `<div class="model-row" data-model="${escape(model.id)}"><label class="check"><input type="checkbox" name="model" value="${escape(model.id)}" data-name="${escape(model.name)}"${model.context ? ` data-context="${model.context}"` : ''} ${picked ? 'checked' : ''}> <span>${escape(model.name)}${model.name !== model.id ? ` <small class="mono">${escape(model.id)}</small>` : ''}</span></label><label class="check model-vision"><input type="checkbox" name="vision" ${vision ? 'checked' : ''}> <small>${t('ai.vision')}</small></label><span class="model-test" aria-live="polite"></span></div>`;
   }).join('');
   /** The form for adding a provider: its type (the ones not added yet), then key and address. */
   const newProvider = (available: ProviderName[]) => `<details class="llm-recipe llm-provider" data-new open><summary><strong>${t('ai.newProvider')}</strong></summary>
     <form class="stack" data-add><div class="recipe-fields">
       <label>${t('ai.providerType')}<select name="type">${available.map(name => `<option value="${name}">${NAMES[name]}</option>`).join('')}</select></label>
       <label data-for="vllm" ${available[0] === 'vllm' ? '' : 'hidden'}><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" placeholder="http://vllm:8000/v1"></label>
-      <label><span>${t('ai.key')}</span><input type="password" name="key" autocomplete="off"></label></div>
+      <label><span>${t('ai.key')}</span><input type="password" data-bwignore data-1p-ignore data-lpignore="true" name="key" autocomplete="off"></label></div>
       <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" data-cancel>${t('ai.recipeCancel')}</button></div></form></details>`;
   const datasetList = (datasets: { id: string; name: string; description: string }[], chosen: string[]) => datasets.map(item =>
     `<label class="check dataset"><input type="checkbox" name="dataset" value="${escape(item.id)}" ${chosen.includes(item.id) ? 'checked' : ''}> <span><strong>${escape(item.name)}</strong><small>${escape(item.description)}</small></span></label>`).join('');
@@ -107,7 +111,7 @@ export async function renderAiSettings(body: HTMLElement) {
       <form id="knowledge-test" class="inline-form"><label>${t('ai.kTest')}<input name="question" required></label><button type="submit">${t('ai.kTestRun')}</button></form><div id="knowledge-results"></div></section>
     <section class="card"><h2>${t('ai.embeddingTitle')}${tip(t('ai.embeddingDesc'))}</h2><form id="embedding" class="stack"><div class="recipe-fields">
         <label><span>${t('ai.embeddingUrl')}${tip(t('ai.embeddingUrlHint'))}</span><input name="url" value="${escape(view.embedding.url)}" placeholder="http://infinity:7997/v1"></label>
-        <label>${t('ai.key')}<input type="password" name="key" autocomplete="off" placeholder="${view.embedding.keySet ? escape(t('ai.keySet', { hint: view.embedding.hint })) : ''}"></label>
+        <label>${t('ai.key')}<input type="password" data-bwignore data-1p-ignore data-lpignore="true" name="key" autocomplete="off" placeholder="${view.embedding.keySet ? escape(t('ai.keySet', { hint: view.embedding.hint })) : ''}"></label>
         <label><span>${t('ai.embeddingModel')}${tip(t('ai.embeddingModelHint'))}</span><select name="model" id="embedding-model"><option value="">${t('ai.embeddingNone')}</option>${view.embedding.model ? `<option value="${escape(view.embedding.model)}" selected>${escape(view.embedding.model)}</option>` : ''}</select></label>
         <label>${t('ai.embeddingBatch')}<input name="batch" type="number" min="1" max="2048" value="${view.embedding.batch}"></label>
       </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="embedding-refresh">${t('ai.refreshModels')}</button></div></form></section>
@@ -124,6 +128,7 @@ export async function renderAiSettings(body: HTMLElement) {
         <label><span>${t('ai.modeLimit')}${tip(t('ai.modeLimitHint'))}</span><select name="modeLimit">${(['read-only', 'restricted', 'full'] as const).map(mode => `<option value="${mode}" ${mode === view.limits.modeLimit ? 'selected' : ''}>${t(`tabularius.mode.${mode}`)}</option>`).join('')}</select></label>
         <label>${t('ai.sshTimeout')}<input name="sshTimeout" type="number" min="5" max="3600" value="${view.limits.sshTimeout}"></label>
         <label><span>${t('ai.sandboxImages')}${tip(t('ai.sandboxImagesHint'))}</span><textarea name="sandboxImages" rows="3" spellcheck="false">${escape(view.limits.sandboxImages.join('\n'))}</textarea></label>
+        <label><span>${t('ai.attachmentLimit')}${tip(t('ai.attachmentLimitHint'))}</span><input name="attachmentMegabytes" type="number" min="1" max="100" value="${view.limits.attachmentMegabytes}"></label>
       </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form></section>`;
 
   window.scrollTo(0, scrolled);
@@ -251,11 +256,12 @@ export async function renderAiSettings(body: HTMLElement) {
       try { offered = await api<ModelEntry[]>(`/tabularius/settings/models/${name}`); }
       catch (error) { list.innerHTML = `<small class="error-text">${escape(t('ai.modelsFailed', { error: error instanceof Error ? error.message : String(error) }))}</small>`; return; }
       const all = [...chosen.filter(model => !offered.some(item => item.id === model.id)), ...offered];
-      list.innerHTML = all.length ? modelRows(all, chosen) : `<small>${t('ai.noModelsListed')}</small>`;
+      list.innerHTML = all.length ? modelRows(name, all, chosen) : `<small>${t('ai.noModelsListed')}</small>`;
     }));
     details.querySelector('[data-save-models]')!.addEventListener('click', () => void run(() => providerSave(name, {
       models: [...list.querySelectorAll<HTMLInputElement>('input[name="model"]:checked')].map(box =>
-        ({ id: box.value, name: box.dataset.name ?? box.value, ...(box.dataset.context ? { context: Number(box.dataset.context) } : {}) })),
+        ({ id: box.value, name: box.dataset.name ?? box.value, ...(box.dataset.context ? { context: Number(box.dataset.context) } : {}),
+          vision: box.closest('.model-row')!.querySelector<HTMLInputElement>('input[name="vision"]')!.checked })),
     })));
   }
   document.getElementById('add-provider')?.addEventListener('click', () => {
@@ -323,7 +329,7 @@ export async function renderAiSettings(body: HTMLElement) {
   limitsForm.addEventListener('submit', event => {
     event.preventDefault();
     const data = new FormData(limitsForm);
-    void run(() => save({ limits: { modeLimit: data.get('modeLimit'), sshTimeout: Number(data.get('sshTimeout')), sandboxImages: lines(data.get('sandboxImages')) } }));
+    void run(() => save({ limits: { modeLimit: data.get('modeLimit'), sshTimeout: Number(data.get('sshTimeout')), sandboxImages: lines(data.get('sandboxImages')), attachmentMegabytes: Number(data.get('attachmentMegabytes')) } }));
   });
   const test = document.getElementById('knowledge-test') as HTMLFormElement;
   test.addEventListener('submit', event => {

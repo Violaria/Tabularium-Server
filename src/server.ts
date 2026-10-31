@@ -654,7 +654,15 @@ export async function createGateway(config: Config) {
         if (route.length === 4 && route[3] === 'conversations' && method === 'GET') { json(res, 200, t.conversations(vault.id, user)); return; }
         if (route.length === 4 && route[3] === 'conversations' && method === 'POST') {
           const data = await body(req, 131_072);
-          await t.start_conversation(res, vault.id, user, field(data, 'message', 8000), { recipe: data.recipe, prompt: data.prompt, params: data.params }); return;
+          // A message may be attachments alone; its text is then empty.
+          await t.start_conversation(res, vault.id, user, field(data, 'message', 8000, 0), { recipe: data.recipe, prompt: data.prompt, params: data.params, web: data.web, attachments: data.attachments }); return;
+        }
+        if (route.length === 4 && route[3] === 'attachments' && method === 'POST') {
+          // The file is the request body; its name comes URL-encoded in a header.
+          let name = '';
+          try { name = decodeURIComponent(String(req.headers['x-file-name'] ?? '')).normalize('NFC'); } catch { fail(400, 'Invalid file name'); }
+          if (!name || name.length > 200 || /[\u0000-\u001f/\\]/.test(name)) fail(400, 'Invalid file name');
+          json(res, 201, await t.upload(vault.id, user, name, await raw(req, t.attachmentLimit()))); return;
         }
       }
       if (route[1] === 'vaults' && route.length === 4 && route[3] === 'proposals' && method === 'GET') {
@@ -712,8 +720,17 @@ export async function createGateway(config: Config) {
         if (route.length === 3 && method === 'DELETE') { t.remove_conversation(route[2], user); json(res, 200, { ok: true }); return; }
         if (route.length === 3 && method === 'PATCH') { json(res, 200, t.configure(route[2], user, await body(req, 131_072))); return; }
         if (route.length === 4 && route[3] === 'messages' && method === 'POST') {
-          await t.continue_conversation(res, route[2], user, field(await body(req, 65_536), 'message', 8000)); return;
+          const data = await body(req, 65_536);
+          await t.continue_conversation(res, route[2], user, field(data, 'message', 8000, 0), data.attachments); return;
         }
+      }
+      if (route[1] === 'attachments' && route.length === 3 && method === 'GET') {
+        // Opened in the browser (images) or saved (text files, PDFs); served as inert bytes either way.
+        const file = t.attachment(route[2], user);
+        res.writeHead(200, { 'content-type': file.mime === 'text/plain' ? 'text/plain; charset=utf-8' : file.mime, 'x-content-type-options': 'nosniff',
+          'cache-control': 'private, no-store', 'content-security-policy': "default-src 'none'; sandbox",
+          'content-disposition': `${file.mime.startsWith('image/') ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}` });
+        res.end(file.data); return;
       }
       fail(404, 'Route not found');
     }

@@ -394,17 +394,48 @@ h3.spaced { margin-top: 22px; }
 .composer textarea { border: 0; padding: 4px 0; background: transparent; resize: none; min-height: 48px; max-height: 40vh; }
 .composer textarea:focus { outline: none; }
 .composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.composer-tools { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* Controls inside the box have no frame of their own: the box is the frame. */
+.icon-button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); }
+.icon-button:hover { background: var(--panel-soft); color: var(--text); }
+.icon-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+select.bare { width: auto; max-width: 260px; border: 0; background-color: transparent; padding: 6px 26px 6px 8px; border-radius: 8px; font-size: 13px; color: var(--muted); cursor: pointer; }
+select.bare:hover, select.bare:focus { background-color: var(--panel-soft); color: var(--text); outline: none; }
+.composer-pill { padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600; }
+/* A file dragged over the box: the box shows it will take it. */
+.composer.dropping { border-color: var(--accent); background: color-mix(in oklab, var(--accent-soft) 45%, var(--panel)); }
+/* Attachment cards: in the box before sending, and on sent messages. */
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; }
+.attachments:empty { display: none; }
+.attachment { position: relative; display: flex; align-items: center; gap: 8px; max-width: 260px; padding: 6px 30px 6px 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); text-decoration: none; }
+.attachment img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; flex: none; }
+.attachment-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 6px; background: var(--panel-soft); color: var(--muted); flex: none; }
+.attachment-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linejoin: round; }
+.attachment-text { display: grid; min-width: 0; }
+.attachment-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment.loading small { color: var(--accent); }
+.attachment.failed { border-color: var(--danger); }
+.attachment.failed small { color: var(--danger); }
+.attachment-remove { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 16px; line-height: 1; }
+.attachment-remove:hover { background: var(--panel-soft); color: var(--text); }
+.sent-attachments { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-bottom: 6px; }
+.turn.user .sent-attachments + p { margin-top: 2px; }
+.turn.user .attachment { padding-right: 10px; }
+.sent-image img { display: block; max-width: 220px; max-height: 160px; border-radius: 10px; border: 1px solid var(--line); object-fit: cover; }
+.model-row .model-vision { margin-left: auto; font-weight: 400; }
+.model-row .model-vision small { color: var(--muted); }
 .composer .send { width: 36px; height: 36px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
 .composer .send svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .log { flex: 1; min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 16px 0 20px; }
 .turn { min-width: 0; }
 .turn.user { justify-self: end; max-width: min(75%, 900px); background: var(--accent-soft); border-radius: 12px; padding: 10px 16px; }
 .turn.user p { color: inherit; margin: 0; }
-.turn.assistant .answer p { color: inherit; }
-.turn pre, .diff { background: var(--panel-soft); border: 1px solid var(--line); }
-.turn pre { padding: 12px; border-radius: 7px; overflow-x: auto; font-size: 13px; }
-.turn code { font-family: var(--mono); font-size: 13px; background: var(--panel-soft); padding: 1px 4px; border-radius: 4px; }
-.turn pre code { padding: 0; background: none; }
+/* Answers take the note styles (.md-body, from the web notes style sheet) at the chat's size. */
+.turn.assistant .answer.md-body { font-size: 15px; line-height: 1.7; }
+.turn.assistant .answer.md-body > :last-child { margin-bottom: 0; }
+.approval pre, .diff { background: var(--panel-soft); border: 1px solid var(--line); }
+.approval pre { padding: 12px; border-radius: 7px; overflow-x: auto; font-size: 13px; }
 .tools { margin: 0 0 10px; padding-left: 18px; color: var(--muted); font-size: 13px; }
 .read { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
 .read p { margin: 4px 0 0; }
@@ -498,7 +529,6 @@ a.cite { overflow-wrap: anywhere; }
 dialog.dialog.chat-settings { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; }
 dialog.dialog.chat-settings h3 { margin: 6px 0 0; }
 .chat-tools button { white-space: nowrap; padding: 6px 12px; font-size: 13px; }
-.chat-tools select.compact { max-width: 240px; }
 .chat-title { flex: 1 1 auto; }
 @media (max-width: 1100px) { .chat-tools .sync-pill > span:last-child, .chat-tools .sync-pill .sep { display: none; } }
 
