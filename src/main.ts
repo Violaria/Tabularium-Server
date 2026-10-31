@@ -33,10 +33,11 @@ let tabularius: TabulariusConfig | undefined;
 if (process.env.TABULARIUS_SECRET_KEY || provider) {
   const key = Buffer.from(required('TABULARIUS_SECRET_KEY'), 'base64');
   if (key.length !== 32) throw new Error('TABULARIUS_SECRET_KEY must be 32 bytes in base64 (openssl rand -base64 32)');
-  const model = provider === 'anthropic' ? process.env.TABULARIUS_MODEL || 'claude-opus-5-5' : provider ? required('TABULARIUS_MODEL') : '';
+  const model = provider ? required('TABULARIUS_MODEL') : '';
   const initial: InitialSettings = {
     providers: {
-      ...(process.env.ANTHROPIC_API_KEY || provider === 'anthropic' ? { anthropic: { key: process.env.ANTHROPIC_API_KEY, models: provider === 'anthropic' ? [model] : ['claude-opus-5-5'] } } : {}),
+      // Only the model chosen in TABULARIUS_MODEL is imported; other models are chosen from the provider's list on the web.
+      ...(process.env.ANTHROPIC_API_KEY || provider === 'anthropic' ? { anthropic: { key: process.env.ANTHROPIC_API_KEY, models: provider === 'anthropic' ? [model] : [] } } : {}),
       ...(process.env.OPENAI_API_KEY || provider === 'openai' ? { openai: { key: process.env.OPENAI_API_KEY, models: provider === 'openai' ? [model] : [] } } : {}),
       ...(provider === 'vllm' ? { vllm: { url: required('TABULARIUS_VLLM_URL'), key: process.env.TABULARIUS_VLLM_KEY || undefined, models: [model],
         context: Number(process.env.TABULARIUS_VLLM_CONTEXT || 32768) } } : {}),

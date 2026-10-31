@@ -50,7 +50,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     for (const path of ['/', '/admin/', '/account/', '/tabularius/']) {
       await page.goto(url + path);
       await expect(page.getByRole('heading', { name: '登录服务器' })).toBeVisible();
-      await expect(page.getByLabel('语言')).toHaveCount(0);
+      await expect(page.getByLabel('语言', { exact: true })).toHaveCount(0);
     }
     assert.equal((await fetch(`${url}/admin.js`)).status, 404);
     assert.equal((await fetch(`${url}/app/app.js`)).status, 200);
@@ -70,7 +70,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await changePassword(page, password, 'admin-browser-password');
     await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
     await page.reload(); await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
-    await expect(page.getByLabel('语言')).toHaveCount(0);
+    await expect(page.getByLabel('语言', { exact: true })).toHaveCount(0);
     const cookies = await context.cookies();
     assert.equal(cookies.find(c => c.name === 'tabularium_session').httpOnly, true);
     assert.equal(cookies.find(c => c.name === 'tabularium_session').sameSite, 'Strict');
@@ -82,8 +82,8 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
 
     await page.getByRole('link', { name: /admin/ }).click();
     await page.getByRole('link', { name: '界面', exact: true }).click();
-    await expect(page.getByLabel('语言')).toHaveCount(1);
-    await page.getByLabel('语言').selectOption('la');
+    await expect(page.getByLabel('语言', { exact: true })).toHaveCount(1);
+    await page.getByLabel('语言', { exact: true }).selectOption('la');
     await expect(page.getByRole('link', { name: la['nav.home'], exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: la['account.interface'], exact: true })).toHaveAttribute('aria-current', 'page');
     await page.getByRole('link', { name: la['nav.tabularius'] }).click();
@@ -91,7 +91,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     assert(!/\p{Extended_Pictographic}/u.test(await page.evaluate(() => document.body.innerText)), 'no emoji on the page');
     await page.getByRole('link', { name: /admin/ }).click();
     await page.getByRole('link', { name: la['account.interface'], exact: true }).click();
-    await page.getByLabel(la['language.label']).selectOption('zh');
+    await page.getByLabel(la['language.label'], { exact: true }).selectOption('zh');
     await expect(page.getByRole('link', { name: '首页', exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: '书记员', exact: true })).toBeVisible();
     report.scenarios.push('three-languages-one-selector-in-account-settings');

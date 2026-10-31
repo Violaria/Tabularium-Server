@@ -1,13 +1,12 @@
 // Tabularius: enable the AI curator for a vault, set what it may send, and talk to it about the notes.
 import { formatDate, serverError, t } from './i18n.js';
-import { api, ApiError, confirmAction, escape, message, run, state } from './core.js';
-import { FormError, paramForm, paramLabel, type Params, type ProviderName, type Rule } from './params.js';
+import { api, ApiError, confirmAction, escape, message, run, state, tip } from './core.js';
+import { FormError, modelName, modelOptions, paramForm, paramLabel, PROVIDER_NAMES, type ModelOption, type Params, type ProviderName, type Rule } from './params.js';
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
   deviceRevoked?: boolean; knowledge?: boolean; web?: boolean; mode?: Mode; params?: Partial<Record<ProviderName, Params>>; prompt?: string; model?: string | null; indexError?: string | null; notes?: number; chunks?: number; log?: string[];
 }
 type Mode = 'read-only' | 'restricted' | 'full';
-interface ModelOption { id: string; provider: ProviderName; model: string }
 interface Overview { models: ModelOption[]; defaultModel: string; rules: Record<ProviderName, Record<string, Rule>>; serverParams: Record<ProviderName, Params>;
   embeddings: boolean; knowledge: boolean; web: boolean; admin: boolean; modes: Mode[]; vaults: VaultStatus[] }
 /** The open conversation's model, extra prompt and parameters, or what a new conversation will start with. */
@@ -119,13 +118,24 @@ async function refresh() {
   draw();
 }
 
+let drawnView = '';
 function shell(content: string) {
+  // A redraw of the same view (after saving a setting) keeps where the page was scrolled to.
+  const key = `${view}|${vaultId}|${conversationId ?? ''}`;
+  const kept = key === drawnView ? { main: app.querySelector('.assist-main')?.scrollTop ?? 0, list: app.querySelector('.pane-list')?.scrollTop ?? 0, page: window.scrollY } : undefined;
+  drawnView = key;
   const current = vault();
   const options = overview!.vaults.map(v => `<option value="${escape(v.id)}" ${v.id === vaultId ? 'selected' : ''}>${escape(v.name)}${v.enabled ? '' : ` (${t('tabularius.off')})`}</option>`).join('');
   const list = conversations.map(c => `<button class="conversation" data-id="${escape(c.id)}" ${c.id === conversationId && view === 'chat' ? 'aria-current="page"' : ''}><span>${escape(c.title)}</span><small>${formatDate(c.updatedAt)}</small></button>`).join('');
   app.innerHTML = `<div class="pane assist"><aside><div class="pane-head">${overview!.vaults.length ? `<select id="vault" aria-label="${t('tabularius.vault')}">${options}</select>` : ''}${current?.enabled ? `<button id="new" class="primary">${t('tabularius.newChat')}</button>` : ''}</div>
     ${current?.enabled ? `<nav class="pane-list" aria-label="${t('tabularius.conversations')}">${list || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`}</nav><nav class="pane-foot"><button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="memories" ${view === 'memories' ? 'aria-current="page"' : ''}>${t('tabularius.memories')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button></nav>` : ''}</aside>
     <section class="assist-main">${content}</section></div>`;
+  if (kept) {
+    app.querySelector('.assist-main')!.scrollTop = kept.main;
+    const list = app.querySelector('.pane-list');
+    if (list) list.scrollTop = kept.list;
+    window.scrollTo(0, kept.page);
+  }
   document.getElementById('vault')?.addEventListener('change', event => { vaultId = (event.target as HTMLSelectElement).value; view = 'chat'; void run(openVault); });
   document.getElementById('new')?.addEventListener('click', () => { view = 'chat'; conversationId = undefined; entries = []; newChat(); draw(); });
   document.getElementById('settings')?.addEventListener('click', () => { view = 'settings'; void run(async () => { await loadHosts(); await refresh(); }); });
@@ -149,7 +159,7 @@ async function saveChat(next: Partial<ChatSettings>) {
   // Parameters chosen for another provider do not travel with a switch of model.
   if (next.model && before && providerOf(before) !== providerOf(next.model)) {
     const left = Object.keys({ ...(vault()?.params?.[providerOf(before)] ?? {}), ...(chat.params[providerOf(before)] ?? {}) });
-    if (left.length) message(t('tabularius.paramsNotApplied', { names: left.map(paramLabel).join(', '), model: next.model }));
+    if (left.length) message(t('tabularius.paramsNotApplied', { names: left.map(paramLabel).join(', '), model: modelName(overview!.models, next.model) }));
   }
 }
 /** The conversation settings dialog: an extra prompt and parameters for the conversation's model. */
@@ -157,8 +167,8 @@ function chatSettings() {
   const provider = providerOf(chat.model);
   const dialog = document.createElement('dialog');
   dialog.className = 'dialog chat-settings';
-  dialog.innerHTML = `<form method="dialog" class="stack"><h2>${t('tabularius.chatSettings')}</h2><label>${t('tabularius.chatPrompt')}<textarea name="prompt" rows="4">${escape(chat.prompt)}</textarea><small>${t('tabularius.chatPromptHint')}</small></label>
-    <h3>${t('tabularius.paramsFor', { model: escape(chat.model) })}</h3><div class="chat-params"></div>
+  dialog.innerHTML = `<form method="dialog" class="stack"><h2>${t('tabularius.chatSettings')}</h2><label><span>${t('tabularius.chatPrompt')}${tip(t('tabularius.chatPromptHint'))}</span><textarea name="prompt" rows="4">${escape(chat.prompt)}</textarea></label>
+    <h3>${t('tabularius.paramsFor', { model: escape(modelName(overview!.models, chat.model)) })}</h3><div class="chat-params"></div>
     <div class="buttons"><button type="button" data-cancel>${t('dialog.cancel')}</button><button type="submit" class="primary">${t('common.save')}</button></div></form>`;
   document.body.append(dialog);
   const defaults = { ...overview!.serverParams[provider], ...(vault()?.params?.[provider] ?? {}) };
@@ -191,12 +201,12 @@ function draw() {
 }
 
 const rulesFields = (excluded: string, masks: string) => `
-  <label>${t('tabularius.excluded')}<textarea name="excluded" rows="4" spellcheck="false">${escape(excluded)}</textarea><small>${t('tabularius.excludedHint')}</small></label>
-  <label>${t('tabularius.masks')}<textarea name="masks" rows="3" spellcheck="false">${escape(masks)}</textarea><small>${t('tabularius.masksHint')}</small></label>`;
+  <label><span>${t('tabularius.excluded')}${tip(t('tabularius.excludedHint'))}</span><textarea name="excluded" rows="4" spellcheck="false">${escape(excluded)}</textarea></label>
+  <label><span>${t('tabularius.masks')}${tip(t('tabularius.masksHint'))}</span><textarea name="masks" rows="3" spellcheck="false">${escape(masks)}</textarea></label>`;
 
 function drawEnable(current: VaultStatus) {
   shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.enableTitle', { name: escape(current.name) })}</h1></div></header>
-    <div class="card"><p>${t('tabularius.enableWarning', { provider: escape(overview!.defaultModel || t('tabularius.noModel')) })}</p>
+    <div class="card"><p>${t('tabularius.enableWarning', { provider: escape(overview!.defaultModel ? modelName(overview!.models, overview!.defaultModel) : t('tabularius.noModel')) })}</p>
     <form id="enable" class="stack"><label class="check"><input type="checkbox" name="confirm" required> ${t('tabularius.enableConfirm')}</label>
     <label>${t('tabularius.passphrase')}<input name="passphrase" type="password" autocomplete="off" required></label>
     ${rulesFields('', '')}
@@ -247,31 +257,30 @@ function drawSettings(current: VaultStatus) {
     <div class="card"><h2>${t('tabularius.rules')}</h2><form id="rules" class="stack">
       ${rulesFields(current.excluded ?? '', current.masks ?? '')}
       <button class="primary" type="submit">${t('common.save')}</button></form></div>
-    <div class="card"><h2>${t('tabularius.modeTitle')}</h2><p>${t('tabularius.modeDesc')}</p>
+    <div class="card"><h2>${t('tabularius.modeTitle')}${tip(t('tabularius.modeDesc'))}</h2>
       <label>${t('tabularius.mode')}<select id="mode">${(['read-only', 'restricted', 'full'] as Mode[]).map(mode =>
         `<option value="${mode}" ${current.mode === mode ? 'selected' : ''} ${overview!.modes.includes(mode) ? '' : 'disabled'}>${t(`tabularius.mode.${mode}`)}</option>`).join('')}</select></label>
-      ${overview!.web ? `<label class="check"><input type="checkbox" id="web" ${current.web ? 'checked' : ''}> ${t('tabularius.webEnable')}</label><small>${t('tabularius.webDesc')}</small>` : ''}</div>
-    ${isAdmin ? `<div class="card" id="hosts-card"><h2>${t('tabularius.hosts')}</h2><p>${t('tabularius.hostsDesc')}</p>${hosts.map(hostHtml).join('')}
+      ${overview!.web ? `<label class="check"><input type="checkbox" id="web" ${current.web ? 'checked' : ''}> ${t('tabularius.webEnable')}${tip(t('tabularius.webDesc'))}</label>` : ''}</div>
+    ${isAdmin ? `<div class="card" id="hosts-card"><h2>${t('tabularius.hosts')}${tip(t('tabularius.hostsDesc'))}</h2>${hosts.map(hostHtml).join('')}
       <form id="add-host" class="stack"><h3>${t('tabularius.addHost')}</h3><div class="inline-form"><label>${t('tabularius.hostName')}<input name="name" required></label><label>${t('tabularius.hostAddress')}<input name="address" required></label>
         <label>${t('tabularius.hostPort')}<input name="port" type="number" value="22" min="1" max="65535"></label><label>${t('tabularius.hostUser')}<input name="username" required></label></div>
-        ${policyField('allowed')}<label>${t('tabularius.hostCommands')}<textarea name="commands" rows="3" spellcheck="false"></textarea><small>${t('tabularius.hostCommandsHint')}</small></label>
+        ${policyField('allowed')}<label><span>${t('tabularius.hostCommands')}${tip(t('tabularius.hostCommandsHint'))}</span><textarea name="commands" rows="3" spellcheck="false"></textarea></label>
         <button class="primary" type="submit">${t('tabularius.addHost')}</button></form>
       ${commandLog.length ? `<details><summary>${t('tabularius.commandLog')}</summary><table><tbody>${commandLog.slice(0, 30).map(c => `<tr><td>${formatDate(c.createdAt)}</td><td>${escape(c.host ?? '')}</td><td><code>${escape(c.command)}</code></td><td>${escape(c.status)}${c.exitCode !== null ? ` (${c.exitCode})` : ''}${c.reason ? ` · ${escape(c.reason)}` : ''}</td></tr>`).join('')}</tbody></table></details>` : ''}</div>` : ''}
-    <div class="card"><h2>${t('tabularius.promptTitle')}</h2><p>${t('tabularius.promptDesc')}</p><form id="vault-prompt" class="stack"><textarea name="prompt" rows="8" spellcheck="false">${escape(current.prompt ?? '')}</textarea>
+    <div class="card"><h2>${t('tabularius.promptTitle')}${tip(t('tabularius.promptDesc'))}</h2><form id="vault-prompt" class="stack"><textarea name="prompt" rows="8" spellcheck="false">${escape(current.prompt ?? '')}</textarea>
       <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="import-prompt">${t('tabularius.importPrompt')}</button></div></form>
-      <details id="preview"><summary>${t('tabularius.preview')}</summary><div class="preview-body"></div></details></div>
-    <div class="card"><h2>${t('tabularius.modelTitle')}</h2><label>${t('tabularius.vaultModel')}<select id="vault-model"><option value="">${escape(t('tabularius.followServer', { model: overview!.defaultModel || t('tabularius.noModel') }))}</option>${overview!.models.map(m =>
-      `<option value="${escape(m.id)}" ${m.id === current.model ? 'selected' : ''}>${escape(m.id)}</option>`).join('')}</select></label></div>
-    <div class="card"><h2>${t('tabularius.paramsTitle')}</h2><p>${t('tabularius.paramsDesc')}</p>${[...new Set(overview!.models.map(m => m.provider))].map(provider =>
-      `<details class="param-provider"${provider === providerOf(current.model || overview!.defaultModel) ? ' open' : ''}><summary>${escape(provider)}</summary><div data-params="${provider}"></div></details>`).join('') || `<p class="muted">${t('tabularius.noModel')}</p>`}
+      <details id="preview"><summary>${t('tabularius.preview')}${tip(t('tabularius.previewHint'))}</summary><div class="preview-body"></div></details></div>
+    <div class="card"><div class="card-head"><h2>${t('tabularius.modelTitle')}</h2>${overview!.admin ? `<a class="button" href="/admin/ai" data-route>${t('tabularius.manageModels')}</a>` : ''}</div><label>${t('tabularius.vaultModel')}<select id="vault-model">${modelOptions(overview!.models, current.model ?? '', t('tabularius.followServer'))}</select></label></div>
+    <div class="card"><h2>${t('tabularius.paramsTitle')}${tip(t('tabularius.paramsDesc'))}</h2>${[...new Set(overview!.models.map(m => m.provider))].map(provider =>
+      `<details class="param-provider"${provider === providerOf(current.model || overview!.defaultModel) ? ' open' : ''}><summary>${PROVIDER_NAMES[provider]}</summary><div data-params="${provider}"></div></details>`).join('') || `<p class="muted">${t('tabularius.noModel')}</p>`}
       <button class="primary" type="button" id="save-params">${t('common.save')}</button></div>
-    ${overview!.knowledge ? `<div class="card"><h2>${t('tabularius.knowledge')}</h2><p>${t('tabularius.knowledgeDesc')}</p>
+    ${overview!.knowledge ? `<div class="card"><div class="card-head"><h2>${t('tabularius.knowledge')}${tip(t('tabularius.knowledgeDesc'))}</h2><a class="button" href="/admin/ai" data-route>${t('tabularius.knowledgeSettings')}</a></div>
       <label class="check"><input type="checkbox" id="knowledge" ${current.knowledge ? 'checked' : ''}> ${t('tabularius.knowledgeEnable')}</label></div>` : ''}
-    <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.model')}</dt><dd>${escape(current.model || overview!.defaultModel || t('tabularius.noModel'))}</dd>
+    <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.model')}</dt><dd>${escape(current.model || overview!.defaultModel ? modelName(overview!.models, current.model || overview!.defaultModel) : t('tabularius.noModel'))}</dd>
       <dt>${t('tabularius.embeddings')}</dt><dd>${overview!.embeddings ? t('tabularius.embeddingsOn') : t('tabularius.embeddingsOff')}</dd>
       <dt>${t('tabularius.enabledAt')}</dt><dd>${formatDate(current.enabledAt!)}</dd></dl>
       ${current.log?.length ? `<details><summary>${t('tabularius.log')}</summary><pre class="mono">${escape(current.log.join('\n'))}</pre></details>` : ''}</div>
-    <div class="card"><h2>${t('tabularius.disable')}</h2><p>${t('tabularius.disableDesc')}</p><button id="disable" class="danger">${t('tabularius.disable')}</button></div>`);
+    <div class="card"><h2>${t('tabularius.disable')}${tip(t('tabularius.disableDesc'))}</h2><button id="disable" class="danger">${t('tabularius.disable')}</button></div>`);
   document.getElementById('reload')!.addEventListener('click', () => void run(refresh));
   document.getElementById('mode')!.addEventListener('change', event => void run(async () => {
     const select = event.target as HTMLSelectElement;
@@ -325,7 +334,7 @@ function drawSettings(current: VaultStatus) {
     if (!(event.target as HTMLDetailsElement).open) return;
     const preview = await api<{ fixed: string; server: string; vault: string }>(`/tabularius/vaults/${vaultId}/prompt`);
     document.querySelector('#preview .preview-body')!.innerHTML = [[t('tabularius.previewServer'), preview.server], [t('tabularius.previewFixed'), preview.fixed], [t('tabularius.previewVault'), preview.vault]]
-      .map(([title, text]) => `<h4>${escape(title)}</h4><pre class="prompt-text">${escape(text || '—')}</pre>`).join('') + `<small>${t('tabularius.previewHint')}</small>`;
+      .map(([title, text]) => `<h4>${escape(title)}</h4><pre class="prompt-text">${escape(text || '—')}</pre>`).join('');
   }));
   document.getElementById('vault-model')!.addEventListener('change', event => void run(async () => {
     const value = (event.target as HTMLSelectElement).value;
@@ -354,7 +363,7 @@ async function showMemories() {
 function drawMemories() {
   const items = memories.map(m => `<form class="memory stack" data-id="${escape(m.id)}"><textarea name="content" rows="2" aria-label="${t('tabularius.memory')}">${escape(m.content)}</textarea>
     <div class="actions"><small>${formatDate(m.updatedAt)}</small><button type="submit">${t('common.save')}</button><button type="button" class="danger" data-delete>${t('tabularius.deleteMemory')}</button></div></form>`).join('');
-  shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.memories')}</h1><p>${t('tabularius.memoriesDesc')}</p></div></header>
+  shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.memories')}${tip(t('tabularius.memoriesDesc'))}</h1></div></header>
     <div class="card"><form id="add-memory" class="stack"><label>${t('tabularius.newMemory')}<textarea name="content" rows="2" required></textarea></label><button class="primary" type="submit">${t('tabularius.addMemory')}</button></form></div>
     <div class="card">${items || `<p class="muted">${t('tabularius.noMemories')}</p>`}</div>`);
   form('add-memory', async data => { await api('/tabularius/memories', 'POST', { content: data.get('content') }); await showMemories(); message(t('tabularius.saved')); });
@@ -418,7 +427,7 @@ function drawChat(current: VaultStatus) {
   const composer = `<form id="ask" class="composer"><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${t('tabularius.ask')}" aria-label="${t('tabularius.ask')}" required ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></form>`;
   // A new conversation starts in the middle of the page; once it has messages the box moves below them.
   const models = overview!.models;
-  const picker = models.length ? `<select id="chat-model" class="compact" aria-label="${t('tabularius.model')}">${models.map(m => `<option value="${escape(m.id)}" ${m.id === chat.model ? 'selected' : ''}>${escape(m.id)}</option>`).join('')}</select><button id="chat-settings" type="button">${t('tabularius.chatSettings')}</button>` : '';
+  const picker = models.length ? `<select id="chat-model" class="compact" aria-label="${t('tabularius.model')}">${modelOptions(models, chat.model, chat.model ? undefined : t('tabularius.noModel'))}</select><button id="chat-settings" type="button">${t('tabularius.chatSettings')}</button>` : '';
   shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${picker}${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
     ${current.indexError ? `<p class="notice error">${t('tabularius.indexError', { error: escape(current.indexError) })}</p>` : ''}
     ${entries.length ? `<section id="log" class="log" aria-live="polite">${entries.map(entryHtml).join('')}</section><div class="chat-bottom">${composer}</div>`

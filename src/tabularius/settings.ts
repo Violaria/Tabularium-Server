@@ -4,13 +4,17 @@
 // application database is the source.
 import type { DatabaseSync } from 'node:sqlite';
 import { open, seal } from './client.js';
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { anthropic, openai, vllm, type Provider } from './providers.js';
 import { checkParams, ParamsError, type Params, type ProviderName } from './params.js';
 import { DEFAULT_PROMPT } from './prompt.js';
 import { KNOWLEDGE_DEFAULTS, listDatasets, ragflow, type KnowledgeBase, type KnowledgeSettings } from './knowledge.js';
 
 export const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
-interface StoredProvider { key: string | null; hint: string; models: string[]; url: string; context: number }
+/** A model offered here: the provider's identifier, its name for people, and (vLLM) its context length. */
+export interface ModelEntry { id: string; name: string; context?: number }
+interface StoredProvider { key: string | null; hint: string; models: ModelEntry[]; url: string; context: number }
 type Stored = Record<ProviderName, StoredProvider>;
 export interface InitialSettings {
   providers?: Partial<Record<ProviderName, { key?: string; models: string[]; url?: string; context?: number }>>;
@@ -21,6 +25,24 @@ export interface InitialSettings {
 export class SettingsError extends Error {}
 
 const blank = (): StoredProvider => ({ key: null, hint: '', models: [], url: '', context: 32_768 });
+/**
+ * A model's name for people when the provider gives none (OpenAI lists identifiers only): "gpt-6.1-sol" reads
+ * "GPT-6.1 Sol". Words starting with a digit, and o-series names such as "o3", keep their case.
+ */
+export function displayName(provider: ProviderName, id: string) {
+  if (provider === 'vllm') return id;
+  const words = id.split('-');
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    if (word === 'gpt') out.push(/^\d/.test(words[i + 1] ?? '') ? `GPT-${words[++i]}` : 'GPT');
+    else if (/^\d|^o\d/.test(word)) out.push(word);
+    else out.push(word.charAt(0).toUpperCase() + word.slice(1));
+  }
+  return out.join(' ');
+}
+// OpenAI lists every model of the account; these are not chat models.
+const NOT_CHAT = /embedding|tts|whisper|dall-e|davinci|babbage|moderation|audio|realtime|transcribe|image|search|computer-use|sora/;
 /** "provider/model"; the model part may itself contain slashes (vLLM model names often do). */
 export function parseModel(id: string) {
   const at = id.indexOf('/');
@@ -42,7 +64,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
   if (!db.prepare("SELECT 1 FROM tabularius_settings WHERE key='providers'").get()) {
     const providers = Object.fromEntries(PROVIDERS.map(name => {
       const given = initial.providers?.[name];
-      return [name, { ...blank(), ...(given ? { key: given.key ? sealKey(given.key) : null, hint: given.key ? hintOf(given.key) : '', models: given.models,
+      return [name, { ...blank(), ...(given ? { key: given.key ? sealKey(given.key) : null, hint: given.key ? hintOf(given.key) : '', models: given.models.map(id => ({ id, name: displayName(name, id) })),
         url: given.url ?? '', context: given.context ?? 32_768 } : {}) }];
     })) as Stored;
     db.exec('BEGIN');
@@ -56,17 +78,23 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
 
   let cache = new Map<string, Provider>();
   let knowledgeBase: KnowledgeBase | undefined;
-  const stored = () => read<Stored>('providers', { anthropic: blank(), openai: blank(), vllm: blank() });
+  // Lists saved before models carried names hold plain identifiers.
+  const stored = () => {
+    const all = read<Stored>('providers', { anthropic: blank(), openai: blank(), vllm: blank() });
+    for (const name of PROVIDERS) all[name].models = all[name].models.map(item => typeof item === 'string' ? { id: item, name: displayName(name, item) } : item);
+    return all;
+  };
   /** A provider is usable once it has a key (Anthropic, OpenAI) or an address (vLLM). */
   const usable = (name: ProviderName, item: StoredProvider) => name === 'vllm' ? Boolean(item.url) : Boolean(item.key);
   function models() {
     const all = stored();
-    return PROVIDERS.flatMap(name => usable(name, all[name]) ? all[name].models.map(model => ({ id: `${name}/${model}`, provider: name, model })) : []);
+    return PROVIDERS.flatMap(name => usable(name, all[name]) ? all[name].models.map(model => ({ id: `${name}/${model.id}`, provider: name, model: model.id, name: model.name })) : []);
   }
   function defaultModel() {
     const list = models();
+    // Only the administrator's choice: no model is picked on their behalf.
     const chosen = read('default_model', '');
-    return list.some(item => item.id === chosen) ? chosen : list[0]?.id ?? '';
+    return list.some(item => item.id === chosen) ? chosen : '';
   }
   const knowledgeSettings = () => read<KnowledgeSettings | null>('knowledge', null);
 
@@ -84,8 +112,9 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
       if (!provider) {
         const item = stored()[parsed.provider];
         const key = item.key ? open(secret, Buffer.from(item.key, 'base64')) : undefined;
+        const context = item.models.find(model => model.id === parsed.model)?.context ?? item.context;
         provider = parsed.provider === 'anthropic' ? anthropic(parsed.model, key)
-          : parsed.provider === 'openai' ? openai(parsed.model, key) : vllm(parsed.model, item.url, key, item.context);
+          : parsed.provider === 'openai' ? openai(parsed.model, key) : vllm(parsed.model, item.url, key, context);
         cache.set(id, provider);
       }
       return provider;
@@ -97,6 +126,30 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
       return knowledgeBase;
     },
     knowledgeConfigured: () => Boolean(knowledgeSettings()?.url),
+    /** The models a provider offers, asked from its API with the saved key (and address). */
+    async available_models(name: ProviderName): Promise<ModelEntry[]> {
+      const item = stored()[name];
+      const key = item.key ? open(secret, Buffer.from(item.key, 'base64')) : undefined;
+      if (name === 'anthropic') {
+        if (!key) throw new SettingsError('Save the key first');
+        const list: ModelEntry[] = [];
+        for await (const model of new Anthropic({ apiKey: key }).models.list({ limit: 100 })) list.push({ id: model.id, name: model.display_name || displayName(name, model.id) });
+        return list;
+      }
+      if (name === 'openai') {
+        if (!key) throw new SettingsError('Save the key first');
+        const list: ModelEntry[] = [];
+        for await (const model of new OpenAI({ apiKey: key }).models.list()) if (!NOT_CHAT.test(model.id)) list.push({ id: model.id, name: displayName(name, model.id) });
+        return list.sort((a, b) => b.id.localeCompare(a.id));
+      }
+      if (!item.url) throw new SettingsError('Save the address first');
+      const list: ModelEntry[] = [];
+      for await (const model of new OpenAI({ apiKey: key || 'none', baseURL: item.url }).models.list()) {
+        const context = (model as unknown as { max_model_len?: number }).max_model_len;
+        list.push({ id: model.id, name: model.id, ...(context ? { context } : {}) });
+      }
+      return list;
+    },
     datasets: (url: string) => listDatasets(url),
     /** What the settings page shows: keys only as their last four characters. */
     view() {
@@ -104,7 +157,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
       return {
         prompt: read('prompt', DEFAULT_PROMPT), defaultPrompt: DEFAULT_PROMPT, defaultModel: read('default_model', ''), params: read('params', {}),
         providers: Object.fromEntries(PROVIDERS.map(name => [name, { configured: usable(name, all[name]), keySet: Boolean(all[name].key), keyHint: all[name].hint,
-          models: all[name].models, url: all[name].url, context: all[name].context }])),
+          models: all[name].models, url: all[name].url }])),
         knowledge: knowledgeSettings() ?? { url: '', datasets: [], ...KNOWLEDGE_DEFAULTS },
       };
     },
@@ -124,9 +177,12 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
             next.hint = item.key ? hintOf(item.key.trim()) : '';
           }
           if (item.models !== undefined) {
-            if (!Array.isArray(item.models) || item.models.length > 50 || !item.models.every(model => typeof model === 'string' && /^[^\s/][^\s]{0,127}$/.test(model)))
-              throw new SettingsError('Invalid model list');
-            next.models = [...new Set(item.models as string[])];
+            const valid = (model: unknown): model is ModelEntry => typeof model === 'object' && model !== null && typeof (model as ModelEntry).id === 'string'
+              && /^[^\s/][^\s]{0,127}$/.test((model as ModelEntry).id) && typeof (model as ModelEntry).name === 'string' && (model as ModelEntry).name.length <= 128
+              && ((model as ModelEntry).context === undefined || (Number.isInteger((model as ModelEntry).context) && (model as ModelEntry).context! > 0));
+            if (!Array.isArray(item.models) || item.models.length > 100 || !item.models.every(valid)) throw new SettingsError('Invalid model list');
+            next.models = (item.models as ModelEntry[]).filter((model, index, list) => list.findIndex(other => other.id === model.id) === index)
+              .map(model => ({ id: model.id, name: model.name.trim() || displayName(name, model.id), ...(model.context ? { context: model.context } : {}) }));
           }
           if (item.url !== undefined) {
             if (typeof item.url !== 'string' || (item.url && !/^https?:\/\/\S+$/.test(item.url))) throw new SettingsError('Invalid address');

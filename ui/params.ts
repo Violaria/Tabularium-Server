@@ -1,8 +1,8 @@
 // The model parameter form, built from the server's rule table (like Open WebUI's advanced parameters): one row per
 // parameter, "Default" until it is switched to a custom value, then a control for its type. vLLM also takes custom
 // parameters (a name and a JSON value). Only the parameters set to a custom value are saved.
-import { hasMessage, t } from './i18n.js';
-import { escape } from './core.js';
+import { catalogues, hasMessage, language, t } from './i18n.js';
+import { escape, tip } from './core.js';
 
 export type Rule =
   | { kind: 'number'; min: number; max: number; step: number; integer?: boolean; initial: number }
@@ -14,6 +14,22 @@ export type ProviderName = 'anthropic' | 'openai' | 'vllm';
 export class FormError extends Error {}
 
 const label = (name: string) => { const key = `param.${name}`; return hasMessage(key) ? t(key) : name; };
+/** The parameter's English name, shown next to a Chinese or Latin one (as Open WebUI does); nothing in English. */
+const englishName = (name: string) => {
+  const key = `param.${name}`;
+  return language() === 'en' || !hasMessage(key) ? '' : catalogues.en[key];
+};
+/** Providers as their makers write them. */
+export const PROVIDER_NAMES: Record<ProviderName, string> = { anthropic: 'Anthropic', openai: 'OpenAI', vllm: 'vLLM' };
+export interface ModelOption { id: string; provider: ProviderName; model: string; name: string }
+/** The models as select options, grouped under their provider's name; `empty` adds a first option with the value ''. */
+export function modelOptions(models: ModelOption[], selected: string, empty?: string) {
+  const groups = (Object.keys(PROVIDER_NAMES) as ProviderName[]).map(provider => [provider, models.filter(m => m.provider === provider)] as const).filter(([, list]) => list.length);
+  return (empty === undefined ? '' : `<option value="" ${selected ? '' : 'selected'}>${escape(empty)}</option>`)
+    + groups.map(([provider, list]) => `<optgroup label="${PROVIDER_NAMES[provider]}">${list.map(m => `<option value="${escape(m.id)}" ${m.id === selected ? 'selected' : ''}>${escape(m.name)}</option>`).join('')}</optgroup>`).join('');
+}
+/** A model's name, from the models offered. */
+export const modelName = (models: ModelOption[], id: string) => models.find(m => m.id === id)?.name ?? id;
 const hint = (name: string) => { const key = `param.${name}Hint`; return hasMessage(key) ? t(key) : ''; };
 const valueLabel = (value: string) => { const key = `param.value.${value}`; return hasMessage(key) ? t(key) : value; };
 const shown = (rule: Rule, value: unknown) =>
@@ -31,11 +47,11 @@ export function paramForm(root: HTMLElement, provider: ProviderName, rules: Reco
     root.innerHTML = `<div class="params">${Object.entries(rules).map(([name, rule]) => {
       const set = values[name] !== undefined;
       const title = hint(name);
-      return `<div class="param" data-param="${escape(name)}"><div class="param-head"><span class="param-name"${title ? ` title="${escape(title)}" tabindex="0"` : ''}>${escape(label(name))} <code>${escape(name)}</code></span>`
+      return `<div class="param" data-param="${escape(name)}"><div class="param-head"><span class="param-name"${title ? ` title="${escape(title)}" tabindex="0"` : ''}>${escape(label(name))}${englishName(name) ? ` <span class="param-en">${escape(englishName(name))}</span>` : ''}</span>`
         + `<button type="button" class="param-toggle${set ? ' custom' : ''}" data-toggle aria-pressed="${set}">${set && rule.kind === 'boolean' ? shown(rule, values[name])
           : set ? t('param.custom') : `${t('param.default')}${defaults[name] !== undefined ? ` · ${escape(shown(rule, defaults[name]))}` : ''}`}</button></div>`
         + (set && rule.kind !== 'boolean' ? `<div class="param-control">${control(name, rule, values[name])}</div>` : '') + '</div>';
-    }).join('')}${provider === 'vllm' ? `<div class="custom-params"><h4>${t('param.customTitle')}</h4><small>${t('param.customHint')}</small>${custom.map((item, index) =>
+    }).join('')}${provider === 'vllm' ? `<div class="custom-params"><h4>${t('param.customTitle')}${tip(t('param.customHint'))}</h4>${custom.map((item, index) =>
       `<div class="custom-param" data-custom="${index}"><input aria-label="${t('param.customName')}" placeholder="${t('param.customName')}" value="${escape(item.name)}" data-field="name"><input aria-label="${t('param.customValue')}" placeholder='{"a": 1}' value="${escape(item.value)}" data-field="value"><button type="button" class="link" data-remove>${t('param.remove')}</button></div>`).join('')}<button type="button" data-add>${t('param.add')}</button></div>` : ''}</div>`;
     for (const row of root.querySelectorAll<HTMLElement>('[data-param]')) {
       const name = row.dataset.param!;

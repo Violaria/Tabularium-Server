@@ -572,6 +572,16 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         return fail(502, error instanceof ProviderError ? error.message : (error as Error).message.slice(0, 300));
       }
     },
+    /** What a provider's API offers, for the administrator to choose from. */
+    async providerModels(name: string) {
+      if (!PROVIDERS.includes(name as ProviderName)) return fail(404, 'Route not found');
+      try { return await settings.available_models(name as ProviderName); } catch (error) {
+        if (error instanceof SettingsError) return fail(400, error.message);
+        return fail(502, `${name}: ${(error as Error).message.slice(0, 300)}`);
+      }
+    },
+    /** A model's name for people, or '' when it is not offered. */
+    modelName: (id: string) => settings.models().find(model => model.id === id)?.name ?? '',
     async datasets(url: string) {
       try { return await settings.datasets(url); } catch (error) { return fail(502, `RAGFlow: ${(error as Error).message.slice(0, 300)}`); }
     },

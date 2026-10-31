@@ -48,6 +48,9 @@ let route = () => {};
 /** The shell registers what happens when the session ends and how a path is drawn. */
 export function connect(handlers: { expired: () => void; route: () => void }) { expired = handlers.expired; route = handlers.route; }
 
+/** An explanation behind an ⓘ icon, shown on hover or focus, instead of a paragraph on the page. */
+export const tip = (text: string) =>
+  `<span class="tip" tabindex="0" data-tip="${escape(text)}"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.2v4M8 4.9v.1"/></svg></span>`;
 export const escape = (value: string | number) =>
   String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
 export const bytes = (n: number) => n >= 1073741824 ? `${(n / 1073741824).toFixed(1)} GiB` : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MiB` : `${(n / 1024).toFixed(1)} KiB`;
@@ -181,7 +184,7 @@ export function page(content: HTMLElement, options: { title: string; subtitle?: 
     .sort((a, b) => b.length - a.length)[0];
   const tabs = options.tabs ? `<nav class="tabs">${options.tabs.map(([href, label]) =>
     `<a href="${href}" data-route ${href === current ? 'aria-current="page"' : ''}>${escape(label)}</a>`).join('')}</nav>` : '';
-  content.innerHTML = `<div class="page"><header class="page-head"><div><h1>${escape(options.title)}</h1>${options.subtitle ? `<p>${escape(options.subtitle)}</p>` : ''}</div>${options.actions ?? ''}</header>${tabs}<div id="body"></div></div>`;
+  content.innerHTML = `<div class="page"><header class="page-head"><div><h1>${escape(options.title)}${options.subtitle ? tip(options.subtitle) : ''}</h1></div>${options.actions ?? ''}</header>${tabs}<div id="body"></div></div>`;
   window.scrollTo(0, 0);
   return content.querySelector<HTMLDivElement>('#body')!;
 }

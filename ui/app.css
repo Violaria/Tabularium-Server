@@ -496,3 +496,26 @@ dialog.dialog.chat-settings h3 { margin: 6px 0 0; }
 .chat-tools select.compact { max-width: 240px; }
 .chat-title { flex: 1 1 auto; }
 @media (max-width: 1100px) { .chat-tools .sync-pill > span:last-child, .chat-tools .sync-pill .sep { display: none; } }
+
+/* Explanations behind an ⓘ icon instead of paragraphs on the page. */
+.tip { position: relative; display: inline-flex; vertical-align: -0.12em; margin-left: 6px; color: var(--muted); cursor: help; font-weight: 400; }
+.tip svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
+.tip:hover, .tip:focus { color: var(--accent); outline: none; }
+.tip::after {
+    content: attr(data-tip); position: absolute; left: -10px; bottom: calc(100% + 8px); z-index: 40; width: max-content; max-width: min(340px, 80vw);
+    padding: 8px 11px; border-radius: 8px; background: var(--text); color: var(--panel); font: 400 12.5px/1.55 var(--font); letter-spacing: 0;
+    text-transform: none; white-space: normal; text-align: left; box-shadow: 0 8px 24px #0000002e; display: none; pointer-events: none;
+}
+/* Drawn only while shown: a hidden tooltip would still widen narrow pages. */
+.tip:hover::after, .tip:focus::after { display: block; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.card-head h2 { margin: 0; }
+th .tip::after { bottom: auto; top: calc(100% + 8px); }
+.param-name .param-en { margin-left: 6px; font-size: 12px; color: var(--muted); }
+.model-list { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; }
+.model-list legend { display: flex; align-items: center; justify-content: space-between; width: 100%; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.model-list [data-models] { display: grid; gap: 4px; max-height: 260px; overflow-y: auto; }
+.model-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.model-row small.mono { margin-left: 6px; }
+.error-text { color: var(--danger); }
+optgroup { font-weight: 600; }

@@ -305,7 +305,7 @@ export async function createGateway(config: Config) {
       let storage = false;
       try { const up = await couch.admin('/_up'); storage = up.ok; await up.arrayBuffer(); } catch { /* Shown as not ready. */ }
       server = { uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000), activeProxyConnections: active.size, storage,
-        model: tabularius ? tabularius.overview().defaultModel || null : null };
+        model: tabularius ? tabularius.modelName(tabularius.overview().defaultModel) || null : null };
     }
     return { vaults: result, conversations, server };
   }
@@ -569,6 +569,7 @@ export async function createGateway(config: Config) {
           json(res, 200, result); return;
         }
         if (route.length === 3 && route[2] === 'test' && method === 'POST') { json(res, 200, await t.testModel(field(await body(req), 'model', 200))); return; }
+        if (route.length === 4 && route[2] === 'models' && method === 'GET') { json(res, 200, await t.providerModels(route[3])); return; }
         if (route.length === 3 && route[2] === 'datasets' && method === 'POST') { json(res, 200, await t.datasets(field(await body(req), 'url', 500))); return; }
         if (route.length === 3 && route[2] === 'knowledge' && method === 'POST') { json(res, 200, await t.testKnowledge(field(await body(req), 'question', 500))); return; }
         fail(404, 'Route not found');

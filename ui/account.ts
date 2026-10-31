@@ -1,7 +1,7 @@
 // Account settings, open to every user: own vaults and devices (issue, revoke, rebuild, unlock), Kindle, password.
 import { formatDate, languageSelect, t } from './i18n.js';
 import { shareTable, type ShareRow } from './shares.js';
-import { ago, api, applyTheme, button, bytes, confirmAction, DEFAULT_THEME, escape, form, input, message, navigate, page, RECIPES, state, THEMES, type Recipe } from './core.js';
+import { ago, api, applyTheme, button, bytes, confirmAction, DEFAULT_THEME, escape, form, input, message, navigate, page, RECIPES, state, THEMES, tip, type Recipe } from './core.js';
 
 interface Rebuild { deviceId: string; until: number; started: number | null }
 export interface Vault { id: string; name: string; state: string; ownerId?: string; owner?: string; rebuild: Rebuild | null }
@@ -32,7 +32,7 @@ export async function renderAccount(content: HTMLElement, path: string) {
 async function vaultsPage(content: HTMLElement) {
   const body = frame(content);
   const vaults = await api<Vault[]>('/vaults');
-  body.innerHTML = `<section class="card table-wrap">${vaults.length ? `<table><thead><tr><th>${t('vaults.vault')}</th><th>${t('common.status')}</th><th></th></tr></thead><tbody>${vaults.map(v => `<tr><td><a href="/account/vaults/${v.id}" data-route>${escape(v.name)}</a></td><td>${badge(v.state)}</td><td class="right"><a href="/account/vaults/${v.id}" data-route>${t('vaults.devices')}</a></td></tr>`).join('')}</tbody></table>` : `<div class="empty">${t('vaults.none')}</div>`}</section><section class="card"><h2>${t('vaults.create')}</h2><form id="create-vault" class="inline-form">${input(t('vaults.name'), 'name', 'text', 'maxlength="128"')}<button class="primary" type="submit">${t('vaults.create')}</button></form><small>${t('account.createHint')}</small></section>`;
+  body.innerHTML = `<section class="card table-wrap">${vaults.length ? `<table><thead><tr><th>${t('vaults.vault')}</th><th>${t('common.status')}</th><th></th></tr></thead><tbody>${vaults.map(v => `<tr><td><a href="/account/vaults/${v.id}" data-route>${escape(v.name)}</a></td><td>${badge(v.state)}</td><td class="right"><a href="/account/vaults/${v.id}" data-route>${t('vaults.devices')}</a></td></tr>`).join('')}</tbody></table>` : `<div class="empty">${t('vaults.none')}</div>`}</section><section class="card"><h2>${t('vaults.create')}${tip(t('account.createHint'))}</h2><form id="create-vault" class="inline-form">${input(t('vaults.name'), 'name', 'text', 'maxlength="128"')}<button class="primary" type="submit">${t('vaults.create')}</button></form></section>`;
   form('create-vault', async data => { await api('/vaults', 'POST', Object.fromEntries(data)); await vaultsPage(content); message(t('vaults.created')); });
 }
 
@@ -55,7 +55,7 @@ async function vaultPage(content: HTMLElement, id: string) {
   const body = page(content, { title: vault.name, subtitle: t('vault.desc'), tabs: tabs(), actions: `<a class="button" href="/account/" data-route>${t('vault.back')}</a>` });
   const devices = await api<Device[]>(`/vaults/${id}/devices`);
   const rebuildCard = vault.state === 'ready' ? await rebuildSection(vault, devices) : '';
-  body.innerHTML = `<section class="card"><h2>${t('vault.connection')}</h2><dl class="details"><dt>${t('vault.syncAddress')}</dt><dd>${escape(location.origin)}/sync</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl>${vault.state !== 'ready' ? `<br><button id="retry">${t('vault.retry')}</button>` : ''}</section><div id="new-secret"></div><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${deviceTable(devices, true)}</section>${vault.state === 'ready' ? `<section class="card"><h2>${t('vault.addDevice')}</h2><form id="issue-device" class="inline-form">${input(t('vault.deviceName'), 'name', 'text', `placeholder="${escape(t('vault.devicePlaceholder'))}" maxlength="128"`)}<button class="primary" type="submit">${t('vault.issue')}</button></form><small>${t('vault.clientHint')}</small></section>` : ''}${rebuildCard}`;
+  body.innerHTML = `<section class="card"><h2>${t('vault.connection')}</h2><dl class="details"><dt>${t('vault.syncAddress')}</dt><dd>${escape(location.origin)}/sync</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl>${vault.state !== 'ready' ? `<br><button id="retry">${t('vault.retry')}</button>` : ''}</section><div id="new-secret"></div><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${deviceTable(devices, true)}</section>${vault.state === 'ready' ? `<section class="card"><h2>${t('vault.addDevice')}${tip(t('vault.clientHint'))}</h2><form id="issue-device" class="inline-form">${input(t('vault.deviceName'), 'name', 'text', `placeholder="${escape(t('vault.devicePlaceholder'))}" maxlength="128"`)}<button class="primary" type="submit">${t('vault.issue')}</button></form></section>` : ''}${rebuildCard}`;
   const reload = () => vaultPage(content, id);
   if (vault.state !== 'ready') button('retry', async () => { await api(`/vaults/${id}/provision`, 'POST', {}); await reload(); });
   if (vault.state === 'ready') form('issue-device', async data => {
@@ -138,7 +138,7 @@ async function sharesPage(content: HTMLElement) {
 
 function passwordPage(content: HTMLElement) {
   const body = frame(content);
-  body.innerHTML = `<section class="card"><p>${t('password.desc')}</p><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(t('password.new'), 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<small>${t('password.hint')}</small><button class="primary" type="submit">${t('password.save')}</button></form></section>`;
+  body.innerHTML = `<section class="card"><p>${t('password.desc')}</p><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(`${t('password.new')}${tip(t('password.hint'))}`, 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<button class="primary" type="submit">${t('password.save')}</button></form></section>`;
   form('password', async data => {
     if (data.get('password') !== data.get('confirmation')) { message(t('password.mismatch'), true); return; }
     await api('/me/password', 'PUT', { currentPassword: data.get('currentPassword'), password: data.get('password') });
@@ -154,13 +154,13 @@ function interfacePage(content: HTMLElement) {
   const current = user.theme || DEFAULT_THEME;
   const recipe: Recipe = { ...(user.recipe ?? RECIPES.sakura) };
   const editing = current === 'custom';
-  body.innerHTML = `<section class="card"><h2>${t('interface.language')}</h2><p>${t('interface.languageDesc')}</p><div id="language-choice" class="language-choice"></div></section>
-    <section class="card"><h2>${t('theme.title')}</h2><p>${t('theme.desc')}</p><div class="themes">${THEMES.map(theme => `<button type="button" class="theme-card" id="theme-${theme}" aria-pressed="${theme === current}"><span class="swatches ${theme}"><span></span><span></span><span></span></span><span>${t(`theme.${theme}`)}</span><small>${t(`theme.${theme}Desc`)}</small></button>`).join('')}</div>
-    <form id="recipe" class="recipe" ${editing ? '' : 'hidden'}><h3>${t('recipe.title')}</h3><div class="recipe-fields">
+  body.innerHTML = `<section class="card"><h2>${t('interface.language')}${tip(t('interface.languageDesc'))}</h2><div id="language-choice" class="language-choice"></div></section>
+    <section class="card"><h2>${t('theme.title')}${tip(t('theme.desc'))}</h2><div class="themes">${THEMES.map(theme => `<button type="button" class="theme-card" id="theme-${theme}" aria-pressed="${theme === current}"><span class="swatches ${theme}"><span></span><span></span><span></span></span><span>${t(`theme.${theme}`)}</span><small>${t(`theme.${theme}Desc`)}</small></button>`).join('')}</div>
+    <form id="recipe" class="recipe" ${editing ? '' : 'hidden'}><h3>${t('recipe.title')}${tip(t('recipe.hint'))}</h3><div class="recipe-fields">
       <label>${t('recipe.accent')}<input type="color" name="accent" value="${escape(recipe.accent)}"></label>
       <label>${t('recipe.tint')}<input type="range" name="tint" min="6" max="40" step="1" value="${recipe.tint}"></label>
       <fieldset><legend>${t('recipe.side')}</legend><label class="check"><input type="radio" name="side" value="light" ${recipe.side === 'light' ? 'checked' : ''}> ${t('recipe.light')}</label><label class="check"><input type="radio" name="side" value="dark" ${recipe.side === 'dark' ? 'checked' : ''}> ${t('recipe.dark')}</label></fieldset>
-    </div><small>${t('recipe.hint')}</small><button class="primary" type="submit">${t('recipe.save')}</button></form></section>`;
+    </div><button class="primary" type="submit">${t('recipe.save')}</button></form></section>`;
   document.getElementById('language-choice')!.append(languageSelect(() => navigate(location.pathname)));
   const custom = body.querySelector<HTMLElement>('.swatches.custom')!.children;
   const recipeForm = document.getElementById('recipe') as HTMLFormElement;

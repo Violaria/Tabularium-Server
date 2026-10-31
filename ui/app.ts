@@ -1,7 +1,7 @@
 // The Tabularium web application: one sign-in, one shell, and the modules home, web notes, Tabularius, administration
 // and account settings. Every path of the application loads this page; the path selects the module.
 import { t, type Language } from './i18n.js';
-import { api, ApiError, applyTheme, captureLinks, connect, escape, form, icon, input, message, navigate, run, state, storedTheme, clearMessage, type Session } from './core.js';
+import { api, ApiError, applyTheme, captureLinks, connect, escape, form, icon, input, message, navigate, run, state, storedTheme, clearMessage, tip, type Session } from './core.js';
 import { renderHome } from './home.js';
 import { renderAdmin } from './admin.js';
 import { renderAccount } from './account.js';
@@ -53,7 +53,7 @@ function signIn() {
 
 /** The first sign-in replaces the initial password before any module opens. */
 function initialPassword() {
-  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('password.initialTitle')}</h1><p>${t('password.desc')}</p><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(t('password.new'), 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<small>${t('password.hint')}</small><button class="primary" type="submit">${t('password.save')}</button></form></div></div></div>`;
+  app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('password.initialTitle')}</h1><p>${t('password.desc')}</p><form id="password" class="stack">${input(t('password.current'), 'currentPassword', 'password', 'autocomplete="current-password"')}${input(`${t('password.new')}${tip(t('password.hint'))}`, 'password', 'password', 'minlength="12" autocomplete="new-password"')}${input(t('password.confirm'), 'confirmation', 'password', 'minlength="12" autocomplete="new-password"')}<button class="primary" type="submit">${t('password.save')}</button></form></div></div></div>`;
   form('password', async data => {
     if (data.get('password') !== data.get('confirmation')) { message(t('password.mismatch'), true); return; }
     await api('/me/password', 'PUT', { currentPassword: data.get('currentPassword'), password: data.get('password') });
