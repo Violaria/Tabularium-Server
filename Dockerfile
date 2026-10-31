@@ -10,8 +10,10 @@ COPY apps/server/ui ./apps/server/ui
 # The web notes page is built on the host (npm run build:notes), it needs the plug-in's dependencies.
 COPY apps/server/notes-dist ./apps/server/notes-dist
 RUN npm run build --workspace @tabularium/server
-# Runtime packages only: the provider SDKs and the passphrase check for Tabularius.
-RUN rm -rf node_modules && npm ci --ignore-scripts --omit=dev --workspace @tabularium/server --include-workspace-root
+# Runtime packages only: the provider SDKs and the passphrase check for Tabularius. pdf.js only reads the text of PDF
+# attachments; its optional canvas package (for drawing pages as pictures) is not used and is left out.
+RUN rm -rf node_modules && npm ci --ignore-scripts --omit=dev --workspace @tabularium/server --include-workspace-root \
+    && rm -rf node_modules/@napi-rs
 
 FROM node:24.10.0-bookworm-slim@sha256:b8d2197aff9129d16c801a3e3e1b2a873c4946480f5a310f38056df2268c38d9
 WORKDIR /app
