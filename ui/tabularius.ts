@@ -148,7 +148,14 @@ async function refresh() {
 let drawnView = '';
 const MORE = icon('more');
 const conversationRow = (c: Summary) => `<div class="conv-row" data-row="${escape(c.id)}" ${c.id === conversationId && view === 'chat' ? 'aria-current="page"' : ''}><button class="conversation" data-id="${escape(c.id)}" title="${escape(`${c.title}\n${formatDate(c.updatedAt)}`)}"><span>${escape(c.title)}</span></button><button type="button" class="icon-button small row-more" data-more="${escape(c.id)}" aria-haspopup="menu" aria-label="${t('tabularius.more')}" title="${t('tabularius.more')}">${MORE}</button></div>`;
-/** The conversation column: projects with their conversations, the ungrouped ones, and the archive folded at the end. */
+/** Sections of the conversation column folded away, remembered in this browser. */
+const SECTIONS_KEY = 'tabularius-sections';
+const folded = new Set<string>((() => { try { return JSON.parse(localStorage.getItem(SECTIONS_KEY) ?? '[]') as string[]; } catch { return []; } })());
+const CARET = '<svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>';
+/** A section's heading: its name with a caret that folds it, and an optional action beside it. */
+const section = (id: string, label: string, action = '') =>
+  `<div class="list-section"><button type="button" class="section-toggle" data-section="${id}" aria-expanded="${!folded.has(id)}"><span>${label}</span>${CARET}</button>${action}</div>`;
+/** The conversation column: projects with their conversations, the recent ones outside projects, and the archive. */
 function listHtml() {
   const live = conversations.filter(c => !c.archived);
   const archived = conversations.filter(c => c.archived);
@@ -157,13 +164,14 @@ function listHtml() {
   const projectRows = projects.map(project => {
     const inside = live.filter(c => c.projectId === project.id);
     const shown = expanded.has(project.id);
-    return `<div class="project-row" data-project-row="${escape(project.id)}" aria-expanded="${shown}"><button class="project" data-project="${escape(project.id)}"><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5.5 6.5 6.5L9 18.5"/></svg>${icon('folder')}<span>${escape(project.name)}</span></button><button type="button" class="icon-button small row-more" data-project-more="${escape(project.id)}" aria-haspopup="menu" aria-label="${t('tabularius.more')}" title="${t('tabularius.more')}">${MORE}</button></div>`
+    return `<div class="project-row" data-project-row="${escape(project.id)}" aria-expanded="${shown}"><button class="project" data-project="${escape(project.id)}">${icon('folder')}<span>${escape(project.name)}</span></button><button type="button" class="icon-button small row-more" data-project-more="${escape(project.id)}" aria-haspopup="menu" aria-label="${t('tabularius.more')}" title="${t('tabularius.more')}">${MORE}</button></div>`
       + (shown ? `<div class="project-children">${inside.map(conversationRow).join('') || `<small class="pane-empty">${t('tabularius.projectEmpty')}</small>`}</div>` : '');
   }).join('');
   const loose = live.filter(c => !c.projectId || !projects.some(p => p.id === c.projectId));
-  return `<div class="list-section"><span>${t('tabularius.projects')}</span>${iconButton('plus', t('tabularius.newProject'), 'id="new-project"')}</div>${projectRows}
-    <div class="list-section"><span>${t('tabularius.recent')}</span></div>${loose.map(conversationRow).join('') || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`}
-    ${archived.length ? `<details class="archive" ${archived.some(c => c.id === conversationId) ? 'open' : ''}><summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5.5 6.5 6.5L9 18.5"/></svg>${t('tabularius.archived')} · ${archived.length}</summary>${archived.map(conversationRow).join('')}</details>` : ''}`;
+  const body = (id: string, html: string) => folded.has(id) ? '' : `<div class="section-body">${html}</div>`;
+  return section('projects', t('tabularius.projects'), iconButton('plus', t('tabularius.newProject'), 'id="new-project"')) + body('projects', projectRows)
+    + section('recent', t('tabularius.recent')) + body('recent', loose.map(conversationRow).join('') || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`)
+    + (archived.length ? section('archived', t('tabularius.archived')) + body('archived', archived.map(conversationRow).join('')) : '');
 }
 function shell(content: string) {
   // A redraw of the same view (after saving a setting) keeps where the page was scrolled to.
@@ -190,6 +198,12 @@ function shell(content: string) {
   document.getElementById('new-project')?.addEventListener('click', () => void run(async () => { await newProject(); draw(); }));
   for (const item of app.querySelectorAll<HTMLButtonElement>('[data-proposal]')) item.addEventListener('click', () => void run(() => showProposal(item.dataset.proposal!)));
   for (const item of app.querySelectorAll<HTMLButtonElement>('.conversation')) item.addEventListener('click', () => void run(() => openConversation(item.dataset.id!)));
+  for (const item of app.querySelectorAll<HTMLButtonElement>('[data-section]')) item.addEventListener('click', () => {
+    const id = item.dataset.section!;
+    if (!folded.delete(id)) folded.add(id);
+    try { localStorage.setItem(SECTIONS_KEY, JSON.stringify([...folded])); } catch { /* storage unavailable: lasts for this page */ }
+    draw();
+  });
   for (const item of app.querySelectorAll<HTMLButtonElement>('[data-project]')) item.addEventListener('click', () => {
     const id = item.dataset.project!;
     if (!expanded.delete(id)) expanded.add(id);
@@ -618,8 +632,10 @@ function drawChat(current: VaultStatus) {
     ${current.indexError ? `<p class="notice error">${t('tabularius.indexError', { error: escape(current.indexError) })}</p>` : ''}
     ${entries.length ? `<section id="log" class="log" aria-live="polite">${entries.map(entry => entryHtml(entry)).join('')}</section><div class="chat-bottom">${composer}</div>`
     : `<div class="chat-start"><div class="chat-start-inner"><h2 class="chat-hello"><span class="brand-mark"><svg viewBox="0 0 64 64" aria-hidden="true">${markShapes()}</svg></span>Tabularius</h2>${composer}</div></div><div id="log" hidden></div>`}`);
+  // The whole chat pane scrolls (its scroll bar at the window's edge); the box stays at the bottom.
   const log = document.getElementById('log')!;
-  log.scrollTop = log.scrollHeight;
+  const pane = app.querySelector<HTMLElement>('.assist-main')!;
+  if (entries.length) pane.scrollTop = pane.scrollHeight;
   // Diagrams are drawn once an answer is complete; while it streams their source shows.
   if (!busy) void answers.renderDiagrams(log);
   document.getElementById('chat-recipe')?.addEventListener('change', event => void run(async () => { await saveChat({ recipe: (event.target as HTMLSelectElement).value }); draw(); }));
@@ -667,7 +683,7 @@ async function ask(text: string, attachments: AttachmentRef[]) {
   entries.push({ role: 'user', text, ...(attachments.length ? { attachments } : {}) }, answer);
   draw();
   const target = () => document.querySelector('#log .turn.assistant:last-child');
-  const update = () => { const node = target(); if (node) node.outerHTML = entryHtml(answer, busy); const log = document.getElementById('log'); if (log) log.scrollTop = log.scrollHeight; };
+  const update = () => { const node = target(); if (node) node.outerHTML = entryHtml(answer, busy); const pane = app.querySelector<HTMLElement>('.assist-main'); if (pane) pane.scrollTop = pane.scrollHeight; };
   update();
   try {
     const response = await fetch(conversationId ? `/api/v1/tabularius/conversations/${encodeURIComponent(conversationId)}/messages` : `/api/v1/tabularius/vaults/${encodeURIComponent(vaultId)}/conversations`, {

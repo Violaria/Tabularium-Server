@@ -1,7 +1,9 @@
 import { readFile, readdir } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
 
-const types: Record<string, string> = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
+// Fonts are KaTeX's, for formulas.
+const types: Record<string, string> = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.wasm': 'application/wasm', '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf' };
 
 function typeOf(file: string) {
   const type = types[file.slice(file.lastIndexOf('.'))];

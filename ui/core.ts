@@ -216,6 +216,12 @@ const ICONS: Record<string, string> = {
   back: '<path d="M15 5.5 8.5 12l6.5 6.5"/>',
   sidebar: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.5 4.5v15"/>',
   refresh: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4"/>',
+  eye: '<path d="M2.5 12C4.2 7.8 7.8 5 12 5s7.8 2.8 9.5 7c-1.7 4.2-5.3 7-9.5 7s-7.8-2.8-9.5-7z"/><circle cx="12" cy="12" r="3"/>',
+  code: '<path d="m8.5 8-4 4 4 4M15.5 8l4 4-4 4"/>',
+  live: '<path d="M4 7V5h16v2M12 5v14M9 19h6"/>',
+  columns: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M12 4.5v15"/>',
+  paperclip: '<path d="m20 11.5-7.8 7.8a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/>',
+  save: '<path d="M5 4.5h11l3.5 3.5V19a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V5a.5.5 0 0 1 .5-.5z"/><path d="M8 4.5v4h7v-4M8 19.5v-6h8v6"/>',
 };
 export const icon = (name: keyof typeof ICONS | string) =>
   `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] ?? ''}</svg>`;
@@ -224,7 +230,7 @@ export const iconButton = (name: string, label: string, extra = '', cls = '') =>
   `<button type="button" class="icon-button${cls ? ` ${cls}` : ''}" aria-label="${escape(label)}" title="${escape(label)}" ${extra}>${icon(name)}</button>`;
 
 /** An item of a floating menu: a label with an optional icon, a danger style, a check mark, or a separator ('-'). */
-export type MenuItem = '-' | { label: string; icon?: string; danger?: boolean; checked?: boolean; heading?: boolean; action?: () => void | Promise<void> };
+export type MenuItem = '-' | { label: string; icon?: string; svg?: string; danger?: boolean; checked?: boolean; heading?: boolean; action?: () => void | Promise<void> };
 let openMenu: { element: HTMLElement; anchor: HTMLElement; close: () => void } | undefined;
 /** Closes the open floating menu, if any. */
 export function closeMenu() { openMenu?.close(); }
@@ -247,7 +253,7 @@ export function popMenu(anchor: HTMLElement, items: MenuItem[]) {
     button.setAttribute('role', item.checked === undefined ? 'menuitem' : 'menuitemradio');
     if (item.checked !== undefined) button.setAttribute('aria-checked', String(item.checked));
     if (item.danger) button.className = 'danger';
-    button.innerHTML = `${item.icon ? icon(item.icon) : ''}<span>${escape(item.label)}</span>`;
+    button.innerHTML = `${item.svg ?? (item.icon ? icon(item.icon) : '')}<span>${escape(item.label)}</span>`;
     button.addEventListener('click', () => { closeMenu(); if (item.action) void run(async () => { await item.action!(); }); });
     menu.append(button);
   }

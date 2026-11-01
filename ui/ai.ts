@@ -37,8 +37,8 @@ export async function renderAiSettings(body: HTMLElement) {
   /** One added provider: its key (and vLLM address), a test, and the models chosen from its list. */
   const providerItem = (name: ProviderName) => {
     const item = view.providers[name];
-    const summary = [item.keySet ? t('ai.keySet', { hint: item.keyHint }) : name === 'vllm' ? escape(item.url) : '', t('ai.modelCount', { count: item.models.length })].filter(Boolean).join(' · ');
-    return `<details class="llm-recipe llm-provider" data-provider="${name}"${openProviders.has(name) ? ' open' : ''}><summary><strong>${NAMES[name]}</strong><span class="muted">${summary}</span></summary>
+    const summary = [item.keySet ? t('ai.keySet', { hint: item.keyHint }) : name === 'vllm' ? item.url : '', t('ai.modelCount', { count: item.models.length })].filter(Boolean).join(' · ');
+    return `<details class="llm-recipe llm-provider" data-provider="${name}"${openProviders.has(name) ? ' open' : ''}><summary title="${escape(summary)}"><strong>${NAMES[name]}</strong></summary>
       <form class="stack" data-key>
         <div class="recipe-fields">${name === 'vllm' ? `<label><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" value="${escape(item.url)}" placeholder="http://vllm:8000/v1"></label>` : ''}
           <label>${name === 'vllm' ? `<span>${t('ai.keyOptional')}${tip(t('ai.keyOptionalHint'))}</span>` : t('ai.key')}<input type="password" data-bwignore data-1p-ignore data-lpignore="true" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label></div>
@@ -74,8 +74,8 @@ export async function renderAiSettings(body: HTMLElement) {
   const recipeItem = (recipe: RecipeView, index: number) => {
     const available = models.some(model => model.id === recipe.model);
     const isDefault = recipe.id !== undefined && recipe.id === view.defaultRecipe;
-    return `<details class="llm-recipe" data-index="${index}"${!recipe.id || openRecipes.has(recipe.id) ? ' open' : ''}><summary><strong>${escape(recipe.name || t('ai.recipeNew'))}</strong>`
-      + `<span class="muted">${escape(available ? `${NAMES[models.find(model => model.id === recipe.model)!.provider]} · ${modelName(models, recipe.model)}` : recipe.model)}</span>${isDefault ? `<span class="badge">${t('ai.recipeDefault')}</span>` : ''}`
+    return `<details class="llm-recipe" data-index="${index}"${!recipe.id || openRecipes.has(recipe.id) ? ' open' : ''}><summary title="${escape(available ? `${NAMES[models.find(model => model.id === recipe.model)!.provider]} · ${modelName(models, recipe.model)}` : recipe.model)}"><strong>${escape(recipe.name || t('ai.recipeNew'))}</strong>`
+      + `${isDefault ? `<span class="badge">${t('ai.recipeDefault')}</span>` : ''}`
       + `${recipe.model && !available ? `<span class="badge warn">${t('ai.recipeUnavailable')}</span>` : ''}</summary>
       <form class="stack"><div class="recipe-fields">
         <label>${t('ai.recipeName')}<input name="name" required maxlength="60" value="${escape(recipe.name)}"></label>
