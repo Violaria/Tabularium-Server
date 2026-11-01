@@ -26,9 +26,28 @@ export function isPublicAddress(address: string): boolean {
   return !blocked.check(address, isIP(address) === 6 ? 'ipv6' : 'ipv4');
 }
 
-/** Which addresses a fetch may connect to: public only, public plus registered intranet hosts and networks, or any. */
+/** One spelling per address: IPv6 in URL-canonical form, IPv4-mapped IPv6 as the IPv4 address it carries. */
+function canonicalAddress(address: string) {
+  if (isIP(address) !== 6) return address;
+  const canonical = new URL(`http://[${address}]/`).hostname.slice(1, -1);
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonical);
+  if (!mapped) return canonical;
+  const [high, low] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
+  return [high >> 8, high & 255, low >> 8, low & 255].join('.');
+}
+
+/**
+ * Which addresses a fetch may connect to: public only, public plus registered intranet hosts and networks, or any; never
+ * the hosts registered as forbidden (an IP address compared with the address connected to, a name with the URL's host).
+ */
 export type AddressPolicy = (address: string, hostname: string) => boolean;
-export function addressPolicy(mode: 'read-only' | 'restricted' | 'full', intranet: string[]): AddressPolicy {
+export function addressPolicy(mode: 'read-only' | 'restricted' | 'full', intranet: string[], forbidden: string[] = []): AddressPolicy {
+  const forbiddenAddresses = new Set(forbidden.filter(entry => isIP(entry)).map(canonicalAddress));
+  const forbiddenNames = new Set(forbidden.filter(entry => !isIP(entry)).map(entry => entry.toLowerCase()));
+  const allowed = modePolicy(mode, intranet);
+  return (address, hostname) => !forbiddenAddresses.has(canonicalAddress(address)) && !forbiddenNames.has(hostname.toLowerCase()) && allowed(address, hostname);
+}
+function modePolicy(mode: 'read-only' | 'restricted' | 'full', intranet: string[]): AddressPolicy {
   if (mode === 'full') return () => true;
   if (mode === 'read-only') return address => isPublicAddress(address);
   const networks = new BlockList();

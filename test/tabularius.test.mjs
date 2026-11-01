@@ -198,6 +198,14 @@ test('web fetch addresses follow the permission mode', async () => {
   assert.equal(restricted('10.0.0.9', 'gitlab.lan'), true);
   assert.equal(restricted('10.0.0.9', 'other.lan'), false);
   assert.equal(addressPolicy('full', [])('127.0.0.1', 'localhost'), true);
+  // Hosts registered as forbidden are refused in every mode, by address in any spelling or by name.
+  for (const mode of ['read-only', 'restricted', 'full']) {
+    const policy = addressPolicy(mode, ['192.168.10.0/24', '198.18.0.0/15'], ['192.168.10.1', 'router.lan', 'fd00::1']);
+    for (const [address, host] of [['192.168.10.1', 'x'], ['::ffff:192.168.10.1', 'x'], ['::ffff:c0a8:a01', 'x'], ['198.18.0.7', 'ROUTER.lan'], ['fd00:0::1', 'x']]) assert.equal(policy(address, host), false, `${mode} ${address} ${host}`);
+    assert.equal(policy('93.184.216.34', 'example.com'), true, mode);
+  }
+  assert.equal(addressPolicy('restricted', ['192.168.10.0/24'], ['192.168.10.1'])('192.168.10.100', 'oblivaria'), true);
+  assert.equal(addressPolicy('full', [], ['192.168.10.1'])('10.0.0.9', 'x'), true);
   assert.equal(domainAllowed({ allowed: ['docs.vllm.ai'], blocked: [], maxUses: 1 }, 'https://docs.vllm.ai/en/latest'), true);
   assert.equal(domainAllowed({ allowed: ['docs.vllm.ai'], blocked: [], maxUses: 1 }, 'https://vllm.ai'), false);
   assert.equal(domainAllowed({ allowed: [], blocked: ['example.org'], maxUses: 1 }, 'https://a.example.org/x'), false);
