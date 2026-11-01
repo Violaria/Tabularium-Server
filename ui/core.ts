@@ -51,6 +51,26 @@ export function applyTheme(theme: string, recipe?: Recipe | null) {
 let saved: { theme: string; recipe: Recipe | null } = { theme: '', recipe: null };
 try { saved = JSON.parse(localStorage.getItem(THEME_KEY) ?? 'null') ?? saved; } catch { /* storage unavailable or an older plain value */ }
 applyTheme(saved.theme ?? '', saved.recipe);
+/**
+ * Password managers attach their autofill button to any focused text field, and leave it behind when the page redraws
+ * (the chat box moving down under a new answer). Only the sign-in and password fields are theirs: every other field
+ * says it is not one, as it appears.
+ */
+const CREDENTIAL = /\b(username|current-password|new-password|one-time-code)\b/;
+const FIELDS = 'input:not([type=checkbox]):not([type=radio]):not([type=file]):not([type=range]):not([type=color]):not([data-bwignore]), textarea:not([data-bwignore])';
+function markField(field: Element) {
+  if (CREDENTIAL.test(field.getAttribute('autocomplete') ?? '')) return;
+  field.setAttribute('data-bwignore', ''); field.setAttribute('data-1p-ignore', ''); field.setAttribute('data-lpignore', 'true');
+  if (!field.hasAttribute('autocomplete')) field.setAttribute('autocomplete', 'off');
+}
+/** Marks the fields in `root`, and `root` itself when it is one. */
+function noFill(root: Element | Document) {
+  if (root instanceof Element && root.matches(FIELDS)) markField(root);
+  for (const field of root.querySelectorAll(FIELDS)) markField(field);
+}
+new MutationObserver(records => { for (const record of records) for (const node of record.addedNodes) if (node instanceof Element) noFill(node); })
+  .observe(document.documentElement, { childList: true, subtree: true });
+noFill(document);
 /** The theme this browser last used, for starting without the server. */
 export const storedTheme = () => saved;
 let expired = () => {};
