@@ -107,14 +107,26 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), undefined);
     await page.reload(); await expect(page.getByRole('button', { name: /森林/ })).toHaveAttribute('aria-pressed', 'true');
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), undefined);
-    // A custom recipe: previewed while it is adjusted, kept after saving.
-    await page.getByRole('button', { name: /自定义/ }).click();
+    // Own schemes: a new one starts from the colours in use, is previewed while adjusted and kept after saving; a second
+    // one does not replace the first.
+    await page.getByRole('button', { name: '新建方案' }).click();
+    await page.getByLabel('名称').fill('蓝色');
     await page.getByLabel('主色').fill('#2a7fbf');
     await page.getByLabel('深色').check();
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'custom');
     await page.getByRole('button', { name: '保存配色方案' }).click();
     await expect(page.locator('.toasts .toast', { hasText: '已切换配色。' })).toBeVisible();
-    await page.reload(); await expect(page.getByRole('button', { name: /自定义/ })).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: '新建方案' }).click();
+    await expect(page.getByLabel('名称')).toHaveValue('方案 2');
+    await page.getByLabel('主色').fill('#2e8b57');
+    await page.getByRole('button', { name: '保存配色方案' }).click();
+    await expect(page.locator('.toasts .toast', { hasText: '已切换配色。' })).toBeVisible();
+    await page.getByRole('button', { name: '蓝色' }).click();
+    await expect(page.getByLabel('名称')).toHaveValue('蓝色');
+    await page.reload(); await expect(page.getByRole('button', { name: '蓝色' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: '方案 2' })).toHaveAttribute('aria-pressed', 'false');
+    // Each scheme kept its own colours: the second one's swatch is green, the first one's blue.
+    assert.equal(await page.getByRole('button', { name: '方案 2' }).locator('.swatches span').first().evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(46, 139, 87)');
     assert.deepEqual(await page.evaluate(() => [document.documentElement.dataset.theme, document.documentElement.dataset.side, getComputedStyle(document.documentElement).getPropertyValue('--recipe-accent').trim()]), ['custom', 'dark', '#2a7fbf']);
     await page.screenshot({ path: join(results, 'custom-theme.png') });
     await page.getByRole('button', { name: /薰衣草/ }).click();

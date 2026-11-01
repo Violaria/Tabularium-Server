@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { open, seal } from './client.js';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
-import { anthropic, openai, vllm, type Provider } from './providers.js';
+import { anthropic, deepseek, gemini, ollama, openai, vllm, type Provider } from './providers.js';
 import { checkParams, ParamsError, type Params, type ProviderName } from './params.js';
 import { DEFAULT_PROMPT } from './prompt.js';
 import { embedder as createEmbedder } from './providers.js';
@@ -15,12 +15,19 @@ import type { Embedder } from './search.js';
 import type { Mode } from './index.js';
 import { KNOWLEDGE_DEFAULTS, listDatasets, ragflow, type KnowledgeBase, type KnowledgeSettings } from './knowledge.js';
 
-export const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
+export const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'gemini', 'deepseek', 'vllm', 'ollama'];
+/** Providers on this network, reached at an address with an optional key; the others need a key. */
+const LOCAL: ProviderName[] = ['vllm', 'ollama'];
 /** A model offered here: the provider's identifier, its name for people, and (vLLM) its context length. */
 /** `vision`: whether the model reads images (the APIs do not say; the administrator marks it). */
 export interface ModelEntry { id: string; name: string; context?: number; vision?: boolean }
-/** Anthropic and OpenAI chat models read images; a local model is marked by the administrator. */
-const visionDefault = (name: ProviderName) => name !== 'vllm';
+/**
+ * Anthropic, OpenAI and Gemini chat models read images; DeepSeek and vLLM models are marked by the administrator; Ollama
+ * reports it per model (the model list carries it).
+ */
+const visionDefault = (name: ProviderName) => name === 'anthropic' || name === 'openai' || name === 'gemini';
+/** Ollama's context length when neither the recipe nor a smaller model limit sets one; Ollama advises 32k for tool use. */
+const OLLAMA_CONTEXT = 32_768;
 interface StoredProvider { key: string | null; hint: string; models: ModelEntry[]; url: string; context: number }
 type Stored = Record<ProviderName, StoredProvider>;
 export interface InitialSettings {
@@ -47,12 +54,13 @@ const blank = (): StoredProvider => ({ key: null, hint: '', models: [], url: '',
  * "GPT-6.1 Sol". Words starting with a digit, and o-series names such as "o3", keep their case.
  */
 export function displayName(provider: ProviderName, id: string) {
-  if (provider === 'vllm') return id;
+  if (LOCAL.includes(provider)) return id;
   const words = id.split('-');
   const out: string[] = [];
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
     if (word === 'gpt') out.push(/^\d/.test(words[i + 1] ?? '') ? `GPT-${words[++i]}` : 'GPT');
+    else if (word === 'deepseek') out.push('DeepSeek');
     else if (/^\d|^o\d/.test(word)) out.push(word);
     else out.push(word.charAt(0).toUpperCase() + word.slice(1));
   }
@@ -65,6 +73,37 @@ export function parseModel(id: string) {
   const at = id.indexOf('/');
   const provider = id.slice(0, at) as ProviderName;
   return at > 0 && PROVIDERS.includes(provider) ? { provider, model: id.slice(at + 1) } : undefined;
+}
+
+/** Gemini's models that generate content, with the names Google gives them. */
+async function geminiModels(key: string): Promise<ModelEntry[]> {
+  const base = (process.env.GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
+  const list: ModelEntry[] = [];
+  let page = '';
+  do {
+    const response = await fetch(`${base}/v1beta/models?pageSize=1000${page ? `&pageToken=${encodeURIComponent(page)}` : ''}`, { headers: { 'x-goog-api-key': key } });
+    const body = await response.json() as { models?: { name: string; displayName?: string; supportedGenerationMethods?: string[] }[]; nextPageToken?: string; error?: { message: string } };
+    if (!response.ok) throw new SettingsError(`Gemini ${response.status} ${body.error?.message ?? ''}`.trim());
+    for (const model of body.models ?? []) if (model.supportedGenerationMethods?.includes('generateContent'))
+      list.push({ id: model.name.replace(/^models\//, ''), name: model.displayName || model.name.replace(/^models\//, '') });
+    page = body.nextPageToken ?? '';
+  } while (page);
+  return list;
+}
+/** The models Ollama has, each with its context length and whether it reads images (from /api/show). */
+async function ollamaModels(url: string, key?: string): Promise<ModelEntry[]> {
+  const headers = { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) };
+  const ask = async <T>(path: string, body?: unknown): Promise<T> => {
+    const response = await fetch(`${url}${path}`, { method: body ? 'POST' : 'GET', headers, ...(body ? { body: JSON.stringify(body) } : {}) });
+    if (!response.ok) throw new SettingsError(`Ollama ${response.status} ${(await response.text()).slice(0, 300)}`.trim());
+    return await response.json() as T;
+  };
+  const { models } = await ask<{ models: { name: string }[] }>('/api/tags');
+  return Promise.all(models.map(async ({ name }) => {
+    const shown = await ask<{ model_info?: Record<string, unknown>; capabilities?: string[] }>('/api/show', { model: name });
+    const context = Object.entries(shown.model_info ?? {}).find(([field]) => field.endsWith('.context_length'))?.[1];
+    return { id: name, name, ...(typeof context === 'number' ? { context } : {}), vision: Boolean(shown.capabilities?.includes('vision')) };
+  }));
 }
 
 export function createSettings(db: DatabaseSync, secret: Buffer, initial: InitialSettings = {}) {
@@ -105,14 +144,15 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
   let knowledgeBase: KnowledgeBase | undefined;
   // Lists saved before models carried names hold plain identifiers.
   const stored = () => {
-    const all = read<Stored>('providers', { anthropic: blank(), openai: blank(), vllm: blank() });
+    // Providers added after the settings were saved start blank.
+    const all = { ...Object.fromEntries(PROVIDERS.map(name => [name, blank()])), ...read<Partial<Stored>>('providers', {}) } as Stored;
     for (const name of PROVIDERS) all[name].models = all[name].models.map(item => typeof item === 'string' ? { id: item, name: displayName(name, item) } : item)
       // Models chosen before image support was marked get the provider's default.
       .map(item => ({ ...item, vision: item.vision ?? visionDefault(name) }));
     return all;
   };
-  /** A provider is usable once it has a key (Anthropic, OpenAI) or an address (vLLM). */
-  const usable = (name: ProviderName, item: StoredProvider) => name === 'vllm' ? Boolean(item.url) : Boolean(item.key);
+  /** A provider is usable once it has a key, or an address for a local one. */
+  const usable = (name: ProviderName, item: StoredProvider) => LOCAL.includes(name) ? Boolean(item.url) : Boolean(item.key);
   function models() {
     const all = stored();
     return PROVIDERS.flatMap(name => usable(name, all[name]) ? all[name].models.map(model => ({ id: `${name}/${model.id}`, provider: name, model: model.id, name: model.name, vision: model.vision ?? visionDefault(name) })) : []);
@@ -177,8 +217,14 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
         const item = stored()[parsed.provider];
         const key = item.key ? open(secret, Buffer.from(item.key, 'base64')) : undefined;
         const context = item.models.find(model => model.id === parsed.model)?.context ?? item.context;
+        // Gemini's own search cannot keep to a domain list; with one configured it searches through SearXNG instead.
+        const web = read<WebSettings>('web', { enabled: false, searxng: '', allowed: [], blocked: [], maxUses: 5, intranet: [] });
         provider = parsed.provider === 'anthropic' ? anthropic(parsed.model, key)
-          : parsed.provider === 'openai' ? openai(parsed.model, key) : vllm(parsed.model, item.url, key, context);
+          : parsed.provider === 'openai' ? openai(parsed.model, key)
+          : parsed.provider === 'gemini' ? gemini(parsed.model, key!, !web.allowed.length && !web.blocked.length)
+          : parsed.provider === 'deepseek' ? deepseek(parsed.model, key!)
+          : parsed.provider === 'ollama' ? ollama(parsed.model, item.url, key, Math.min(item.models.find(model => model.id === parsed.model)?.context ?? OLLAMA_CONTEXT, OLLAMA_CONTEXT))
+          : vllm(parsed.model, item.url, key, context);
         cache.set(id, provider);
       }
       return provider;
@@ -230,7 +276,18 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
         for await (const model of new OpenAI({ apiKey: key }).models.list()) if (!NOT_CHAT.test(model.id)) list.push({ id: model.id, name: displayName(name, model.id) });
         return list.sort((a, b) => b.id.localeCompare(a.id));
       }
+      if (name === 'gemini') {
+        if (!key) throw new SettingsError('Save the key first');
+        return geminiModels(key);
+      }
+      if (name === 'deepseek') {
+        if (!key) throw new SettingsError('Save the key first');
+        const list: ModelEntry[] = [];
+        for await (const model of new OpenAI({ apiKey: key, baseURL: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com' }).models.list()) list.push({ id: model.id, name: displayName(name, model.id) });
+        return list;
+      }
       if (!item.url) throw new SettingsError('Save the address first');
+      if (name === 'ollama') return ollamaModels(item.url, key);
       const list: ModelEntry[] = [];
       for await (const model of new OpenAI({ apiKey: key || 'none', baseURL: item.url }).models.list()) {
         const context = (model as unknown as { max_model_len?: number }).max_model_len;

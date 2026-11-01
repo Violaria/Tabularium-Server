@@ -374,3 +374,103 @@ test('user masks run in linear time and RE2-incompatible ones are refused', asyn
   assert.throws(() => checkMasks('(?<=x)y'));
   assert.throws(() => checkMasks('x'.repeat(301)), /too long/);
 });
+
+test('Gemini, DeepSeek and Ollama: requests in their own formats, and what each must get back replayed', async () => {
+  const { createServer } = await import('node:http');
+  const { gemini, deepseek, ollama } = await import('../dist/tabularius/providers.js');
+  const requests = { gemini: [], deepseek: [], ollama: [] };
+  const sse = (res, chunks) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); for (const chunk of chunks) res.write(`data: ${JSON.stringify(chunk)}\n\n`); res.end(); };
+  const server = createServer(async (req, res) => {
+    let body = ''; for await (const piece of req) body += piece;
+    const json = body ? JSON.parse(body) : {};
+    if (req.url.startsWith('/v1beta/models/gemini-test:streamGenerateContent')) {
+      requests.gemini.push({ json, key: req.headers['x-goog-api-key'] });
+      return sse(res, requests.gemini.length === 1
+        ? [{ candidates: [{ content: { role: 'model', parts: [{ functionCall: { name: 'search_notes', args: { query: '紫藤' } }, thoughtSignature: 'sig-A' }] } }] }]
+        : [{ candidates: [{ content: { role: 'model', parts: [{ text: '端口是 ' }] } }] },
+          { candidates: [{ content: { role: 'model', parts: [{ text: '8443', thoughtSignature: 'sig-B' }] }, groundingMetadata: { webSearchQueries: ['紫藤 端口'], groundingChunks: [{ web: { uri: 'https://example.com/a', title: 'A' } }] } }] }]);
+    }
+    if (req.url === '/chat/completions') {
+      requests.deepseek.push(json);
+      const delta = d => ({ id: 'x', object: 'chat.completion.chunk', created: 0, model: 'deepseek-test', choices: [{ index: 0, delta: d, finish_reason: null }] });
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const chunks = requests.deepseek.length === 1
+        ? [delta({ reasoning_content: '先查' }), delta({ reasoning_content: '笔记' }), delta({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'search_notes', arguments: '{"query":' } }] }), delta({ tool_calls: [{ index: 0, function: { arguments: '"紫藤"}' } }] })]
+        : [delta({ reasoning_content: '有了' }), delta({ content: '8443' })];
+      for (const chunk of chunks) res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      res.end('data: [DONE]\n\n'); return;
+    }
+    if (req.url === '/api/chat') {
+      requests.ollama.push(json);
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+      const lines = requests.ollama.length === 1
+        ? [{ message: { role: 'assistant', content: '', thinking: '想一想' } }, { message: { role: 'assistant', content: '', tool_calls: [{ function: { name: 'search_notes', arguments: { query: '紫藤' } } }] } }, { done: true }]
+        : [{ message: { role: 'assistant', content: '8443' } }, { done: true }];
+      res.end(lines.map(line => JSON.stringify(line)).join('\n') + '\n'); return;
+    }
+    res.writeHead(404).end('{}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  process.env.GEMINI_BASE_URL = url; process.env.DEEPSEEK_BASE_URL = url;
+  const tools = [{ name: 'search_notes', description: 'search', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } }];
+  const question = { role: 'user', parts: [{ type: 'text', text: '紫藤的端口？' }, { type: 'image', mime: 'image/png', data: 'iVBORw0K' }] };
+  /** One tool round and the answer: the second request carries the first turn back. */
+  const loop = async provider => {
+    const first = await provider.turn('system', tools, [question], () => {}, { params: provider.name === 'ollama' ? { num_ctx: 65536, think: 'high' } : provider.name === 'deepseek' ? { thinking: true } : { thinking_level: 'low' } });
+    const call = first.parts.find(part => part.type === 'tool_call');
+    assert.equal(call.name, 'search_notes'); assert.deepEqual(call.input, { query: '紫藤' });
+    let text = '';
+    const second = await provider.turn('system', tools, [question, { role: 'assistant', parts: first.parts, native: first.native },
+      { role: 'user', parts: [{ type: 'tool_result', id: call.id, content: '紫藤：8443' }] }], piece => { text += piece; });
+    return { first, second, text };
+  };
+  try {
+    const g = await loop(gemini('gemini-test', 'g-key'));
+    assert.equal(requests.gemini[0].key, 'g-key');
+    assert.deepEqual(requests.gemini[0].json.contents[0].parts[1], { inlineData: { mimeType: 'image/png', data: 'iVBORw0K' } });
+    assert.deepEqual(requests.gemini[0].json.generationConfig, { thinkingConfig: { thinkingLevel: 'low' } });
+    const replayed = requests.gemini[1].json.contents;
+    assert.equal(replayed[1].role, 'model');
+    assert.equal(replayed[1].parts[0].thoughtSignature, 'sig-A', 'the signature goes back as it came');
+    assert.deepEqual(replayed[2].parts[0].functionResponse, { id: g.first.parts.find(p => p.type === 'tool_call').id, name: 'search_notes', response: { result: '紫藤：8443' } });
+    assert.equal(g.text, '端口是 8443');
+    assert.deepEqual(g.second.native.content, [{ text: '端口是 8443', thoughtSignature: 'sig-B' }], 'streamed text pieces become one part with the last signature');
+    assert.deepEqual(g.second.parts.filter(p => p.type !== 'text'), [{ type: 'web', name: 'web_search', input: { query: '紫藤 端口' } }, { type: 'source', url: 'https://example.com/a', title: 'A' }]);
+    // Another model gets the neutral parts, with the placeholder signature.
+    await gemini('gemini-test', 'g-key').turn('system', tools, [question, { role: 'assistant', parts: g.first.parts, native: { ...g.first.native, model: 'gemini-other' } }], () => {});
+    assert.equal(requests.gemini[2].json.contents[1].parts[0].thoughtSignature, 'skip_thought_signature_validator');
+    // A configured domain list turns Google Search off: the provider asks for the server's tools instead.
+    assert.equal(gemini('gemini-test', 'g-key', false).nativeWeb, false);
+
+    const d = await loop(deepseek('deepseek-test', 'd-key'));
+    assert.deepEqual(requests.deepseek[0].thinking, { type: 'enabled' });
+    // system, the question's text and picture, the assistant's tool call, the tool's result
+    assert.equal(requests.deepseek[1].messages[3].reasoning_content, '先查笔记', 'reasoning goes back on the tool-call turn');
+    assert.equal(requests.deepseek[1].messages[4].role, 'tool');
+    assert.equal(d.text, '8443');
+
+    const o = await loop(ollama('qwen-test', url, undefined, 8192));
+    assert.equal(requests.ollama[0].think, 'high');
+    assert.equal(requests.ollama[0].options.num_ctx, 65536, "the recipe's context length");
+    assert.deepEqual(requests.ollama[0].messages[2], { role: 'user', content: '', images: ['iVBORw0K'] });
+    assert.equal(requests.ollama[1].options.num_ctx, 8192, 'otherwise the given one, always sent');
+    assert.equal(requests.ollama[1].messages[3].thinking, '想一想');
+    assert.deepEqual(requests.ollama[1].messages[3].tool_calls, [{ function: { name: 'search_notes', arguments: { query: '紫藤' } } }]);
+    assert.deepEqual(requests.ollama[1].messages[4], { role: 'tool', content: '紫藤：8443', tool_name: 'search_notes' });
+    assert.equal(o.text, '8443');
+  } finally {
+    delete process.env.GEMINI_BASE_URL; delete process.env.DEEPSEEK_BASE_URL;
+    server.close();
+  }
+});
+
+test('parameters of the new providers are checked and become their request fields', async () => {
+  const { checkParams, deepseekBody, geminiConfig, ollamaRequest } = await import('../dist/tabularius/params.js');
+  assert.deepEqual(geminiConfig(checkParams('gemini', { temperature: 0.4, max_output_tokens: 2048, thinking_level: 'high' })), { temperature: 0.4, maxOutputTokens: 2048, thinkingConfig: { thinkingLevel: 'high' } });
+  assert.throws(() => checkParams('gemini', { min_p: 0.1 }), /not a parameter of gemini/);
+  assert.deepEqual(deepseekBody(checkParams('deepseek', { thinking: false, max_tokens: 1024 })), { max_tokens: 1024, thinking: { type: 'disabled' } });
+  assert.throws(() => checkParams('deepseek', { reasoning_effort: 'medium' }), /low, high, max/);
+  assert.deepEqual(ollamaRequest(checkParams('ollama', { think: 'off', num_ctx: 16384, repeat_penalty: 1.2 })), { think: false, options: { num_ctx: 16384, repeat_penalty: 1.2 } });
+  assert.throws(() => checkParams('ollama', { num_ctx: 100 }), /2048/);
+});

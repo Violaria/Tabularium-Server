@@ -32,7 +32,10 @@ const isEpub = (data: Buffer) => data.length > 58 && data.readUInt32LE(0) === 0x
   data.subarray(30, 38).toString() === 'mimetype' && data.subarray(38, 58).toString() === 'application/epub+zip';
 const forbidden = (id: unknown, reason: string) => ({ id, error: 'forbidden', reason });
 const publicUser = (u: User) => ({ id: u.id, username: u.username, role: u.role, disabled: Boolean(u.disabled), mustChangePassword: Boolean(u.must_change_password),
-  theme: u.theme ?? '', recipe: u.theme_recipe ? JSON.parse(u.theme_recipe) as unknown : null });
+  theme: u.theme ?? '', recipe: u.theme_recipe ? JSON.parse(u.theme_recipe) as unknown : null, customThemes: JSON.parse(u.custom_themes || '[]') as unknown[] });
+/** An account's own colour schemes: a name and a recipe each. */
+interface Scheme { id: string; name: string; accent: string; tint: number; side: 'light' | 'dark' }
+const SCHEMES_LIMIT = 20;
 /** Colour themes of the web pages; '' is the default, "custom" is built from the account's recipe. */
 const THEMES = ['', 'forest', 'sakura', 'lavender', 'custom'];
 /** A custom theme's recipe: main colour, tint strength (6 to 40 percent) and a light or dark sidebar. */
@@ -531,15 +534,50 @@ export async function createGateway(config: Config) {
     if (['/api/v1/sessions/current', '/api/v1/web-session'].includes(path) && method === 'DELETE') {
       db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hash); setSessionCookie(res, '', 0); json(res, 200, { ok: true }); return;
     }
+    // Colour schemes: a built-in theme, or one of the account's own schemes (the one in use is kept in theme_recipe).
+    const schemes = () => JSON.parse(user.custom_themes || '[]') as Scheme[];
+    const activeScheme = () => user.theme === 'custom' && user.theme_recipe ? (JSON.parse(user.theme_recipe) as Scheme).id : undefined;
+    const schemeName = (value: unknown) => {
+      const name = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+      if (!name || name.length > 40) fail(400, 'Invalid scheme name');
+      return name;
+    };
     if (path === '/api/v1/me/theme' && method === 'PUT') {
       const data = await body(req);
       const theme = field({ theme: '', ...data }, 'theme', 32, 0);
       if (!THEMES.includes(theme)) fail(400, 'Unknown theme');
-      // A custom theme needs its recipe; choosing another theme keeps the recipe for later.
-      const chosen = theme === 'custom' ? recipe(data.recipe) : undefined;
+      // A custom theme is one of the account's schemes; choosing another theme keeps them all.
+      const chosen = theme === 'custom' ? schemes().find(item => item.id === data.id) : undefined;
+      if (theme === 'custom' && !chosen) fail(404, 'Scheme not found');
       if (chosen) db.prepare('UPDATE users SET theme=?, theme_recipe=? WHERE id=?').run(theme, JSON.stringify(chosen), user.id);
       else db.prepare('UPDATE users SET theme=? WHERE id=?').run(theme || null, user.id);
       json(res, 200, { theme, recipe: chosen ?? null }); return;
+    }
+    if (path === '/api/v1/me/themes' && method === 'POST') {
+      const data = await body(req);
+      const list = schemes();
+      if (list.length >= SCHEMES_LIMIT) fail(409, 'Too many schemes');
+      const scheme: Scheme = { id: randomUUID(), name: schemeName(data.name), ...recipe(data) };
+      db.prepare('UPDATE users SET custom_themes=? WHERE id=?').run(JSON.stringify([...list, scheme]), user.id);
+      json(res, 201, scheme); return;
+    }
+    const schemePath = /^\/api\/v1\/me\/themes\/([\w-]{1,64})$/.exec(path);
+    if (schemePath && (method === 'PUT' || method === 'DELETE')) {
+      const list = schemes();
+      const index = list.findIndex(item => item.id === schemePath[1]);
+      if (index < 0) fail(404, 'Scheme not found');
+      const inUse = activeScheme() === schemePath[1];
+      if (method === 'DELETE') {
+        list.splice(index, 1);
+        // The scheme in use goes: the pages go back to the default theme.
+        db.prepare(`UPDATE users SET custom_themes=?${inUse ? ', theme=NULL, theme_recipe=NULL' : ''} WHERE id=?`).run(JSON.stringify(list), user.id);
+        json(res, 200, { ok: true }); return;
+      }
+      const data = await body(req);
+      const scheme: Scheme = { id: list[index].id, name: data.name === undefined ? list[index].name : schemeName(data.name), ...recipe(data) };
+      list[index] = scheme;
+      db.prepare(`UPDATE users SET custom_themes=?${inUse ? ', theme_recipe=?' : ''} WHERE id=?`).run(...[JSON.stringify(list), ...(inUse ? [JSON.stringify(scheme)] : []), user.id]);
+      json(res, 200, scheme); return;
     }
     if (path === '/api/v1/me/password' && method === 'PUT') {
       const data = await body(req);

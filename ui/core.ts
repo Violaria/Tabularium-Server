@@ -5,13 +5,19 @@ export { markShapes } from './mark.js';
 
 /** A colour scheme built from a few choices: the main colour, how strongly it tints the pages, and the sidebar. */
 export interface Recipe { accent: string; tint: number; side: 'light' | 'dark' }
-export interface User { id: string; username: string; role: 'admin' | 'user'; disabled: boolean; mustChangePassword: boolean; theme: string; recipe: Recipe | null }
+/** One of an account's own colour schemes: a named recipe. */
+export interface Scheme extends Recipe { id: string; name: string }
+export interface User { id: string; username: string; role: 'admin' | 'user'; disabled: boolean; mustChangePassword: boolean; theme: string; recipe: (Recipe & Partial<Scheme>) | null; customThemes: Scheme[] }
 export interface Session { user: User; csrf: string }
 
 export const state: { session?: Session } = {};
 
-/** Colour themes of the web pages; "custom" uses the account's own recipe. */
-export const THEMES = ['sakura', 'lavender', 'forest', 'custom'] as const;
+/** The built-in colour themes; "custom" is one of the account's own schemes, given by its recipe. */
+export const THEMES = ['sakura', 'lavender', 'forest'] as const;
+/** A recipe's colours as the style sheet mixes them: main colour, canvas (the sidebar's) and sheet, for swatches. */
+export const swatchColours = (value: Recipe) => [value.accent,
+  value.side === 'dark' ? `color-mix(in oklab, ${value.accent} 18%, #16131a)` : `color-mix(in oklab, ${value.accent} ${value.tint * 0.8}%, #f3f3f5)`,
+  `color-mix(in oklab, ${value.accent} ${value.tint * 0.28}%, #fcfcfd)`];
 /** Accounts that have not chosen a theme, and the sign-in page before anyone has signed in here, use this one. */
 export const DEFAULT_THEME = 'sakura';
 /** The recipes of the built-in tinted themes, also the starting point of a custom one. */
@@ -57,9 +63,17 @@ applyTheme(saved.theme ?? '', saved.recipe);
  * says it is not one, as it appears.
  */
 const CREDENTIAL = /\b(username|current-password|new-password|one-time-code)\b/;
-const FIELDS = 'input:not([type=checkbox]):not([type=radio]):not([type=file]):not([type=range]):not([type=color]):not([data-bwignore]), textarea:not([data-bwignore])';
+const FIELDS = 'input:not([type=checkbox]):not([type=radio]):not([type=file]):not([type=range]):not([type=color]):not([data-no-fill]), textarea:not([data-no-fill])';
+/**
+ * Hidden-text fields that are not account passwords (an E2EE passphrase, API keys, a share's password) are shown as
+ * dots by the style sheet instead of being password fields: password managers attach to every password field, whatever
+ * it says about itself. Browsers that cannot draw text as dots keep the password field.
+ */
+const MASKS = CSS.supports('-webkit-text-security', 'disc');
 function markField(field: Element) {
+  field.setAttribute('data-no-fill', '');
   if (CREDENTIAL.test(field.getAttribute('autocomplete') ?? '')) return;
+  if (MASKS && field instanceof HTMLInputElement && field.type === 'password') { field.type = 'text'; field.classList.add('masked'); field.spellcheck = false; field.autocapitalize = 'off'; }
   field.setAttribute('data-bwignore', ''); field.setAttribute('data-1p-ignore', ''); field.setAttribute('data-lpignore', 'true');
   if (!field.hasAttribute('autocomplete')) field.setAttribute('autocomplete', 'off');
 }

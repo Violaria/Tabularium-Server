@@ -37,7 +37,7 @@ for (const version of [1, 2]) {
     legacy.close();
     try {
       const upgraded = openStore(path);
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 18);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 19);
       assert.equal(upgraded.prepare('SELECT kindle_address FROM users').get().kindle_address, null);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM kindle_deliveries').get().n, 0);
       // Existing records are unchanged; devices gain an empty last synchronisation time (schema 11).
@@ -58,6 +58,8 @@ for (const version of [1, 2]) {
       // Projects and the archive (18).
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM tabularius_projects').get().n, 0);
       assert(upgraded.prepare("SELECT 1 FROM pragma_table_info('tabularius_conversations') WHERE name='archived_at'").get());
+      // Several colour schemes per account (19).
+      assert.equal(upgraded.prepare('SELECT custom_themes FROM users LIMIT 1').get().custom_themes, '[]');
       upgraded.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)').run(Date.now(), 'u', 'device.revoke', 'd');
       upgraded.close();
       const reopened = openStore(path);

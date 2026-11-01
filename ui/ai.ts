@@ -17,7 +17,12 @@ interface SettingsView {
   limits: { modeLimit: 'read-only' | 'restricted' | 'full'; sshTimeout: number; sandboxImages: string[]; attachmentMegabytes: number };
 }
 interface Overview { rules: Record<ProviderName, Record<string, Rule>> }
-const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'vllm'];
+const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'gemini', 'deepseek', 'vllm', 'ollama'];
+/** Local providers: reached at an address, with an optional key. */
+const LOCAL: ProviderName[] = ['vllm', 'ollama'];
+const ADDRESS: Partial<Record<ProviderName, string>> = { vllm: 'http://vllm:8000/v1', ollama: 'http://ollama:11434' };
+/** Models of these providers read images unless marked otherwise; Ollama says per model; the rest are marked here. */
+const SEES: ProviderName[] = ['anthropic', 'openai', 'gemini'];
 /** Recipes and providers open in the page: a redraw after saving keeps them open. */
 const openRecipes = new Set<string>();
 const openProviders = new Set<ProviderName>();
@@ -37,11 +42,11 @@ export async function renderAiSettings(body: HTMLElement) {
   /** One added provider: its key (and vLLM address), a test, and the models chosen from its list. */
   const providerItem = (name: ProviderName) => {
     const item = view.providers[name];
-    const summary = [item.keySet ? t('ai.keySet', { hint: item.keyHint }) : name === 'vllm' ? item.url : '', t('ai.modelCount', { count: item.models.length })].filter(Boolean).join(' · ');
+    const summary = [item.keySet ? t('ai.keySet', { hint: item.keyHint }) : LOCAL.includes(name) ? item.url : '', t('ai.modelCount', { count: item.models.length })].filter(Boolean).join(' · ');
     return `<details class="llm-recipe llm-provider" data-provider="${name}"${openProviders.has(name) ? ' open' : ''}><summary title="${escape(summary)}"><strong>${NAMES[name]}</strong></summary>
       <form class="stack" data-key>
-        <div class="recipe-fields">${name === 'vllm' ? `<label><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" value="${escape(item.url)}" placeholder="http://vllm:8000/v1"></label>` : ''}
-          <label>${name === 'vllm' ? `<span>${t('ai.keyOptional')}${tip(t('ai.keyOptionalHint'))}</span>` : t('ai.key')}<input type="password" data-bwignore data-1p-ignore data-lpignore="true" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label></div>
+        <div class="recipe-fields">${LOCAL.includes(name) ? `<label><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" value="${escape(item.url)}" placeholder="${ADDRESS[name]}"></label>` : ''}
+          <label>${LOCAL.includes(name) ? `<span>${t('ai.keyOptional')}${tip(t('ai.keyOptionalHint'))}</span>` : t('ai.key')}<input type="password" data-bwignore data-1p-ignore data-lpignore="true" name="key" autocomplete="off" placeholder="${item.keySet ? escape(t('ai.keySet', { hint: item.keyHint })) : ''}"></label></div>
         <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" data-test-provider>${t('ai.testConnection')}</button><span class="test-status" aria-live="polite"></span>
           <span class="actions-end">${item.keySet ? `<button type="button" data-clear-key>${t('ai.clearKey')}</button>` : ''}<button type="button" class="danger" data-remove-provider>${t('ai.removeProvider')}</button></span></div>
       </form>
@@ -56,14 +61,14 @@ export async function renderAiSettings(body: HTMLElement) {
    */
   const modelRows = (name: ProviderName, offered: ModelEntry[], chosen: ModelEntry[]) => offered.map(model => {
     const picked = chosen.find(item => item.id === model.id);
-    const vision = picked?.vision ?? name !== 'vllm';
+    const vision = picked?.vision ?? model.vision ?? SEES.includes(name);
     return `<div class="model-row" data-model="${escape(model.id)}"><label class="check"><input type="checkbox" name="model" value="${escape(model.id)}" data-name="${escape(model.name)}"${model.context ? ` data-context="${model.context}"` : ''} ${picked ? 'checked' : ''}> <span>${escape(model.name)}${model.name !== model.id ? ` <small class="mono">${escape(model.id)}</small>` : ''}</span></label><label class="check model-vision"><input type="checkbox" name="vision" ${vision ? 'checked' : ''}> <small>${t('ai.vision')}</small></label><span class="model-test" aria-live="polite"></span></div>`;
   }).join('');
   /** The form for adding a provider: its type (the ones not added yet), then key and address. */
   const newProvider = (available: ProviderName[]) => `<details class="llm-recipe llm-provider" data-new open><summary><strong>${t('ai.newProvider')}</strong></summary>
     <form class="stack" data-add><div class="recipe-fields">
       <label>${t('ai.providerType')}<select name="type">${available.map(name => `<option value="${name}">${NAMES[name]}</option>`).join('')}</select></label>
-      <label data-for="vllm" ${available[0] === 'vllm' ? '' : 'hidden'}><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" placeholder="http://vllm:8000/v1"></label>
+      <label data-for="local" ${LOCAL.includes(available[0]) ? '' : 'hidden'}><span>${t('ai.url')}${tip(t('ai.urlHint'))}</span><input name="url" placeholder="${ADDRESS[available[0]] ?? ''}"></label>
       <label><span>${t('ai.key')}</span><input type="password" data-bwignore data-1p-ignore data-lpignore="true" name="key" autocomplete="off"></label></div>
       <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" data-cancel>${t('ai.recipeCancel')}</button></div></form></details>`;
   const datasetList = (datasets: { id: string; name: string; description: string }[], chosen: string[]) => datasets.map(item =>
@@ -202,7 +207,7 @@ export async function renderAiSettings(body: HTMLElement) {
       const item: Record<string, unknown> = {};
       const key = String(data.get('key') ?? '').trim();
       if (key) item.key = key;
-      if (name === 'vllm') item.url = String(data.get('url')).trim();
+      if (LOCAL.includes(name)) item.url = String(data.get('url')).trim();
       void run(() => providerSave(name, item));
     });
     // A test reads the provider's model list with the saved key: it shows, beside the button, whether the key and address work.
@@ -272,7 +277,11 @@ export async function renderAiSettings(body: HTMLElement) {
     const fresh = list.querySelector<HTMLDetailsElement>('details[data-new]')!;
     const addForm = fresh.querySelector<HTMLFormElement>('form[data-add]')!;
     const type = addForm.querySelector<HTMLSelectElement>('select[name="type"]')!;
-    type.addEventListener('change', () => { addForm.querySelector<HTMLElement>('[data-for="vllm"]')!.hidden = type.value !== 'vllm'; });
+    type.addEventListener('change', () => {
+      const address = addForm.querySelector<HTMLElement>('[data-for="local"]')!;
+      address.hidden = !LOCAL.includes(type.value as ProviderName);
+      address.querySelector('input')!.placeholder = ADDRESS[type.value as ProviderName] ?? '';
+    });
     fresh.querySelector('[data-cancel]')!.addEventListener('click', () => void renderAiSettings(body));
     addForm.addEventListener('submit', event => {
       event.preventDefault();
@@ -280,8 +289,9 @@ export async function renderAiSettings(body: HTMLElement) {
       const name = type.value as ProviderName;
       const key = String(data.get('key') ?? '').trim();
       const url = String(data.get('url') ?? '').trim();
-      if (name === 'vllm' ? !url : !key) { message(name === 'vllm' ? t('ai.urlRequired') : t('ai.keyRequired'), true); return; }
-      void run(() => providerSave(name, { ...(key ? { key } : {}), ...(name === 'vllm' ? { url } : {}) }));
+      const local = LOCAL.includes(name);
+      if (local ? !url : !key) { message(local ? t('ai.urlRequired') : t('ai.keyRequired'), true); return; }
+      void run(() => providerSave(name, { ...(key ? { key } : {}), ...(local ? { url } : {}) }));
     });
   });
   const promptForm = document.getElementById('server-prompt') as HTMLFormElement;

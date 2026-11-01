@@ -1,7 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { randomUUID } from 'node:crypto';
 import type { Embedder } from './search.js';
-import { vllmBody, type Params } from './params.js';
+import { deepseekBody, geminiConfig, ollamaRequest, vllmBody, type Params, type ProviderName } from './params.js';
 import type { WebOptions } from './web.js';
 
 // Conversations are stored in a small neutral form so they survive a change of provider. An assistant turn also keeps the
@@ -22,7 +23,7 @@ export interface Tool { name: string; description: string; parameters: { type: '
 /** `paused`: the provider paused a long server-side turn; send it back unchanged to continue. */
 export interface Turn { parts: Part[]; native: { provider: string; model?: string; content: unknown }; paused?: boolean }
 export interface Provider {
-  name: 'anthropic' | 'openai' | 'vllm'; model: string;
+  name: ProviderName; model: string;
   /** Whether the provider searches the web itself; the others get client-side search tools. */
   nativeWeb: boolean;
   turn(system: string, tools: Tool[], messages: Message[], onText: (text: string) => void, options?: TurnOptions): Promise<Turn>;
@@ -255,6 +256,264 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
         parts.push({ type: 'tool_call', id: call.id, name: call.name, input });
       }
       return { parts, native: { provider: 'vllm', model, content: { reasoning } } };
+    },
+  };
+}
+
+/** A tool call's arguments as an object; text that is not JSON is kept for the model to see. */
+function argumentsOf(text: string): Record<string, unknown> {
+  try { return JSON.parse(text || '{}'); } catch { return { invalid: text }; }
+}
+/** The names of the tools called, by call ID, for providers whose tool results carry the name. */
+function callNames(messages: Message[]) {
+  const names = new Map<string, string>();
+  for (const message of messages) for (const part of message.parts) if (part.type === 'tool_call') names.set(part.id, part.name);
+  return names;
+}
+
+/**
+ * Gemini API (generateContent over REST, streamed as server-sent events). A model turn's parts are stored as given and
+ * replayed to the same model: function calls carry a thoughtSignature that Gemini 3 and later require back in the same
+ * turn. After a switch of model the neutral parts are sent, function calls with the placeholder signature the API
+ * accepts for calls it did not make. Tool results go back together in one user turn as functionResponse parts. Web
+ * search is Gemini's own Google Search, unless `nativeSearch` is off (a domain list is configured, which Google Search
+ * cannot apply): then the server's SearXNG tools are offered instead. The base address can be replaced with
+ * GEMINI_BASE_URL.
+ */
+export function gemini(model: string, apiKey: string, nativeSearch = true): Provider {
+  const base = (process.env.GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
+  interface GeminiPart { text?: string; thought?: boolean; thoughtSignature?: string; inlineData?: { mimeType: string; data: string };
+    functionCall?: { id?: string; name: string; args?: Record<string, unknown> }; functionResponse?: { id?: string; name: string; response: Record<string, unknown> } }
+  interface Content { role: 'user' | 'model'; parts: GeminiPart[] }
+  const toContents = (messages: Message[]): Content[] => {
+    const names = callNames(messages);
+    const contents: Content[] = [];
+    for (const message of messages) {
+      if (message.role === 'assistant') {
+        if (own(message, 'gemini', model)) { contents.push({ role: 'model', parts: message.native!.content as GeminiPart[] }); continue; }
+        const parts: GeminiPart[] = message.parts.flatMap((part): GeminiPart[] => part.type === 'text' ? [{ text: part.text }]
+          : part.type === 'tool_call' ? [{ functionCall: { id: part.id, name: part.name, args: part.input }, thoughtSignature: 'skip_thought_signature_validator' }] : []);
+        if (parts.length) contents.push({ role: 'model', parts });
+        continue;
+      }
+      const parts: GeminiPart[] = message.parts.flatMap((part): GeminiPart[] => part.type === 'text' ? [{ text: part.text }]
+        : part.type === 'image' ? [{ inlineData: { mimeType: part.mime, data: part.data } }]
+        : part.type === 'tool_result' ? [{ functionResponse: { id: part.id, name: names.get(part.id) ?? 'tool', response: { result: part.content } } }] : []);
+      if (parts.length) contents.push({ role: 'user', parts });
+    }
+    return contents;
+  };
+  return {
+    name: 'gemini', model, nativeWeb: nativeSearch,
+    async turn(system, tools, messages, onText, { web, params = {}, answerOnly = false } = {}) {
+      const stored: GeminiPart[] = [];
+      const queries: string[] = [];
+      const cited: { url: string; title?: string | null }[] = [];
+      try {
+        const response = await fetch(`${base}/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: system }] },
+            contents: toContents(messages),
+            tools: [...(tools.length ? [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })) }] : []),
+              ...(web ? [{ googleSearch: {} }] : [])],
+            ...(tools.length && answerOnly ? { toolConfig: { functionCallingConfig: { mode: 'NONE' } } } : {}),
+            generationConfig: geminiConfig(params),
+          }),
+        });
+        if (!response.ok) {
+          const body = await response.text();
+          let detail = body.slice(0, 500);
+          try { detail = (JSON.parse(body) as { error?: { message?: string } }).error?.message ?? detail; } catch { /* the body as it came */ }
+          throw new ProviderError(`Gemini ${response.status} ${detail}`.trim());
+        }
+        const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
+        let buffer = '';
+        const take = (data: string) => {
+          const chunk = JSON.parse(data) as { candidates?: { content?: { parts?: GeminiPart[] }; groundingMetadata?: { webSearchQueries?: string[]; groundingChunks?: { web?: { uri: string; title?: string } }[] } }[]; error?: { message: string } };
+          if (chunk.error) throw new ProviderError(`Gemini: ${chunk.error.message}`);
+          const candidate = chunk.candidates?.[0];
+          for (const part of candidate?.content?.parts ?? []) {
+            if (part.text !== undefined && !part.thought) {
+              if (part.text) onText(part.text);
+              // Adjacent text arrives in pieces; one part keeps the text and the signature that came last.
+              const last = stored.at(-1);
+              if (last && last.text !== undefined && !last.thought && !last.functionCall) {
+                last.text += part.text;
+                if (part.thoughtSignature) last.thoughtSignature = part.thoughtSignature;
+                continue;
+              }
+            }
+            stored.push({ ...part });
+          }
+          for (const query of candidate?.groundingMetadata?.webSearchQueries ?? []) if (!queries.includes(query)) queries.push(query);
+          for (const item of candidate?.groundingMetadata?.groundingChunks ?? []) if (item.web?.uri) cited.push({ url: item.web.uri, title: item.web.title });
+        };
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += value;
+          let end;
+          while ((end = buffer.indexOf('\n\n')) >= 0) {
+            const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+            const data = block.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('');
+            if (data) take(data);
+          }
+        }
+        if (buffer.trim().startsWith('data:')) take(buffer.trim().slice(5).trim());
+      } catch (error) {
+        if (error instanceof ProviderError) throw error;
+        throw new ProviderError(`Gemini: ${(error as Error).message}`);
+      }
+      const parts: Part[] = [...queries.map((query): Part => ({ type: 'web', name: 'web_search', input: { query } }))];
+      const text = stored.flatMap(part => part.text !== undefined && !part.thought ? [part.text] : []).join('');
+      if (text) parts.push({ type: 'text', text });
+      for (const part of stored) if (part.functionCall)
+        parts.push({ type: 'tool_call', id: part.functionCall.id ?? `call_${randomUUID()}`, name: part.functionCall.name, input: part.functionCall.args ?? {} });
+      // Calls without an ID get one here, kept in the stored parts so the replay and the results match.
+      let index = 0;
+      const calls = parts.filter(part => part.type === 'tool_call');
+      for (const part of stored) if (part.functionCall) part.functionCall.id = calls[index++].id;
+      return { parts: [...parts, ...sources(cited)], native: { provider: 'gemini', model, content: stored } };
+    },
+  };
+}
+
+/**
+ * DeepSeek's Chat Completions (with the OpenAI SDK, as DeepSeek documents). Thinking models return `reasoning_content`
+ * beside the answer; a request with tools must carry it back for every earlier turn (it is ignored otherwise), so it is
+ * stored and replayed to the same model. Web search goes through SearXNG. DEEPSEEK_BASE_URL replaces the address.
+ */
+export function deepseek(model: string, apiKey: string): Provider {
+  const client = new OpenAI({ apiKey, baseURL: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com' });
+  type Assistant = OpenAI.Chat.ChatCompletionAssistantMessageParam & { reasoning_content?: string };
+  const toMessages = (message: Message): OpenAI.Chat.ChatCompletionMessageParam[] => {
+    if (message.role === 'assistant') {
+      const text = message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
+      const calls = message.parts.flatMap(part => part.type === 'tool_call'
+        ? [{ id: part.id, type: 'function' as const, function: { name: part.name, arguments: JSON.stringify(part.input) } }] : []);
+      const reasoning = own(message, 'deepseek', model) ? (message.native!.content as { reasoning?: string }).reasoning : undefined;
+      if (!text && !calls.length) return [];
+      const assistant: Assistant = { role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}), ...(reasoning ? { reasoning_content: reasoning } : {}) };
+      return [assistant];
+    }
+    return message.parts.flatMap((part): OpenAI.Chat.ChatCompletionMessageParam[] => part.type === 'tool_result'
+      ? [{ role: 'tool', tool_call_id: part.id, content: part.content }]
+      : part.type === 'text' ? [{ role: 'user', content: part.text }]
+        : part.type === 'image' ? [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:${part.mime};base64,${part.data}` } }] }] : []);
+  };
+  return {
+    name: 'deepseek', model, nativeWeb: false,
+    async turn(system, tools, messages, onText, { params = {}, answerOnly = false } = {}) {
+      const calls: { id: string; name: string; arguments: string }[] = [];
+      let text = ''; let reasoning = '';
+      try {
+        const stream = await client.chat.completions.create({
+          ...deepseekBody(params),
+          model, stream: true,
+          messages: [{ role: 'system', content: system }, ...messages.flatMap(toMessages)],
+          ...(tools.length ? {
+            tools: tools.map(tool => ({ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
+            ...(answerOnly ? { tool_choice: 'none' as const } : {}),
+          } : {}),
+        } as OpenAI.Chat.ChatCompletionCreateParamsStreaming);
+        for await (const chunk of stream) {
+          const delta = chunk.choices[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string }) | undefined;
+          if (delta?.reasoning_content) reasoning += delta.reasoning_content;
+          if (delta?.content) { text += delta.content; onText(delta.content); }
+          for (const call of delta?.tool_calls ?? []) {
+            const entry = calls[call.index] ??= { id: '', name: '', arguments: '' };
+            entry.id ||= call.id ?? '';
+            entry.name += call.function?.name ?? '';
+            entry.arguments += call.function?.arguments ?? '';
+          }
+        }
+      } catch (error) {
+        if (error instanceof OpenAI.APIError) throw new ProviderError(`DeepSeek ${error.status ?? ''} ${error.message}`.trim());
+        throw new ProviderError(`DeepSeek: ${(error as Error).message}`);
+      }
+      const parts: Part[] = text ? [{ type: 'text', text }] : [];
+      for (const call of calls) parts.push({ type: 'tool_call', id: call.id, name: call.name, input: argumentsOf(call.arguments) });
+      return { parts, native: { provider: 'deepseek', model, content: { reasoning } } };
+    },
+  };
+}
+
+/**
+ * Ollama's own chat API (/api/chat, streamed as JSON lines), for local models. Its OpenAI-compatible endpoint cannot set
+ * the context length, and Ollama cuts an overlong prompt from the start, losing the system prompt; so every request sends
+ * `num_ctx` (the recipe's, else `contextTokens`) and older turns are left out to fit it. Thinking (`message.thinking`) is
+ * stored and replayed to the same model; tool results carry the tool's name; images go in the message's `images`.
+ */
+export function ollama(model: string, baseURL: string, apiKey?: string, contextTokens = 32_768): Provider {
+  const base = baseURL.replace(/\/$/, '');
+  interface OllamaMessage { role: 'system' | 'user' | 'assistant' | 'tool'; content: string; thinking?: string; images?: string[];
+    tool_calls?: { function: { name: string; arguments: Record<string, unknown> } }[]; tool_name?: string }
+  const toMessages = (message: Message, names: Map<string, string>): OllamaMessage[] => {
+    if (message.role === 'assistant') {
+      const text = message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
+      const calls = message.parts.flatMap(part => part.type === 'tool_call' ? [{ function: { name: part.name, arguments: part.input } }] : []);
+      const thinking = own(message, 'ollama', model) ? (message.native!.content as { thinking?: string }).thinking : undefined;
+      if (!text && !calls.length) return [];
+      return [{ role: 'assistant', content: text, ...(calls.length ? { tool_calls: calls } : {}), ...(thinking ? { thinking } : {}) }];
+    }
+    return message.parts.flatMap((part): OllamaMessage[] => part.type === 'tool_result' ? [{ role: 'tool', content: part.content, tool_name: names.get(part.id) ?? 'tool' }]
+      : part.type === 'text' ? [{ role: 'user', content: part.text }]
+        : part.type === 'image' ? [{ role: 'user', content: '', images: [part.data] }] : []);
+  };
+  return {
+    name: 'ollama', model, nativeWeb: false,
+    async turn(system, tools, messages, onText, { params = {}, answerOnly = false } = {}) {
+      const { think, options } = ollamaRequest(params) as { think?: boolean | string; options: Record<string, unknown> };
+      const context = (options.num_ctx as number | undefined) ?? contextTokens;
+      const kept = fit(messages, context - estimate(system) - estimate(JSON.stringify(tools)) - ((options.num_predict as number) > 0 ? options.num_predict as number : 0));
+      const names = callNames(kept);
+      const calls: { name: string; arguments: Record<string, unknown> }[] = [];
+      let text = ''; let thinking = '';
+      try {
+        const response = await fetch(`${base}/api/chat`, {
+          method: 'POST', headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
+          body: JSON.stringify({
+            model, stream: true, ...(think === undefined ? {} : { think }), options: { ...options, num_ctx: context },
+            messages: [{ role: 'system', content: system }, ...kept.flatMap(message => toMessages(message, names)),
+              // Ollama has no tool_choice: the last round goes without tools and with the instruction to answer.
+              ...(answerOnly ? [{ role: 'user', content: ANSWER_NOW }] : [])],
+            ...(tools.length && !answerOnly ? { tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) } : {}),
+          }),
+        });
+        if (!response.ok) {
+          const body = await response.text();
+          let detail = body.slice(0, 500);
+          try { detail = (JSON.parse(body) as { error?: string }).error ?? detail; } catch { /* the body as it came */ }
+          throw new ProviderError(`Ollama ${response.status} ${detail}`.trim());
+        }
+        const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
+        let buffer = '';
+        const take = (line: string) => {
+          const chunk = JSON.parse(line) as { message?: OllamaMessage; error?: string };
+          if (chunk.error) throw new ProviderError(`Ollama: ${chunk.error}`);
+          if (chunk.message?.thinking) thinking += chunk.message.thinking;
+          if (chunk.message?.content) { text += chunk.message.content; onText(chunk.message.content); }
+          for (const call of chunk.message?.tool_calls ?? []) calls.push({ name: call.function.name, arguments: call.function.arguments ?? {} });
+        };
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += value;
+          let end;
+          while ((end = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, end).trim(); buffer = buffer.slice(end + 1);
+            if (line) take(line);
+          }
+        }
+        if (buffer.trim()) take(buffer.trim());
+      } catch (error) {
+        if (error instanceof ProviderError) throw error;
+        throw new ProviderError(`Ollama: ${(error as Error).message}`);
+      }
+      const parts: Part[] = text ? [{ type: 'text', text }] : [];
+      for (const call of calls) parts.push({ type: 'tool_call', id: `call_${randomUUID()}`, name: call.name, input: call.arguments });
+      return { parts, native: { provider: 'ollama', model, content: { thinking } } };
     },
   };
 }

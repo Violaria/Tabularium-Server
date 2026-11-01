@@ -150,7 +150,7 @@ function offlineSession() {
   let last: { id: string; username: string } | null = null;
   try { last = JSON.parse(localStorage.getItem('tabularium-notes:last-user') ?? 'null'); } catch { /* no record */ }
   if (!last) return undefined;
-  return { user: { ...last, role: 'user' as const, disabled: false, mustChangePassword: false, ...storedTheme() }, csrf: '' };
+  return { user: { ...last, role: 'user' as const, disabled: false, mustChangePassword: false, customThemes: [], ...storedTheme() }, csrf: '' };
 }
 void (async () => {
   try { state.session = await api<Session>('/web-session'); }

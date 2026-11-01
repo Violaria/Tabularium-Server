@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomBytes, createHash, scrypt, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, createHash, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const derive = promisify(scrypt);
@@ -21,7 +21,7 @@ export function same(given: unknown, expected: string) {
   const b = createHash('sha256').update(expected).digest();
   return timingSafeEqual(a, b);
 }
-export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number; kindle_address: string | null; theme: string | null; theme_recipe: string | null }
+export interface User { id: string; username: string; password_hash: string; role: string; disabled: number; must_change_password: number; kindle_address: string | null; theme: string | null; theme_recipe: string | null; custom_themes: string }
 export interface Vault {
   id: string; owner_id: string; name: string; database_name: string; state: string;
   rebuild_device: string | null; rebuild_until: number | null; rebuild_started: number | null;
@@ -344,6 +344,18 @@ export function openStore(path: string) {
   `);
     version = 18;
   }
-  if (version !== 18) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 18) {
+    // Several custom colour schemes per account. The one in use stays in theme/theme_recipe; an account's former single
+    // custom recipe becomes its first scheme, named after the theme it was.
+    db.exec('BEGIN');
+    db.exec("ALTER TABLE users ADD COLUMN custom_themes TEXT NOT NULL DEFAULT '[]'");
+    for (const row of db.prepare('SELECT id, theme_recipe FROM users WHERE theme_recipe IS NOT NULL').all() as { id: string; theme_recipe: string }[]) {
+      const scheme = { id: randomUUID(), name: '自定义', ...JSON.parse(row.theme_recipe) as object };
+      db.prepare('UPDATE users SET custom_themes=?, theme_recipe=? WHERE id=?').run(JSON.stringify([scheme]), JSON.stringify(scheme), row.id);
+    }
+    db.exec('PRAGMA user_version=19; COMMIT');
+    version = 19;
+  }
+  if (version !== 19) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

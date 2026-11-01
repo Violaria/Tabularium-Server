@@ -3,9 +3,11 @@
 // the control, with stop sequences. OpenAI's Responses API takes effort, a reasoning summary, verbosity, the service tier
 // and truncation (presence and frequency penalties, seed, stop and logit bias exist only in Chat Completions). vLLM takes
 // the usual sampling parameters, a thinking switch for the model's chat template, its own extensions, and further fields
-// of its own (custom parameters).
+// of its own (custom parameters). Gemini takes sampling, a stop list, a seed and a thinking level (generationConfig);
+// DeepSeek a thinking switch and effort with the Chat Completions sampling fields; Ollama a thinking switch or level, its
+// context length (num_ctx) and its sampling options.
 export type Params = Record<string, unknown>;
-export type ProviderName = 'anthropic' | 'openai' | 'vllm';
+export type ProviderName = 'anthropic' | 'openai' | 'gemini' | 'deepseek' | 'vllm' | 'ollama';
 export type Rule =
   | { kind: 'number'; min: number; max: number; step: number; integer?: boolean; initial: number }
   | { kind: 'enum'; values: string[]; initial: string }
@@ -28,6 +30,16 @@ export const PARAMS: Record<ProviderName, Record<string, Rule>> = {
     max_output_tokens: number(256, 128_000, 256, 16_000, true), temperature: number(0, 2, 0.05, 1), top_p: number(0, 1, 0.05, 1),
     service_tier: choice('auto', 'auto', 'default', 'flex', 'priority'), truncation: choice('auto', 'auto', 'disabled'),
   },
+  gemini: {
+    temperature: number(0, 2, 0.05, 1), top_p: number(0, 1, 0.05, 0.95), top_k: number(1, 500, 1, 64, true),
+    max_output_tokens: number(256, 65_536, 256, 8192, true), stop_sequences: { kind: 'list', initial: [] }, seed: number(0, 2 ** 31 - 1, 1, 0, true),
+    thinking_level: choice('high', 'minimal', 'low', 'medium', 'high'),
+  },
+  deepseek: {
+    thinking: { kind: 'boolean', initial: true }, reasoning_effort: choice('high', 'low', 'high', 'max'), max_tokens: number(256, 65_536, 256, 8192, true),
+    temperature: number(0, 2, 0.05, 1), top_p: number(0, 1, 0.05, 1), presence_penalty: number(-2, 2, 0.05, 0), frequency_penalty: number(-2, 2, 0.05, 0),
+    stop: { kind: 'list', initial: [] },
+  },
   vllm: {
     temperature: number(0, 2, 0.05, 0.7), top_p: number(0, 1, 0.05, 0.8), top_k: number(-1, 200, 1, 20, true), min_p: number(0, 1, 0.01, 0),
     presence_penalty: number(-2, 2, 0.05, 0), frequency_penalty: number(-2, 2, 0.05, 0), repetition_penalty: number(0.5, 2, 0.01, 1),
@@ -36,6 +48,12 @@ export const PARAMS: Record<ProviderName, Record<string, Rule>> = {
     reasoning_effort: choice('medium', 'low', 'medium', 'high'), logit_bias: { kind: 'bias', initial: {} },
     bad_words: { kind: 'list', initial: [] }, length_penalty: number(0, 2, 0.05, 1), ignore_eos: { kind: 'boolean', initial: false },
     skip_special_tokens: { kind: 'boolean', initial: true }, truncate_prompt_tokens: number(1, 131_072, 256, 32_768, true),
+  },
+  ollama: {
+    think: choice('on', 'on', 'off', 'low', 'medium', 'high', 'max'), num_ctx: number(2048, 1_048_576, 1024, 32_768, true),
+    temperature: number(0, 2, 0.05, 0.8), top_p: number(0, 1, 0.05, 0.9), top_k: number(1, 200, 1, 40, true), min_p: number(0, 1, 0.01, 0),
+    repeat_penalty: number(0.5, 2, 0.01, 1.1), presence_penalty: number(-2, 2, 0.05, 0), frequency_penalty: number(-2, 2, 0.05, 0),
+    num_predict: number(-1, 131_072, 256, -1, true), seed: number(0, 2 ** 31 - 1, 1, 0, true), stop: { kind: 'list', initial: [] },
   },
 };
 /** Fields the server fills in itself; a custom vLLM parameter cannot replace them. */
@@ -82,4 +100,21 @@ function isBias(value: unknown) {
 export function vllmBody(params: Params) {
   const { enable_thinking: thinking, ...rest } = params;
   return thinking === undefined ? rest : { ...rest, chat_template_kwargs: { enable_thinking: thinking } };
+}
+
+/** Gemini's generationConfig from the parameters. */
+export function geminiConfig(params: Params) {
+  const { temperature, top_p: topP, top_k: topK, max_output_tokens: maxOutputTokens, stop_sequences: stopSequences, seed, thinking_level: thinkingLevel } = params;
+  return Object.fromEntries(Object.entries({ temperature, topP, topK, maxOutputTokens, stopSequences, seed, ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}) })
+    .filter(([, value]) => value !== undefined));
+}
+/** DeepSeek's request fields: the thinking switch is an object of its own; the rest are Chat Completions fields. */
+export function deepseekBody(params: Params) {
+  const { thinking, ...rest } = params;
+  return thinking === undefined ? rest : { ...rest, thinking: { type: thinking ? 'enabled' : 'disabled' } };
+}
+/** Ollama's request: `think` at the top (a switch or a level), the rest as model options. */
+export function ollamaRequest(params: Params) {
+  const { think, ...options } = params;
+  return { ...(think === undefined ? {} : { think: think === 'on' ? true : think === 'off' ? false : think }), options };
 }

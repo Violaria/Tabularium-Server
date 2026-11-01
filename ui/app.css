@@ -408,15 +408,16 @@ h3.spaced { margin-top: 22px; }
 /* Colour themes, chosen per account under Account > Appearance. Forest is the default above. */
 /* Tinted themes are recipes: a main colour (--recipe-accent), how strongly it tints the pages (--recipe-tint) and a
    light or dark sidebar. Sakura and lavender are built-in recipes; "custom" receives the account's recipe from the page.
-   The colour is mixed into the warm neutrals: the canvas most, the sheet a little, cards hardly at all. */
+   The colour is mixed into neutral greys (warm ones would muddy a cool colour), in proportion to the tint for every
+   layer: the canvas most, then the second column, then the sheet, cards least. */
 :root[data-theme="sakura"] { --recipe-accent: #d63c78; --recipe-tint: 22%; }
 :root[data-theme="lavender"] { --recipe-accent: #7653d9; --recipe-tint: 20%; }
 :root[data-theme="sakura"], :root[data-theme="lavender"], :root[data-theme="custom"] {
     --r: var(--recipe-accent, #d63c78); --t: var(--recipe-tint, 22%);
-    --canvas: color-mix(in oklab, var(--r) calc(var(--t) * 0.62), #f3f0ea);
-    --sheet: color-mix(in oklab, var(--r) calc(var(--t) * 0.09), #fbfaf7);
-    --raised: color-mix(in oklab, var(--r) calc(var(--t) * 0.03), #ffffff);
-    --recess: color-mix(in oklab, var(--r) calc(var(--t) * 0.2), #f6f4ef);
+    --canvas: color-mix(in oklab, var(--r) calc(var(--t) * 0.8), #f3f3f5);
+    --sheet: color-mix(in oklab, var(--r) calc(var(--t) * 0.28), #fcfcfd);
+    --raised: color-mix(in oklab, var(--r) calc(var(--t) * 0.06), #ffffff);
+    --recess: color-mix(in oklab, var(--r) calc(var(--t) * 0.45), #f6f6f8);
     --overlay: #ffffff;
     --text: color-mix(in oklab, var(--r) 10%, #1f1d1e);
     --muted: color-mix(in oklab, var(--r) 16%, #6d6a66);
@@ -448,11 +449,11 @@ h3.spaced { margin-top: 22px; }
 :root[data-theme="custom"][data-side="dark"] .side nav a[aria-current="page"] .icon { color: color-mix(in oklab, var(--r) 55%, #fff); }
 @media (prefers-color-scheme: dark) {
     :root[data-theme="sakura"], :root[data-theme="lavender"], :root[data-theme="custom"] {
-        --canvas: color-mix(in oklab, var(--r) calc(var(--t) * 0.32), #131213);
-        --sheet: color-mix(in oklab, var(--r) calc(var(--t) * 0.2), #1d1b1d);
-        --raised: color-mix(in oklab, var(--r) calc(var(--t) * 0.22), #262426);
-        --recess: color-mix(in oklab, var(--r) calc(var(--t) * 0.2), #19171a);
-        --overlay: color-mix(in oklab, var(--r) calc(var(--t) * 0.2), #2c2a2c);
+        --canvas: color-mix(in oklab, var(--r) calc(var(--t) * 0.5), #121214);
+        --sheet: color-mix(in oklab, var(--r) calc(var(--t) * 0.32), #1c1c1f);
+        --raised: color-mix(in oklab, var(--r) calc(var(--t) * 0.34), #252528);
+        --recess: color-mix(in oklab, var(--r) calc(var(--t) * 0.38), #19191c);
+        --overlay: color-mix(in oklab, var(--r) calc(var(--t) * 0.3), #2b2b2e);
         --text: color-mix(in oklab, var(--r) 8%, #efebed);
         --muted: color-mix(in oklab, var(--r) 18%, #a69fa3);
         --faint: color-mix(in oklab, var(--r) 16%, #7c7579);
@@ -484,10 +485,10 @@ h3.spaced { margin-top: 22px; }
 .theme-card[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--accent), 0 6px 18px -8px color-mix(in oklab, var(--accent) 45%, transparent); }
 .swatches { display: flex; gap: 6px; }
 .swatches span { width: 24px; height: 24px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.08); }
-/* Swatches of each theme's light variant: accent, canvas, sheet. */
+/* Swatches of each theme's light variant: accent, canvas, sheet (the same mixes as the themes above). */
 .swatches.forest span:nth-child(1) { background: #1d634b; } .swatches.forest span:nth-child(2) { background: #efede6; } .swatches.forest span:nth-child(3) { background: #faf9f6; }
-.swatches.sakura span:nth-child(1) { background: #d63c78; } .swatches.sakura span:nth-child(2) { background: #f1dbe1; } .swatches.sakura span:nth-child(3) { background: #fbf7f7; }
-.swatches.lavender span:nth-child(1) { background: #7653d9; } .swatches.lavender span:nth-child(2) { background: #e6def2; } .swatches.lavender span:nth-child(3) { background: #f9f8fa; }
+.swatches.sakura span:nth-child(1) { background: #d63c78; } .swatches.sakura span:nth-child(2) { background: color-mix(in oklab, #d63c78 17.6%, #f3f3f5); } .swatches.sakura span:nth-child(3) { background: color-mix(in oklab, #d63c78 6.2%, #fcfcfd); }
+.swatches.lavender span:nth-child(1) { background: #7653d9; } .swatches.lavender span:nth-child(2) { background: color-mix(in oklab, #7653d9 16%, #f3f3f5); } .swatches.lavender span:nth-child(3) { background: color-mix(in oklab, #7653d9 5.6%, #fcfcfd); }
 .theme-card small { font-weight: 400; }
 
 /* Tabularius: the conversation column. */
@@ -621,11 +622,13 @@ select.bare:hover, select.bare:focus { background-color: var(--hover); color: va
     display: inline-flex; align-items: center; gap: 6px; max-width: 320px; padding: 4px 10px 4px 8px; border-radius: 999px; font-size: 12.5px;
     color: var(--muted); background: var(--raised); box-shadow: var(--shadow-1); text-decoration: none; transition: color 0.12s, box-shadow 0.12s;
 }
+.chip.proposal-link { font-weight: 500; color: var(--text); cursor: pointer; }
+.chip .badge { padding: 0 7px; font-size: 11px; }
 .chip:hover { color: var(--text); box-shadow: var(--shadow-1), 0 4px 10px -6px rgb(var(--shadow-tint) / 0.25); }
 .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip svg { width: 13px; height: 13px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 a.cite { overflow-wrap: anywhere; }
-.proposal-link { padding: 0; border: 0; box-shadow: none; background: none; color: var(--accent); font-weight: 500; text-align: left; }
+.proposal-link:not(.chip) { padding: 0; border: 0; box-shadow: none; background: none; color: var(--accent); font-weight: 500; text-align: left; }
 .proposal .file { margin-bottom: 22px; }
 .proposal .file:last-child { margin-bottom: 0; }
 .proposal h3 { font-weight: 500; overflow-wrap: anywhere; }
@@ -769,3 +772,7 @@ tr:hover td button.danger, td button.danger:focus-visible { background: var(--da
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+/* "New scheme": a card of its own, quieter than the schemes. */
+.theme-new { align-content: center; justify-items: center; gap: 6px; color: var(--muted); font-weight: 500; background: transparent; box-shadow: inset 0 0 0 1.5px var(--line-strong); }
+.theme-new:hover { color: var(--text); background: var(--hover); box-shadow: inset 0 0 0 1.5px var(--line-strong); transform: none; }
+.theme-new .icon { width: 20px; height: 20px; }

@@ -568,14 +568,28 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       response = await visit(random.slug); assert.equal(response.status, 403); await response.arrayBuffer();
       await configure(v => { v.shares.enabled = true; });
     });
-    await t.test('colour themes: built-in, custom recipe kept on the account', async () => {
-      await api('/me/theme', 'PUT', { theme: 'custom' }, alice, 400);
-      await api('/me/theme', 'PUT', { theme: 'custom', recipe: { accent: 'red', tint: 10, side: 'light' } }, alice, 400);
-      await api('/me/theme', 'PUT', { theme: 'custom', recipe: { accent: '#3366CC', tint: 50, side: 'light' } }, alice, 400);
-      await api('/me/theme', 'PUT', { theme: 'custom', recipe: { accent: '#3366CC', tint: 18, side: 'dark' } }, alice);
-      assert.deepEqual(await api('/me', 'GET', undefined, alice).then(me => [me.theme, me.recipe]), ['custom', { accent: '#3366cc', tint: 18, side: 'dark' }]);
+    await t.test('colour themes: built-in ones, and several schemes of the account', async () => {
+      await api('/me/theme', 'PUT', { theme: 'custom' }, alice, 404);
+      await api('/me/themes', 'POST', { name: '蓝', accent: 'red', tint: 10, side: 'light' }, alice, 400);
+      await api('/me/themes', 'POST', { name: '蓝', accent: '#3366CC', tint: 50, side: 'light' }, alice, 400);
+      await api('/me/themes', 'POST', { name: ' ', accent: '#3366CC', tint: 18, side: 'dark' }, alice, 400);
+      const blue = await api('/me/themes', 'POST', { name: '蓝', accent: '#3366CC', tint: 18, side: 'dark' }, alice, 201);
+      const green = await api('/me/themes', 'POST', { name: '绿', accent: '#2e8b57', tint: 30, side: 'light' }, alice, 201);
+      await api('/me/theme', 'PUT', { theme: 'custom', id: blue.id }, alice);
+      let me = await api('/me', 'GET', undefined, alice);
+      assert.deepEqual([me.theme, me.recipe, me.customThemes.map(item => item.name)], ['custom', { id: blue.id, name: '蓝', accent: '#3366cc', tint: 18, side: 'dark' }, ['蓝', '绿']]);
+      // Changing the scheme in use changes the pages; another scheme is not touched.
+      await api(`/me/themes/${blue.id}`, 'PUT', { name: '深蓝', accent: '#223388', tint: 20, side: 'dark' }, alice);
+      me = await api('/me', 'GET', undefined, alice);
+      assert.deepEqual([me.recipe.name, me.recipe.accent, me.customThemes[1]], ['深蓝', '#223388', green]);
       await api('/me/theme', 'PUT', { theme: 'lavender' }, alice);
-      assert.deepEqual(await api('/me', 'GET', undefined, alice).then(me => [me.theme, me.recipe.accent]), ['lavender', '#3366cc']);
+      assert.equal((await api('/me', 'GET', undefined, alice)).theme, 'lavender');
+      // Deleting the scheme in use goes back to the default theme.
+      await api('/me/theme', 'PUT', { theme: 'custom', id: green.id }, alice);
+      await api(`/me/themes/${green.id}`, 'DELETE', undefined, alice);
+      me = await api('/me', 'GET', undefined, alice);
+      assert.deepEqual([me.theme, me.recipe, me.customThemes.map(item => item.id)], ['', null, [blue.id]]);
+      await api(`/me/themes/${green.id}`, 'DELETE', undefined, alice, 404);
       await api('/me/theme', 'PUT', { theme: 'neon' }, alice, 400);
     });
     await t.test('limits and account disable cancel active replication', async () => {

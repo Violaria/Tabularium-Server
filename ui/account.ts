@@ -1,7 +1,7 @@
 // Account settings, open to every user: own vaults and devices (issue, revoke, rebuild, unlock), Kindle, password.
 import { formatDate, languageSelect, t } from './i18n.js';
 import { shareTable, type ShareRow } from './shares.js';
-import { ago, api, applyTheme, button, bytes, confirmAction, DEFAULT_THEME, escape, form, input, message, navigate, page, RECIPES, state, THEMES, tip, type Recipe } from './core.js';
+import { ago, api, applyTheme, button, bytes, confirmAction, DEFAULT_THEME, escape, form, icon, input, message, navigate, page, RECIPES, state, swatchColours, THEMES, tip, type Recipe, type Scheme } from './core.js';
 
 interface Rebuild { deviceId: string; until: number; started: number | null }
 export interface Vault { id: string; name: string; state: string; ownerId?: string; owner?: string; rebuild: Rebuild | null }
@@ -147,54 +147,73 @@ function passwordPage(content: HTMLElement) {
   });
 }
 
-/** Interface: the language of this browser and the account's colour scheme, including a custom recipe. */
-function interfacePage(content: HTMLElement) {
+/**
+ * Interface: the language of this browser and the account's colour scheme: a built-in theme or one of the account's own
+ * schemes. Choosing one of them opens its editor below the cards, which previews as it is adjusted.
+ */
+function interfacePage(content: HTMLElement, editingId?: string) {
   const body = frame(content);
   const user = state.session!.user;
-  const current = user.theme || DEFAULT_THEME;
-  const recipe: Recipe = { ...(user.recipe ?? RECIPES.sakura) };
-  const editing = current === 'custom';
+  const schemes = user.customThemes ?? [];
+  const activeId = user.theme === 'custom' ? user.recipe?.id : undefined;
+  const current = user.theme === 'custom' ? `scheme-${activeId}` : `theme-${user.theme || DEFAULT_THEME}`;
+  const editing = schemes.find(item => item.id === (editingId ?? activeId));
+  const swatches = (value: Recipe) => `<span class="swatches">${swatchColours(value).map(colour => `<span style="background:${escape(colour)}"></span>`).join('')}</span>`;
+  const builtIn = THEMES.map(theme => `<button type="button" class="theme-card" id="theme-${theme}" aria-pressed="${current === `theme-${theme}`}"><span class="swatches ${theme}"><span></span><span></span><span></span></span><span title="${escape(t(`theme.${theme}Desc`))}">${t(`theme.${theme}`)}</span></button>`);
+  const own = schemes.map(item => `<button type="button" class="theme-card" id="scheme-${escape(item.id)}" data-scheme="${escape(item.id)}" aria-pressed="${current === `scheme-${item.id}`}">${swatches(item)}<span>${escape(item.name)}</span></button>`);
+  const add = schemes.length < 20 ? `<button type="button" class="theme-card theme-new" id="theme-new">${icon('plus')}<span>${t('theme.newScheme')}</span></button>` : '';
   body.innerHTML = `<section class="card"><h2>${t('interface.language')}${tip(t('interface.languageDesc'))}</h2><div id="language-choice" class="language-choice"></div></section>
-    <section class="card"><h2>${t('theme.title')}${tip(t('theme.desc'))}</h2><div class="themes">${THEMES.map(theme => `<button type="button" class="theme-card" id="theme-${theme}" aria-pressed="${theme === current}"><span class="swatches ${theme}"><span></span><span></span><span></span></span><span title="${escape(t(`theme.${theme}Desc`))}">${t(`theme.${theme}`)}</span></button>`).join('')}</div>
-    <form id="recipe" class="recipe" ${editing ? '' : 'hidden'}><h3>${t('recipe.title')}${tip(t('recipe.hint'))}</h3><div class="recipe-fields">
-      <label>${t('recipe.accent')}<input type="color" name="accent" value="${escape(recipe.accent)}"></label>
-      <label>${t('recipe.tint')}<input type="range" name="tint" min="6" max="40" step="1" value="${recipe.tint}"></label>
-      <fieldset><legend>${t('recipe.side')}</legend><label class="check"><input type="radio" name="side" value="light" ${recipe.side === 'light' ? 'checked' : ''}> ${t('recipe.light')}</label><label class="check"><input type="radio" name="side" value="dark" ${recipe.side === 'dark' ? 'checked' : ''}> ${t('recipe.dark')}</label></fieldset>
-    </div><button class="primary" type="submit">${t('recipe.save')}</button></form></section>`;
+    <section class="card"><h2>${t('theme.title')}${tip(t('theme.desc'))}</h2><div class="themes">${[...builtIn, ...own, add].join('')}</div>
+    ${editing ? `<form id="recipe" class="recipe"><div class="recipe-fields">
+      <label>${t('theme.schemeName')}<input name="name" maxlength="40" required value="${escape(editing.name)}"></label>
+      <label>${t('recipe.accent')}<input type="color" name="accent" value="${escape(editing.accent)}"></label>
+      <label>${t('recipe.tint')}<input type="range" name="tint" min="6" max="40" step="1" value="${editing.tint}"></label>
+      <fieldset><legend>${t('recipe.side')}</legend><label class="check"><input type="radio" name="side" value="light" ${editing.side === 'light' ? 'checked' : ''}> ${t('recipe.light')}</label><label class="check"><input type="radio" name="side" value="dark" ${editing.side === 'dark' ? 'checked' : ''}> ${t('recipe.dark')}</label></fieldset>
+    </div><div class="actions"><button class="primary" type="submit">${t('recipe.save')}</button><span class="actions-end"><button type="button" class="danger" id="delete-scheme">${t('theme.deleteScheme')}</button></span></div></form>` : ''}</section>`;
   document.getElementById('language-choice')!.append(languageSelect(() => navigate(location.pathname)));
-  const custom = body.querySelector<HTMLElement>('.swatches.custom')!.children;
-  const recipeForm = document.getElementById('recipe') as HTMLFormElement;
-  const read = (): Recipe => {
+  const chosen = async (theme: string, scheme?: Scheme) => {
+    await api('/me/theme', 'PUT', scheme ? { theme: 'custom', id: scheme.id } : { theme });
+    user.theme = scheme ? 'custom' : theme; if (scheme) user.recipe = scheme;
+    applyTheme(user.theme, user.recipe);
+    message(t('theme.saved'));
+  };
+  for (const theme of THEMES) button(`theme-${theme}`, async () => { await chosen(theme); interfacePage(content); });
+  for (const item of schemes) button(`scheme-${item.id}`, async () => { await chosen('custom', item); interfacePage(content, item.id); });
+  // A new scheme starts from the colours in use, and is chosen at once.
+  if (add) button('theme-new', async () => {
+    const start: Recipe = user.theme === 'custom' && user.recipe ? user.recipe : RECIPES[(user.theme || DEFAULT_THEME) as 'sakura'] ?? RECIPES.sakura;
+    const scheme = await api<Scheme>('/me/themes', 'POST', { name: t('theme.newName', { n: schemes.length + 1 }), accent: start.accent, tint: start.tint, side: start.side });
+    user.customThemes = [...schemes, scheme];
+    await chosen('custom', scheme);
+    interfacePage(content, scheme.id);
+  });
+  const recipeForm = document.getElementById('recipe') as HTMLFormElement | null;
+  if (!editing || !recipeForm) return;
+  const read = () => {
     const data = new FormData(recipeForm);
-    return { accent: String(data.get('accent')), tint: Number(data.get('tint')), side: data.get('side') === 'dark' ? 'dark' : 'light' };
+    return { name: String(data.get('name')).trim(), accent: String(data.get('accent')), tint: Number(data.get('tint')), side: data.get('side') === 'dark' ? 'dark' as const : 'light' as const };
   };
-  const paintSwatches = (value: Recipe) => {
-    (custom[0] as HTMLElement).style.background = value.accent;
-    (custom[1] as HTMLElement).style.background = `color-mix(in oklab, ${value.accent} ${value.side === 'dark' ? 30 : value.tint * 1.4}%, ${value.side === 'dark' ? '#17131a' : '#fff'})`;
-    (custom[2] as HTMLElement).style.background = `color-mix(in oklab, ${value.accent} ${value.tint}%, #fff)`;
-  };
-  paintSwatches(recipe);
-  // Changes are previewed at once; they are kept only when saved.
-  recipeForm.addEventListener('input', () => { const value = read(); paintSwatches(value); applyTheme('custom', value); });
-  form('recipe', async () => {
+  // Changes are previewed at once, on the page and the scheme's card; they are kept only when saved.
+  recipeForm.addEventListener('input', () => {
     const value = read();
-    await api('/me/theme', 'PUT', { theme: 'custom', recipe: value });
-    user.theme = 'custom'; user.recipe = value;
+    const card = body.querySelector<HTMLElement>(`[data-scheme="${CSS.escape(editing.id)}"] .swatches`);
+    swatchColours(value).forEach((colour, index) => { (card?.children[index] as HTMLElement | undefined)?.style.setProperty('background', colour); });
     applyTheme('custom', value);
-    interfacePage(content);
+  });
+  form('recipe', async () => {
+    const saved = await api<Scheme>(`/me/themes/${encodeURIComponent(editing.id)}`, 'PUT', read());
+    user.customThemes = schemes.map(item => item.id === saved.id ? saved : item);
+    if (activeId === saved.id) user.recipe = saved; else await chosen('custom', saved);
+    applyTheme('custom', saved);
+    interfacePage(content, saved.id);
     message(t('theme.saved'));
   });
-  for (const theme of THEMES) button(`theme-${theme}`, async () => {
-    if (theme === 'custom') {
-      recipeForm.hidden = false;
-      for (const card of body.querySelectorAll('.theme-card')) card.setAttribute('aria-pressed', String(card.id === 'theme-custom'));
-      applyTheme('custom', read());
-      return;
-    }
-    await api('/me/theme', 'PUT', { theme });
-    user.theme = theme;
-    applyTheme(theme, user.recipe);
+  button('delete-scheme', async () => {
+    if (!await confirmAction({ title: t('theme.deleteScheme'), body: t('theme.confirmDeleteScheme', { name: editing.name }), action: t('theme.deleteScheme'), danger: true })) return;
+    await api(`/me/themes/${encodeURIComponent(editing.id)}`, 'DELETE');
+    user.customThemes = schemes.filter(item => item.id !== editing.id);
+    if (activeId === editing.id) { user.theme = ''; user.recipe = null; }
+    applyTheme(user.theme, user.recipe);
     interfacePage(content);
-    message(t('theme.saved'));
   });
 }

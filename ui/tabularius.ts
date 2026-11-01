@@ -98,7 +98,7 @@ function toolLabel(tool: ToolUse) {
   if (tool.name === 'web_search') return t('tabularius.toolWebSearch', { query: value('query') });
   if (tool.name === 'web_fetch' || tool.name === 'fetch_url') return t('tabularius.toolWebFetch', { url: value('url') });
   if (tool.name === 'propose_changes') return tool.proposal
-    ? `<button class="proposal-link" data-proposal="${escape(tool.proposal.id)}">${t('tabularius.toolPropose', { title: escape(tool.proposal.title) })}</button> ${statusBadge(tool.proposal.status)}`
+    ? `${t('tabularius.toolPropose', { title: escape(tool.proposal.title) })} ${statusBadge(tool.proposal.status)}`
     : t('tabularius.toolProposeFailed');
   return escape(tool.name);
 }
@@ -115,7 +115,11 @@ function entryHtml(entry: Entry, working = false) {
   const tools = entry.tools ?? [];
   const steps = tools.length || working ? `<details class="steps${working ? ' working' : ''}"><summary>${icon(working ? 'spark' : 'steps')}<span>${working && !tools.length ? t('tabularius.working') : t('tabularius.steps', { count: tools.length })}</span>${tools.length ? CHEV : ''}</summary>${tools.length ? `<ul class="tools">${tools.map(tool => `<li>${toolLabel(tool)}</li>`).join('')}</ul>` : ''}</details>` : '';
   const web = (entry.sources ?? []).filter(source => /^https?:/.test(source.url));
+  // A proposal waits for the user's review: it shows under the answer, not only in the folded steps.
+  const proposed = tools.flatMap(tool => tool.proposal ? [tool.proposal] : []).map(item =>
+    `<button class="chip proposal-link" data-proposal="${escape(item.id)}">${icon('proposal')}<span>${t('tabularius.toolPropose', { title: escape(item.title) })}</span>${statusBadge(item.status)}</button>`);
   const chips = [
+    ...proposed,
     ...(entry.read ?? []).map(path => `<a class="chip cite" href="${escape(noteHref(path))}" data-route title="${escape(path)}">${icon('file')}<span>${escape(path.replace(/\.md$/i, '').split('/').pop()!)}</span></a>`),
     ...web.map(source => `<a class="chip" href="${escape(source.url)}" target="_blank" rel="noopener noreferrer" title="${escape(source.url)}">${icon('globe')}<span>${escape(source.title || new URL(source.url).hostname)}</span></a>`),
   ].join('');

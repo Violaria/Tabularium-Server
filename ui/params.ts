@@ -11,7 +11,7 @@ export type Rule =
   | { kind: 'list'; initial: string[] }
   | { kind: 'bias'; initial: Record<string, number> };
 export type Params = Record<string, unknown>;
-export type ProviderName = 'anthropic' | 'openai' | 'vllm';
+export type ProviderName = 'anthropic' | 'openai' | 'gemini' | 'deepseek' | 'vllm' | 'ollama';
 export class FormError extends Error {}
 
 const label = (name: string) => { const key = `param.${name}`; return hasMessage(key) ? t(key) : name; };
@@ -21,7 +21,7 @@ const englishName = (name: string) => {
   return language() === 'en' || !hasMessage(key) ? '' : catalogues.en[key];
 };
 /** Providers as their makers write them. */
-export const PROVIDER_NAMES: Record<ProviderName, string> = { anthropic: 'Anthropic', openai: 'OpenAI', vllm: 'vLLM' };
+export const PROVIDER_NAMES: Record<ProviderName, string> = { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek', vllm: 'vLLM', ollama: 'Ollama' };
 export interface ModelOption { id: string; provider: ProviderName; model: string; name: string }
 /** The models as select options, grouped under their provider's name; `empty` adds a first option with the value ''. */
 export function modelOptions(models: ModelOption[], selected: string, empty?: string) {
