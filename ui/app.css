@@ -777,3 +777,8 @@ tr:hover td button.danger, td button.danger:focus-visible { background: var(--da
 .theme-new { align-content: center; justify-items: center; gap: 6px; color: var(--muted); font-weight: 500; background: transparent; box-shadow: inset 0 0 0 1.5px var(--line-strong); }
 .theme-new:hover { color: var(--text); background: var(--hover); box-shadow: inset 0 0 0 1.5px var(--line-strong); transform: none; }
 .theme-new .icon { width: 20px; height: 20px; }
+/* Typed text and placeholders are regular weight, whatever their label's weight. */
+label input, label select, label textarea { font-weight: 400; }
+/* Secrets that are not account passwords: drawn as dots without being password fields (password managers attach to
+   every password field; see core.ts). */
+input.masked { -webkit-text-security: disc; }

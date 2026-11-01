@@ -24,7 +24,8 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await compose('up', '-d', '--wait');
     const port = (await compose('port', 'couchdb', '5984')).stdout.trim();
     gateway = await createGateway({ database: join(temp, 'app.sqlite'), bootstrapUser: 'admin', bootstrapPassword: password, origins: [],
-      couch: { url: `http://${port}`, adminUser: 'baseline', adminPassword: password, syncUser: 'tabularium', syncPassword: randomBytes(24).toString('hex') } });
+      couch: { url: `http://${port}`, adminUser: 'baseline', adminPassword: password, syncUser: 'tabularium', syncPassword: randomBytes(24).toString('hex') },
+      backupDir: join(temp, 'backups') });
     const url = await gateway.listen();
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ viewport: { width: 1366, height: 900 }, locale: 'zh-CN' });
@@ -218,6 +219,22 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await expect(page.getByText('已撤销', { exact: true })).toBeVisible();
     const revoked = await fetch(`${url}/sync/${vaultId}`, { headers: { authorization: auth } });
     assert.equal(revoked.status, 401); await revoked.arrayBuffer();
+    // Scheduled backups: the schedule is saved and shown with the next time; "back up now" writes a point.
+    await page.goto(url + '/admin/backups');
+    await page.getByLabel('时间').fill('19:00');
+    await page.getByLabel('时区').fill('Europe/London');
+    await page.getByLabel('保留的备份点').fill('30');
+    await page.getByLabel('按这个计划备份').check();
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(page.locator('.toasts .toast', { hasText: '备份设置已保存。' })).toBeVisible();
+    await page.reload();
+    await expect(page.getByLabel('按这个计划备份')).toBeChecked();
+    await expect(page.getByLabel('时间')).toHaveValue('19:00');
+    await expect(page.getByText('下一次备份')).toBeVisible();
+    await page.getByRole('button', { name: '立即备份' }).click();
+    await expect(page.locator('.toasts .toast', { hasText: '备份已开始。' })).toBeVisible();
+    await expect.poll(async () => { await page.reload(); return page.locator('tbody tr', { hasText: '完成' }).count(); }, { timeout: 60_000 }).toBeGreaterThan(0);
+    await page.screenshot({ path: join(results, 'backups.png'), fullPage: true });
     await page.getByRole('link', { name: '操作记录', exact: true }).click();
     await expect(page.getByRole('cell', { name: '撤销设备', exact: true })).toBeVisible();
     await expect(page.getByRole('cell', { name: '授权重建', exact: true })).toBeVisible();
