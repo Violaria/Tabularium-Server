@@ -206,6 +206,18 @@ test('web fetch addresses follow the permission mode', async () => {
   }
   assert.equal(addressPolicy('restricted', ['192.168.10.0/24'], ['192.168.10.1'])('192.168.10.100', 'oblivaria'), true);
   assert.equal(addressPolicy('full', [], ['192.168.10.1'])('10.0.0.9', 'x'), true);
+  // Every fetch connects anew: a connection left open by a fetch in full mode is not reused by one in read-only mode.
+  const { fetchPage } = await import('../dist/tabularius/web.js');
+  const { createServer } = await import('node:http');
+  const local = createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/plain', connection: 'keep-alive' }); res.end('local page'); }).listen(0, '127.0.0.1');
+  await new Promise(resolve => local.once('listening', resolve));
+  const page = `http://localhost:${local.address().port}/`;
+  const options = { allowed: [], blocked: [], maxUses: 5 };
+  try {
+    assert.equal((await fetchPage(options, addressPolicy('full', []), page)).text, 'local page');
+    await assert.rejects(fetchPage(options, addressPolicy('read-only', []), page), /does not allow/);
+    await assert.rejects(fetchPage(options, addressPolicy('full', [], ['localhost']), page), /does not allow/);
+  } finally { local.closeAllConnections(); local.close(); }
   assert.equal(domainAllowed({ allowed: ['docs.vllm.ai'], blocked: [], maxUses: 1 }, 'https://docs.vllm.ai/en/latest'), true);
   assert.equal(domainAllowed({ allowed: ['docs.vllm.ai'], blocked: [], maxUses: 1 }, 'https://vllm.ai'), false);
   assert.equal(domainAllowed({ allowed: [], blocked: ['example.org'], maxUses: 1 }, 'https://a.example.org/x'), false);

@@ -92,8 +92,9 @@ function get(url: URL, policy: AddressPolicy) {
   return new Promise<IncomingMessage>((resolve, reject) => {
     const literal = url.hostname.replace(/^\[|\]$/g, '');
     if (isIP(literal) && !policy(literal, literal)) return reject(new Error(`${url.hostname} is an address this mode does not allow`));
+    // No pooled connections: a socket kept alive from a fetch under another policy would skip the address check.
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
-      lookup: checkedLookup(policy) as never, headers: { 'user-agent': 'Tabularius/1', accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.1' },
+      agent: false, lookup: checkedLookup(policy) as never, headers: { 'user-agent': 'Tabularius/1', accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.1' },
       timeout: TIMEOUT_MS,
     }, resolve);
     request.on('timeout', () => request.destroy(new Error('timed out')));
