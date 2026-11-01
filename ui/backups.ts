@@ -1,7 +1,7 @@
 // Scheduled backups, for administrators: the schedule and how many points to keep, "back up now", the points on disk
 // and the history of runs. Backups run on the server without stopping it; restoring is done with the backup tool.
 import { formatDate, t } from './i18n.js';
-import { api, bytes, escape, message, run, tip } from './core.js';
+import { api, bytes, escape, message, run, scroller, tip } from './core.js';
 
 interface Settings { enabled: boolean; frequency: 'daily' | 'weekly' | 'monthly'; weekday: number; monthDay: number; time: string; timezone: string; keep: number; fullEvery: number }
 interface Point { id: string; type: 'full' | 'incremental'; chain: string; createdAt: string; size: number }
@@ -34,7 +34,7 @@ export async function renderBackups(body: HTMLElement) {
     return;
   }
   const s = view.settings;
-  const scrolled = window.scrollY;
+  const scrolled = scroller().scrollTop;
   const zones = (Intl as unknown as { supportedValuesOf(kind: string): string[] }).supportedValuesOf('timeZone');
   body.innerHTML = `${statusCard(view)}
     <section class="card"><h2>${t('backups.schedule')}</h2><form id="backup-settings" class="stack">
@@ -51,7 +51,7 @@ export async function renderBackups(body: HTMLElement) {
       <div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form></section>
     ${pointsCard(view)}
     ${historyCard(view)}`;
-  window.scrollTo(0, scrolled);
+  scroller().scrollTop = scrolled;
 
   const settingsForm = document.getElementById('backup-settings') as HTMLFormElement;
   // Only the field for the chosen frequency is shown.

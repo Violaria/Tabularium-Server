@@ -186,23 +186,104 @@ export function captureLinks(root: HTMLElement) {
   });
 }
 
-/** Line icons drawn inline, so the pages need no icon font or third-party assets. */
+/** Line icons drawn inline (24 grid), so the pages need no icon font or third-party assets. */
 const ICONS: Record<string, string> = {
-  home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
-  notes: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h5"/>',
-  assistant: '<path d="M4 5h16v11H8l-4 4z"/><path d="M8 10h8M8 13h5"/>',
-  admin: '<path d="M12 3 4 6v6c0 5 3.4 8 8 9 4.6-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
+  home: '<path d="M4 10.2 12 4l8 6.2V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/>',
+  notes: '<path d="M7 3.5h7.5L19 8v11.5a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z"/><path d="M14 3.5V8.5h5M9.5 13h6M9.5 16.5h4"/>',
+  assistant: '<path d="M5 5.5h14a1 1 0 0 1 1 1V16a1 1 0 0 1-1 1h-8.5L6 20.5V17H5a1 1 0 0 1-1-1V6.5a1 1 0 0 1 1-1z"/><path d="M8.5 10h7M8.5 13h4.5"/>',
+  admin: '<path d="M12 3.5 5 6.2v5.3c0 4.3 2.9 7.6 7 9 4.1-1.4 7-4.7 7-9V6.2z"/><path d="m9.2 12 2 2 3.8-4"/>',
+  logout: '<path d="M14 4.5h4a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-4"/><path d="M10 8.5 6.5 12l3.5 3.5M6.5 12H15"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  compose: '<path d="M12.5 5.5H6a1 1 0 0 0-1 1V18a1 1 0 0 0 1 1h11.5a1 1 0 0 0 1-1v-6.5"/><path d="m10 14 .6-2.7 7.6-7.6a1.4 1.4 0 0 1 2 2l-7.6 7.6z"/>',
+  pencil: '<path d="m5 19 .9-3.6L15.6 5.7a1.8 1.8 0 0 1 2.6 0l.1.1a1.8 1.8 0 0 1 0 2.6L8.6 18.1z"/><path d="m14 7.3 2.7 2.7"/>',
+  search: '<circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4.5 4.5"/>',
+  folder: '<path d="M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4.2l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5v8.3A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"/>',
+  archive: '<rect x="3.5" y="4.5" width="17" height="4.5" rx="1"/><path d="M5 9v9.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/>',
+  unarchive: '<rect x="3.5" y="4.5" width="17" height="4.5" rx="1"/><path d="M5 9v9.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M12 17v-5M9.8 14 12 11.8l2.2 2.2"/>',
+  trash: '<path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M6.5 7l.8 11.6a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4L17.5 7"/>',
+  more: '<circle cx="6" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="18" cy="12" r="1.1"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.5-2-3.4-2.3.9a7.5 7.5 0 0 0-2.6-1.5L14.1 2.5h-4.2l-.4 2.5a7.5 7.5 0 0 0-2.6 1.5l-2.3-.9-2 3.4 2 1.5a7.6 7.6 0 0 0 0 3l-2 1.5 2 3.4 2.3-.9a7.5 7.5 0 0 0 2.6 1.5l.4 2.5h4.2l.4-2.5a7.5 7.5 0 0 0 2.6-1.5l2.3.9 2-3.4z"/>',
+  proposal: '<path d="M6 4.5v15M6 4.5a2 2 0 1 0 0 0zM18 19.5a2 2 0 1 0 0 0z"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M18 16V10a3 3 0 0 0-3-3h-4.5M12.5 4.5 10 7l2.5 2.5"/>',
+  memory: '<path d="M7 3.5h10a1 1 0 0 1 1 1v16l-6-3.8-6 3.8v-16a1 1 0 0 1 1-1z"/>',
+  file: '<path d="M7 3.5h7L18.5 8v11.5a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z"/><path d="M13.5 3.5V8.5h5"/>',
+  globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.2-3.5-8.5S9.7 5.9 12 3.5z"/>',
+  chevron: '<path d="m9 5.5 6.5 6.5L9 18.5"/>',
+  steps: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  spark: '<path d="M12 3.5v4M12 16.5v4M3.5 12h4M16.5 12h4M6 6l2.6 2.6M15.4 15.4 18 18M6 18l2.6-2.6M15.4 8.6 18 6"/>',
+  device: '<rect x="3.5" y="5" width="17" height="11" rx="1.5"/><path d="M8.5 19.5h7M12 16v3.5"/>',
+  database: '<ellipse cx="12" cy="6.5" rx="7" ry="2.8"/><path d="M5 6.5v11c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-11M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  back: '<path d="M15 5.5 8.5 12l6.5 6.5"/>',
+  sidebar: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.5 4.5v15"/>',
+  refresh: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4"/>',
 };
 export const icon = (name: keyof typeof ICONS | string) =>
   `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] ?? ''}</svg>`;
+/** A button that is only a symbol; its name is its accessible label and tooltip. */
+export const iconButton = (name: string, label: string, extra = '', cls = '') =>
+  `<button type="button" class="icon-button${cls ? ` ${cls}` : ''}" aria-label="${escape(label)}" title="${escape(label)}" ${extra}>${icon(name)}</button>`;
+
+/** An item of a floating menu: a label with an optional icon, a danger style, a check mark, or a separator ('-'). */
+export type MenuItem = '-' | { label: string; icon?: string; danger?: boolean; checked?: boolean; heading?: boolean; action?: () => void | Promise<void> };
+let openMenu: { element: HTMLElement; anchor: HTMLElement; close: () => void } | undefined;
+/** Closes the open floating menu, if any. */
+export function closeMenu() { openMenu?.close(); }
+/**
+ * A floating menu under (or above, near the bottom of the window) its button. It closes on a choice, a click outside,
+ * Escape or scrolling; the button is marked expanded while it is open.
+ */
+export function popMenu(anchor: HTMLElement, items: MenuItem[]) {
+  const again = openMenu?.anchor === anchor;
+  closeMenu();
+  if (again) return;
+  const menu = document.createElement('div');
+  menu.className = 'pop-menu';
+  menu.setAttribute('role', 'menu');
+  for (const item of items) {
+    if (item === '-') { menu.append(document.createElement('hr')); continue; }
+    if (item.heading) { const label = document.createElement('div'); label.className = 'menu-label'; label.textContent = item.label; menu.append(label); continue; }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', item.checked === undefined ? 'menuitem' : 'menuitemradio');
+    if (item.checked !== undefined) button.setAttribute('aria-checked', String(item.checked));
+    if (item.danger) button.className = 'danger';
+    button.innerHTML = `${item.icon ? icon(item.icon) : ''}<span>${escape(item.label)}</span>`;
+    button.addEventListener('click', () => { closeMenu(); if (item.action) void run(async () => { await item.action!(); }); });
+    menu.append(button);
+  }
+  document.body.append(menu);
+  const box = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth, height = menu.offsetHeight;
+  const left = Math.max(8, Math.min(box.right - width, window.innerWidth - width - 8));
+  const below = box.bottom + 6 + height < window.innerHeight - 8;
+  menu.style.left = `${left}px`;
+  menu.style.top = `${below ? box.bottom + 6 : Math.max(8, box.top - 6 - height)}px`;
+  const row = anchor.closest<HTMLElement>('.conv-row, .project-row');
+  row?.classList.add('menu-open');
+  anchor.setAttribute('aria-expanded', 'true');
+  const outside = (event: Event) => { if (!menu.contains(event.target as Node) && !anchor.contains(event.target as Node)) closeMenu(); };
+  const key = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeMenu(); anchor.focus(); } };
+  const scrolled = (event: Event) => { if (!menu.contains(event.target as Node)) closeMenu(); };
+  const close = () => {
+    menu.remove(); row?.classList.remove('menu-open'); anchor.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', key, true); document.removeEventListener('scroll', scrolled, true);
+    window.removeEventListener('resize', close);
+    openMenu = undefined;
+  };
+  document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', key, true); document.addEventListener('scroll', scrolled, true);
+  window.addEventListener('resize', close);
+  openMenu = { element: menu, anchor, close };
+  menu.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+}
 
 let drawnPage = '';
 /**
- * Draws a page in the content area: heading, optional tabs and actions, the notice, and an empty body that the module
- * fills. Redrawing the same page after an action keeps the frame and the scroll position.
+ * Draws a page in the content area: heading, optional tabs and actions, and an empty body that the module fills. A page
+ * with tabs shows them in place of the module's title, which the sidebar already names. Redrawing the same page after an
+ * action keeps the frame and the scroll position.
  */
-export function page(content: HTMLElement, options: { title: string; subtitle?: string; tabs?: [string, string][]; actions?: string }) {
-  const key = JSON.stringify([options.title, options.subtitle, options.tabs, options.actions, location.pathname, document.documentElement.lang]);
+export function page(content: HTMLElement, options: { title: string; subtitle?: string; tabs?: [string, string][]; actions?: string; back?: { href: string; label: string } }) {
+  const key = JSON.stringify([options.title, options.subtitle, options.tabs, options.actions, options.back, location.pathname, document.documentElement.lang]);
   const existing = content.querySelector<HTMLDivElement>('#body');
   if (key === drawnPage && existing) return existing;
   drawnPage = key;
@@ -211,9 +292,17 @@ export function page(content: HTMLElement, options: { title: string; subtitle?: 
     .sort((a, b) => b.length - a.length)[0];
   const tabs = options.tabs ? `<nav class="tabs">${options.tabs.map(([href, label]) =>
     `<a href="${href}" data-route ${href === current ? 'aria-current="page"' : ''}>${escape(label)}</a>`).join('')}</nav>` : '';
-  content.innerHTML = `<div class="page"><header class="page-head"><div><h1>${escape(options.title)}${options.subtitle ? tip(options.subtitle) : ''}</h1></div>${options.actions ?? ''}</header>${tabs}<div id="body"></div></div>`;
-  window.scrollTo(0, 0);
+  const back = options.back ? `<a class="icon-button back" href="${options.back.href}" data-route aria-label="${escape(options.back.label)}" title="${escape(options.back.label)}">${icon('back')}</a>` : '';
+  const head = options.tabs && !options.actions && !options.back ? ''
+    : `<header class="page-head"><div class="title-row">${back}<h1>${escape(options.title)}${options.subtitle ? tip(options.subtitle) : ''}</h1></div>${options.actions ?? ''}</header>`;
+  content.innerHTML = `<div class="page">${head}${tabs}<div id="body"></div></div>`;
+  content.scrollTo(0, 0); window.scrollTo(0, 0);
   return content.querySelector<HTMLDivElement>('#body')!;
+}
+/** What scrolls the page: the content sheet on wide screens, the window on narrow ones. */
+export function scroller(): Element {
+  const content = document.getElementById('content');
+  return content && getComputedStyle(content).overflowY === 'auto' ? content : document.scrollingElement!;
 }
 /** Relative time for recent events: "3 minutes ago", falling back to the date. */
 export function ago(value: number, format: (value: number) => string, words: { now: string; minutes: (n: number) => string; hours: (n: number) => string; days: (n: number) => string }) {
@@ -230,7 +319,7 @@ export function askText(options: { title: string; label: string; value?: string;
   return new Promise(resolve => {
     const dialog = document.createElement('dialog');
     dialog.className = 'dialog';
-    dialog.innerHTML = `<form method="dialog" class="stack"><h2>${escape(options.title)}</h2><label>${escape(options.label)}<input name="value" autocomplete="off" required></label><div class="buttons"><button type="button" data-answer="no">${escape(t('dialog.cancel'))}</button><button type="submit" class="primary">${escape(options.action)}</button></div></form>`;
+    dialog.innerHTML = `<form method="dialog" class="stack"><h2>${escape(options.title)}</h2><label>${escape(options.label)}<input name="value" autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" required></label><div class="buttons"><button type="button" data-answer="no">${escape(t('dialog.cancel'))}</button><button type="submit" class="primary">${escape(options.action)}</button></div></form>`;
     const field = dialog.querySelector<HTMLInputElement>('input')!;
     field.value = options.value ?? '';
     const close = (answer: string | null) => { dialog.close(); dialog.remove(); resolve(answer); };

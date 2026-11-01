@@ -1,6 +1,6 @@
 // Tabularius: enable the AI curator for a vault, set what it may send, and talk to it about the notes.
 import { formatDate, hasMessage, serverError, t } from './i18n.js';
-import { api, ApiError, bytes, confirmAction, escape, message, notesStyles, run, state, tip } from './core.js';
+import { api, ApiError, askText, bytes, confirmAction, escape, icon, iconButton, markShapes, message, notesStyles, popMenu, run, state, tip, type MenuItem } from './core.js';
 import { FormError, paramForm, paramLabel, PROVIDER_NAMES, type Params, type ProviderName, type Rule } from './params.js';
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
@@ -17,7 +17,9 @@ interface ChatSettings { recipe: string; prompt: string; params: Partial<Record<
 interface AttachmentRef { id: string; name: string; kind: 'image' | 'text' }
 /** A file in the box, before sending: uploading (no id yet), ready, or refused with the reason. */
 interface Pending { key: number; name: string; size: number; image: boolean; preview?: string; id?: string; kind?: 'image' | 'text'; error?: string }
-interface Summary { id: string; title: string; updatedAt: number }
+interface Summary { id: string; title: string; updatedAt: number; projectId: string | null; archived: boolean }
+/** A named group of conversations in a vault. */
+interface Project { id: string; name: string }
 interface ProposalRef { id: string; title: string; status: string; files?: number }
 interface ToolUse { name: string; input: Record<string, unknown>; proposal?: ProposalRef }
 interface ProposalSummary { id: string; conversationId: string; title: string; summary: string; status: string; error: string | null; createdAt: number; decidedAt: number | null }
@@ -40,6 +42,9 @@ let memories: MemoryItem[] = [];
 let proposals: ProposalSummary[] = [];
 let proposal: ProposalDetail | undefined;
 let conversations: Summary[] = [];
+let projects: Project[] = [];
+/** Projects shown open in the list; one holding the open conversation opens with it. */
+const expanded = new Set<string>();
 let conversationId: string | undefined;
 let entries: Entry[] = [];
 let busy = false;
@@ -102,17 +107,22 @@ const named = (key: string, value: string) => hasMessage(key) ? t(key as 'tabula
 const statusBadge = (status: string) => `<span class="badge${status === 'pending' ? ' warn' : status === 'discarded' ? ' off' : ''}">${named(`tabularius.status.${status}`, status)}</span>`;
 /** Approvals already answered in this page: a redraw of the streaming answer keeps their buttons off. */
 const answered = new Set<string>();
-function entryHtml(entry: Entry) {
+const CHEV = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5.5 6.5 6.5L9 18.5"/></svg>';
+const noteHref = (path: string) => `/notes/?vault=${encodeURIComponent(vaultId)}&path=${encodeURIComponent(path)}`;
+function entryHtml(entry: Entry, working = false) {
   if (entry.role === 'user') return `<div class="turn user">${entry.attachments?.length ? `<div class="sent-attachments">${entry.attachments.map(sentAttachment).join('')}</div>` : ''}${entry.text ? `<p>${escape(entry.text).replace(/\n/g, '<br>')}</p>` : ''}</div>`;
-  const tools = (entry.tools ?? []).map(tool => `<li>${toolLabel(tool)}</li>`).join('');
-  const read = entry.read?.length ? `<div class="read"><small>${t('tabularius.readNotes')}</small>${render(entry.read.map(path => `[[${path}]]`).join('  '))}</div>` : '';
+  // What the model did folds into one line; notes read and web pages used become chips under the answer.
+  const tools = entry.tools ?? [];
+  const steps = tools.length || working ? `<details class="steps${working ? ' working' : ''}"><summary>${icon(working ? 'spark' : 'steps')}<span>${working && !tools.length ? t('tabularius.working') : t('tabularius.steps', { count: tools.length })}</span>${tools.length ? CHEV : ''}</summary>${tools.length ? `<ul class="tools">${tools.map(tool => `<li>${toolLabel(tool)}</li>`).join('')}</ul>` : ''}</details>` : '';
   const web = (entry.sources ?? []).filter(source => /^https?:/.test(source.url));
-  const sources = web.length ? `<div class="read"><small>${t('tabularius.sources')}</small><ol class="sources">${web.map(source =>
-    `<li><a href="${escape(source.url)}" target="_blank" rel="noopener noreferrer">${escape(source.title || source.url)}</a></li>`).join('')}</ol></div>` : '';
+  const chips = [
+    ...(entry.read ?? []).map(path => `<a class="chip cite" href="${escape(noteHref(path))}" data-route title="${escape(path)}">${icon('file')}<span>${escape(path.replace(/\.md$/i, '').split('/').pop()!)}</span></a>`),
+    ...web.map(source => `<a class="chip" href="${escape(source.url)}" target="_blank" rel="noopener noreferrer" title="${escape(source.url)}">${icon('globe')}<span>${escape(source.title || new URL(source.url).hostname)}</span></a>`),
+  ].join('');
   const approvals = (entry.approvals ?? []).map(a => `<div class="notice approval"><p>${t('tabularius.approvalAsk', { host: escape(a.host) })}</p><pre class="mono">${escape(a.command)}</pre>
     ${a.approved === undefined ? `<div class="actions"><button class="primary" data-approve="${escape(a.id)}" ${answered.has(a.id) ? 'disabled' : ''}>${t('tabularius.approve')}</button><button data-deny="${escape(a.id)}" ${answered.has(a.id) ? 'disabled' : ''}>${t('tabularius.deny')}</button></div>`
       : `<span class="badge${a.approved ? '' : ' warn'}">${a.approved ? t('tabularius.approved') : t('tabularius.denied')}</span>`}</div>`).join('');
-  return `<div class="turn assistant">${tools ? `<ul class="tools">${tools}</ul>` : ''}${approvals}<div class="answer md-body">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${read}${sources}</div>`;
+  return `<div class="turn assistant">${steps}${approvals}<div class="answer md-body">${render(entry.text)}</div>${entry.error ? `<p class="notice error">${escape(entry.error)}</p>` : ''}${chips ? `<div class="chips">${chips}</div>` : ''}</div>`;
 }
 
 async function load() {
@@ -122,8 +132,13 @@ async function load() {
 }
 async function openVault() {
   conversationId = undefined; entries = []; newChat();
-  conversations = vault()?.enabled ? await api<Summary[]>(`/tabularius/vaults/${encodeURIComponent(vaultId)}/conversations`) : [];
+  await loadList();
   draw();
+}
+/** The vault's conversations and projects. */
+async function loadList() {
+  const base = `/tabularius/vaults/${encodeURIComponent(vaultId)}`;
+  [conversations, projects] = vault()?.enabled ? await Promise.all([api<Summary[]>(`${base}/conversations`), api<Project[]>(`${base}/projects`)]) : [[], []];
 }
 async function refresh() {
   overview = await api<Overview>('/tabularius');
@@ -131,30 +146,117 @@ async function refresh() {
 }
 
 let drawnView = '';
+const MORE = icon('more');
+const conversationRow = (c: Summary) => `<div class="conv-row" data-row="${escape(c.id)}" ${c.id === conversationId && view === 'chat' ? 'aria-current="page"' : ''}><button class="conversation" data-id="${escape(c.id)}" title="${escape(`${c.title}\n${formatDate(c.updatedAt)}`)}"><span>${escape(c.title)}</span></button><button type="button" class="icon-button small row-more" data-more="${escape(c.id)}" aria-haspopup="menu" aria-label="${t('tabularius.more')}" title="${t('tabularius.more')}">${MORE}</button></div>`;
+/** The conversation column: projects with their conversations, the ungrouped ones, and the archive folded at the end. */
+function listHtml() {
+  const live = conversations.filter(c => !c.archived);
+  const archived = conversations.filter(c => c.archived);
+  const open = conversations.find(c => c.id === conversationId);
+  if (open?.projectId && !open.archived) expanded.add(open.projectId);
+  const projectRows = projects.map(project => {
+    const inside = live.filter(c => c.projectId === project.id);
+    const shown = expanded.has(project.id);
+    return `<div class="project-row" data-project-row="${escape(project.id)}" aria-expanded="${shown}"><button class="project" data-project="${escape(project.id)}"><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5.5 6.5 6.5L9 18.5"/></svg>${icon('folder')}<span>${escape(project.name)}</span></button><button type="button" class="icon-button small row-more" data-project-more="${escape(project.id)}" aria-haspopup="menu" aria-label="${t('tabularius.more')}" title="${t('tabularius.more')}">${MORE}</button></div>`
+      + (shown ? `<div class="project-children">${inside.map(conversationRow).join('') || `<small class="pane-empty">${t('tabularius.projectEmpty')}</small>`}</div>` : '');
+  }).join('');
+  const loose = live.filter(c => !c.projectId || !projects.some(p => p.id === c.projectId));
+  return `<div class="list-section"><span>${t('tabularius.projects')}</span>${iconButton('plus', t('tabularius.newProject'), 'id="new-project"')}</div>${projectRows}
+    <div class="list-section"><span>${t('tabularius.recent')}</span></div>${loose.map(conversationRow).join('') || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`}
+    ${archived.length ? `<details class="archive" ${archived.some(c => c.id === conversationId) ? 'open' : ''}><summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5.5 6.5 6.5L9 18.5"/></svg>${t('tabularius.archived')} · ${archived.length}</summary>${archived.map(conversationRow).join('')}</details>` : ''}`;
+}
 function shell(content: string) {
   // A redraw of the same view (after saving a setting) keeps where the page was scrolled to.
   const key = `${view}|${vaultId}|${conversationId ?? ''}`;
-  const kept = key === drawnView ? { main: app.querySelector('.assist-main')?.scrollTop ?? 0, list: app.querySelector('.pane-list')?.scrollTop ?? 0, page: window.scrollY } : undefined;
+  const kept = key === drawnView ? { main: app.querySelector('.assist-main')?.scrollTop ?? 0, list: app.querySelector('.pane-list')?.scrollTop ?? 0, page: app.scrollTop } : undefined;
   drawnView = key;
   const current = vault();
   const options = overview!.vaults.map(v => `<option value="${escape(v.id)}" ${v.id === vaultId ? 'selected' : ''}>${v.enabled ? escape(v.name) : t('tabularius.vaultOff', { name: escape(v.name) })}</option>`).join('');
-  const list = conversations.map(c => `<button class="conversation" data-id="${escape(c.id)}" ${c.id === conversationId && view === 'chat' ? 'aria-current="page"' : ''}><span>${escape(c.title)}</span><small>${formatDate(c.updatedAt)}</small></button>`).join('');
-  app.innerHTML = `<div class="pane assist"><aside><div class="pane-head">${overview!.vaults.length ? `<select id="vault" aria-label="${t('tabularius.vault')}">${options}</select>` : ''}${current?.enabled ? `<button id="new" class="primary">${t('tabularius.newChat')}</button>` : ''}</div>
-    ${current?.enabled ? `<nav class="pane-list" aria-label="${t('tabularius.conversations')}">${list || `<small class="pane-empty">${t('tabularius.noConversations')}</small>`}</nav><nav class="pane-foot"><button id="proposals" ${view.startsWith('proposal') ? 'aria-current="page"' : ''}>${t('tabularius.proposals')}</button><button id="memories" ${view === 'memories' ? 'aria-current="page"' : ''}>${t('tabularius.memories')}</button><button id="settings" ${view === 'settings' ? 'aria-current="page"' : ''}>${t('tabularius.settings')}</button></nav>` : ''}</aside>
+  const foot = (id: string, glyph: string, label: string, currentView: boolean) => iconButton(glyph, label, `id="${id}" ${currentView ? 'aria-current="page"' : ''}`);
+  app.innerHTML = `<div class="pane assist"><aside><div class="pane-head">${overview!.vaults.length ? `<select id="vault" aria-label="${t('tabularius.vault')}">${options}</select>` : ''}${current?.enabled ? iconButton('compose', t('tabularius.newChat'), 'id="new"') : ''}</div>
+    ${current?.enabled ? `<nav class="pane-list" aria-label="${t('tabularius.conversations')}">${listHtml()}</nav><nav class="pane-foot">${foot('proposals', 'proposal', t('tabularius.proposals'), view.startsWith('proposal'))}${foot('memories', 'memory', t('tabularius.memories'), view === 'memories')}${foot('settings', 'gear', t('tabularius.settings'), view === 'settings')}</nav>` : ''}</aside>
     <section class="assist-main">${content}</section></div>`;
   if (kept) {
     app.querySelector('.assist-main')!.scrollTop = kept.main;
     const list = app.querySelector('.pane-list');
     if (list) list.scrollTop = kept.list;
-    window.scrollTo(0, kept.page);
+    app.scrollTop = kept.page;
   }
   document.getElementById('vault')?.addEventListener('change', event => { vaultId = (event.target as HTMLSelectElement).value; view = 'chat'; void run(openVault); });
   document.getElementById('new')?.addEventListener('click', () => { view = 'chat'; conversationId = undefined; entries = []; newChat(); draw(); });
   document.getElementById('settings')?.addEventListener('click', () => { view = 'settings'; void run(async () => { await loadHosts(); await refresh(); }); });
   document.getElementById('proposals')?.addEventListener('click', () => void run(showProposals));
   document.getElementById('memories')?.addEventListener('click', () => void run(showMemories));
+  document.getElementById('new-project')?.addEventListener('click', () => void run(async () => { await newProject(); draw(); }));
   for (const item of app.querySelectorAll<HTMLButtonElement>('[data-proposal]')) item.addEventListener('click', () => void run(() => showProposal(item.dataset.proposal!)));
   for (const item of app.querySelectorAll<HTMLButtonElement>('.conversation')) item.addEventListener('click', () => void run(() => openConversation(item.dataset.id!)));
+  for (const item of app.querySelectorAll<HTMLButtonElement>('[data-project]')) item.addEventListener('click', () => {
+    const id = item.dataset.project!;
+    if (!expanded.delete(id)) expanded.add(id);
+    draw();
+  });
+  for (const item of app.querySelectorAll<HTMLButtonElement>('[data-more]')) item.addEventListener('click', () => conversationMenu(item, item.dataset.more!));
+  for (const item of app.querySelectorAll<HTMLButtonElement>('[data-project-more]')) item.addEventListener('click', () => projectMenu(item, item.dataset.projectMore!));
+}
+
+/** Asks for a project name and creates it; resolves to the new project, or undefined when cancelled. */
+async function newProject() {
+  const name = await askText({ title: t('tabularius.newProject'), label: t('tabularius.projectName'), action: t('tabularius.create') });
+  if (!name) return undefined;
+  const project = await api<Project>(`/tabularius/vaults/${encodeURIComponent(vaultId)}/projects`, 'POST', { name });
+  projects = [...projects, project].sort((a, b) => a.name.localeCompare(b.name));
+  expanded.add(project.id);
+  return project;
+}
+/** Changes a conversation's title, project or archive state, and updates the list. */
+async function arrange(id: string, change: { title?: string; project?: string | null; archived?: boolean }) {
+  await api(`/tabularius/conversations/${encodeURIComponent(id)}`, 'PATCH', change);
+  conversations = conversations.map(c => c.id !== id ? c : { ...c, ...(change.title ? { title: change.title } : {}),
+    ...(change.project !== undefined ? { projectId: change.project } : {}), ...(change.archived !== undefined ? { archived: change.archived } : {}) });
+  draw();
+}
+function conversationMenu(anchor: HTMLElement, id: string) {
+  const conversation = conversations.find(c => c.id === id)!;
+  const items: MenuItem[] = [
+    { label: t('tabularius.rename'), icon: 'pencil', action: async () => {
+      const title = await askText({ title: t('tabularius.rename'), label: t('tabularius.chatTitle'), value: conversation.title, action: t('common.save') });
+      if (title) await arrange(id, { title });
+    } },
+    '-',
+    { label: t('tabularius.moveTo'), heading: true },
+    ...projects.map(project => ({ label: project.name, icon: 'folder', checked: conversation.projectId === project.id, action: () => arrange(id, { project: project.id }) })),
+    { label: t('tabularius.newProjectEllipsis'), icon: 'plus', action: async () => { const project = await newProject(); if (project) await arrange(id, { project: project.id }); else draw(); } },
+    ...(conversation.projectId ? [{ label: t('tabularius.leaveProject'), icon: 'back', action: () => arrange(id, { project: null }) }] : []),
+    '-',
+    conversation.archived
+      ? { label: t('tabularius.unarchive'), icon: 'unarchive', action: () => arrange(id, { archived: false }) }
+      : { label: t('tabularius.archive'), icon: 'archive', action: () => arrange(id, { archived: true }) },
+    { label: t('tabularius.deleteChat'), icon: 'trash', danger: true, action: async () => {
+      if (!await confirmAction({ title: t('tabularius.deleteChat'), body: t('tabularius.confirmDeleteChat'), action: t('tabularius.deleteChat'), danger: true })) return;
+      await api(`/tabularius/conversations/${encodeURIComponent(id)}`, 'DELETE');
+      conversations = conversations.filter(c => c.id !== id);
+      if (conversationId === id) { conversationId = undefined; entries = []; newChat(); }
+      draw();
+    } },
+  ];
+  popMenu(anchor, items);
+}
+function projectMenu(anchor: HTMLElement, id: string) {
+  const project = projects.find(p => p.id === id)!;
+  popMenu(anchor, [
+    { label: t('tabularius.rename'), icon: 'pencil', action: async () => {
+      const name = await askText({ title: t('tabularius.rename'), label: t('tabularius.projectName'), value: project.name, action: t('common.save') });
+      if (!name) return;
+      await api(`/tabularius/projects/${encodeURIComponent(id)}`, 'PATCH', { name });
+      projects = projects.map(p => p.id === id ? { ...p, name } : p).sort((a, b) => a.name.localeCompare(b.name)); draw();
+    } },
+    { label: t('tabularius.deleteProject'), icon: 'trash', danger: true, action: async () => {
+      if (!await confirmAction({ title: t('tabularius.deleteProject'), body: t('tabularius.confirmDeleteProject', { name: project.name }), action: t('tabularius.deleteProject'), danger: true })) return;
+      await api(`/tabularius/projects/${encodeURIComponent(id)}`, 'DELETE');
+      projects = projects.filter(p => p.id !== id);
+      conversations = conversations.map(c => c.projectId === id ? { ...c, projectId: null } : c); draw();
+    } },
+  ]);
 }
 async function openConversation(id: string) {
   const loaded = await api<{ id: string; messages: Entry[] } & ChatSettings>(`/tabularius/conversations/${encodeURIComponent(id)}`);
@@ -300,7 +402,7 @@ const rulesFields = (excluded: string, masks: string) => `
   <label><span>${t('tabularius.masks')}${tip(t('tabularius.masksHint'))}</span><textarea name="masks" rows="3" spellcheck="false">${escape(masks)}</textarea></label>`;
 
 function drawEnable(current: VaultStatus) {
-  shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.enableTitle', { name: escape(current.name) })}</h1></div></header>
+  shell(`<header class="page-head"><div><h1>${t('tabularius.enableTitle', { name: escape(current.name) })}</h1></div></header>
     <div class="card"><p>${t('tabularius.enableWarning', { provider: escape(recipeOf(overview!.defaultRecipe)?.modelName ?? t('tabularius.noModel')) })}</p>
     <form id="enable" class="stack"><label class="check"><input type="checkbox" name="confirm" required> ${t('tabularius.enableConfirm')}</label>
     <label>${t('tabularius.passphrase')}<input name="passphrase" type="password" data-bwignore data-1p-ignore data-lpignore="true" autocomplete="off" required></label>
@@ -313,14 +415,14 @@ function drawEnable(current: VaultStatus) {
   });
 }
 
-/** The hosted client's state as a small indicator: a coloured dot, the state, and what is indexed. */
-function syncPill(current: VaultStatus) {
-  const [kind, label] = current.deviceRevoked ? ['warn', t('tabularius.revoked')]
-    : !current.running ? ['warn', t('tabularius.stopped')]
+/** The hosted client's state as a dot; the state and what is indexed are in its tooltip. */
+function clientState(current: VaultStatus) {
+  const [kind, label] = current.deviceRevoked ? ['error', t('tabularius.revoked')]
+    : !current.running ? ['error', t('tabularius.stopped')]
       : current.indexError ? ['warn', t('tabularius.ready')]
         : current.replicated ? ['ok', t('tabularius.ready')] : ['busy', t('tabularius.syncing')];
-  const counts = t('tabularius.counts', { notes: current.notes ?? 0, chunks: current.chunks ?? 0 });
-  return `<span class="sync-pill ${kind}" role="status" title="${escape(current.indexError ? t('tabularius.indexError', { error: current.indexError }) : counts)}"><span class="dot" aria-hidden="true"></span><strong>${escape(label)}</strong><span class="sep" aria-hidden="true"></span><span>${escape(counts)}</span></span>`;
+  const detail = `${label} · ${t('tabularius.counts', { notes: current.notes ?? 0, chunks: current.chunks ?? 0 })}${current.indexError ? `\n${t('tabularius.indexError', { error: current.indexError })}` : ''}`;
+  return `<span class="client-state ${kind}" role="status" aria-label="${escape(detail)}" title="${escape(detail)}"><span class="dot ${kind === 'ok' ? '' : kind}"></span></span>`;
 }
 const GEAR_ICON = '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/><circle cx="10" cy="10" r="5.3"/></svg>';
 const SEND_ICON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4M4.5 9.5 10 4l5.5 5.5"/></svg>';
@@ -349,7 +451,7 @@ async function loadHosts() {
   catch (error) { if (!(error instanceof ApiError && error.status === 403)) throw error; isAdmin = false; hosts = []; commandLog = []; }
 }
 function drawSettings(current: VaultStatus) {
-  shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${escape(current.name)}</h1><p>${statusText(current)}</p></div><button id="reload">${t('common.refresh')}</button></header>
+  shell(`<header class="page-head"><div><h1>${escape(current.name)}</h1><p>${statusText(current)}</p></div>${iconButton('refresh', t('common.refresh'), 'id="reload"', 'raised')}</header>
     <div class="card"><h2>${t('tabularius.rules')}</h2><form id="rules" class="stack">
       ${rulesFields(current.excluded ?? '', current.masks ?? '')}
       <button class="primary" type="submit">${t('common.save')}</button></form></div>
@@ -445,7 +547,7 @@ async function showMemories() {
 function drawMemories() {
   const items = memories.map(m => `<form class="memory stack" data-id="${escape(m.id)}"><textarea name="content" rows="2" aria-label="${t('tabularius.memory')}">${escape(m.content)}</textarea>
     <div class="actions"><small>${formatDate(m.updatedAt)}</small><button type="submit">${t('common.save')}</button><button type="button" class="danger" data-delete>${t('tabularius.deleteMemory')}</button></div></form>`).join('');
-  shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.memories')}${tip(t('tabularius.memoriesDesc'))}</h1></div></header>
+  shell(`<header class="page-head"><div><h1>${t('tabularius.memories')}${tip(t('tabularius.memoriesDesc'))}</h1></div></header>
     <div class="card"><form id="add-memory" class="stack"><label>${t('tabularius.newMemory')}<textarea name="content" rows="2" required></textarea></label><button class="primary" type="submit">${t('tabularius.addMemory')}</button></form></div>
     <div class="card">${items || `<p class="muted">${t('tabularius.noMemories')}</p>`}</div>`);
   form('add-memory', async data => { await api('/tabularius/memories', 'POST', { content: data.get('content') }); await showMemories(); message(t('tabularius.saved')); });
@@ -470,7 +572,7 @@ async function showProposal(id: string) {
 }
 function drawProposals() {
   const rows = proposals.map(p => `<tr><td><button class="link" data-proposal="${escape(p.id)}">${escape(p.title)}</button></td><td>${statusBadge(p.status)}</td><td>${formatDate(p.createdAt)}</td></tr>`).join('');
-  shell(`<header class="page-head"><div><p class="eyebrow">Tabularius</p><h1>${t('tabularius.proposals')}</h1></div></header>
+  shell(`<header class="page-head"><div><h1>${t('tabularius.proposals')}</h1></div></header>
     <div class="card">${rows ? `<table><thead><tr><th>${t('tabularius.proposalTitle')}</th><th>${t('common.status')}</th><th>${t('tabularius.proposedAt')}</th></tr></thead><tbody>${rows}</tbody></table>` : `<p class="muted">${t('tabularius.noProposals')}</p>`}</div>`);
 }
 function fileHtml(file: ProposalFile) {
@@ -483,7 +585,7 @@ function fileHtml(file: ProposalFile) {
 }
 function drawProposal(detail: ProposalDetail) {
   const pending = detail.status === 'pending';
-  shell(`<header class="page-head"><div><p class="eyebrow">${t('tabularius.proposal')} ${statusBadge(detail.status)}</p><h1>${escape(detail.title)}</h1>
+  shell(`<header class="page-head"><div><h1>${escape(detail.title)} ${statusBadge(detail.status)}</h1>
       <p>${escape(detail.summary)}</p><small>${t('tabularius.fileCount', { count: detail.files.length })} · ${formatDate(detail.createdAt)}</small></div>
       <div class="actions"><button id="chat">${t('tabularius.backToChat')}</button>${pending ? `<button id="discard">${t('tabularius.discard')}</button><button id="apply" class="primary">${t('tabularius.apply')}</button>` : ''}</div></header>
     ${detail.error && pending ? `<div class="notice error">${t('tabularius.applyFailed')}<ul>${detail.error.split('\n').map(line => { const [kind, path] = line.split('\t'); return `<li>${path === undefined ? escape(kind) : (hasMessage(`tabularius.problem.${kind}`) ? t(`tabularius.problem.${kind as 'missing'}`, { path: escape(path) }) : `${escape(kind)}: ${escape(path)}`)}</li>`; }).join('')}</ul></div>` : ''}
@@ -509,24 +611,19 @@ function drawChat(current: VaultStatus) {
   // The recipe and this conversation's settings sit in the box itself, with the send button.
   const picker = overview!.recipes.length ? `<button id="chat-settings" type="button" class="icon-button" aria-label="${t('tabularius.chatSettings')}" title="${t('tabularius.chatSettings')}">${GEAR_ICON}</button><select id="chat-recipe" class="bare" aria-label="${t('tabularius.recipe')}" title="${escape(recipeOf(chat.recipe)?.modelName ?? '')}">${recipeOptions(chat.recipe, chat.recipe ? undefined : t('tabularius.noModel'))}</select>` : '';
   const attach = `<button id="attach" type="button" class="icon-button" aria-label="${t('tabularius.attach')}" title="${t('tabularius.attachHint')}">${ATTACH_ICON}</button><input id="attach-input" type="file" multiple hidden>`;
-  const webPill = chat.web && webAllowed() ? `<span class="composer-pill">${t('tabularius.webPill')}</span>` : '';
-  const composer = `<form id="ask" class="composer"><div id="attachments" class="attachments">${pendingHtml()}</div><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${escape(t('tabularius.ask'))}" aria-label="${escape(t('tabularius.ask'))}" title="${escape(t('tabularius.askHint'))}" ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><div class="composer-tools">${attach}${picker}${webPill}</div><div class="composer-tools"><small>${escape(current.name)}</small><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></div></form>`;
+  const webPill = chat.web && webAllowed() ? `<span class="composer-pill" title="${t('tabularius.webSearch')}">${icon('globe')}${t('tabularius.webPill')}</span>` : '';
+  const composer = `<form id="ask" class="composer"><div id="attachments" class="attachments">${pendingHtml()}</div><textarea name="message" rows="${entries.length ? 2 : 3}" placeholder="${escape(t('tabularius.ask'))}" aria-label="${escape(t('tabularius.ask'))}" title="${escape(t('tabularius.askHint'))}" ${busy ? 'disabled' : ''}></textarea><div class="composer-bar"><div class="composer-tools">${attach}${picker}${webPill}</div><div class="composer-tools"><button class="primary send" type="submit" aria-label="${t('tabularius.send')}" title="${t('tabularius.send')}" ${busy ? 'disabled' : ''}>${SEND_ICON}</button></div></div></form>`;
   // A new conversation starts in the middle of the page; once it has messages the box moves below them.
-  shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${syncPill(current)}${conversationId ? `<button id="delete" class="danger">${t('tabularius.deleteChat')}</button>` : ''}</div></header>
+  shell(`<header class="chat-top"><h1 class="chat-title">${escape(title)}</h1><div class="chat-tools">${clientState(current)}</div></header>
     ${current.indexError ? `<p class="notice error">${t('tabularius.indexError', { error: escape(current.indexError) })}</p>` : ''}
-    ${entries.length ? `<section id="log" class="log" aria-live="polite">${entries.map(entryHtml).join('')}</section><div class="chat-bottom">${composer}</div>`
-    : `<div class="chat-start"><div class="chat-start-inner"><h2 class="chat-hello">Tabularius</h2>${composer}</div></div><div id="log" hidden></div>`}`);
+    ${entries.length ? `<section id="log" class="log" aria-live="polite">${entries.map(entry => entryHtml(entry)).join('')}</section><div class="chat-bottom">${composer}</div>`
+    : `<div class="chat-start"><div class="chat-start-inner"><h2 class="chat-hello"><span class="brand-mark"><svg viewBox="0 0 64 64" aria-hidden="true">${markShapes()}</svg></span>Tabularius</h2>${composer}</div></div><div id="log" hidden></div>`}`);
   const log = document.getElementById('log')!;
   log.scrollTop = log.scrollHeight;
   // Diagrams are drawn once an answer is complete; while it streams their source shows.
   if (!busy) void answers.renderDiagrams(log);
   document.getElementById('chat-recipe')?.addEventListener('change', event => void run(async () => { await saveChat({ recipe: (event.target as HTMLSelectElement).value }); draw(); }));
   document.getElementById('chat-settings')?.addEventListener('click', chatSettings);
-  document.getElementById('delete')?.addEventListener('click', () => void run(async () => {
-    if (!await confirmAction({ title: t('tabularius.deleteChat'), body: t('tabularius.confirmDeleteChat'), action: t('tabularius.deleteChat'), danger: true })) return;
-    await api(`/tabularius/conversations/${encodeURIComponent(conversationId!)}`, 'DELETE');
-    conversations = conversations.filter(c => c.id !== conversationId); conversationId = undefined; entries = []; newChat(); draw();
-  }));
   const textarea = document.querySelector<HTMLTextAreaElement>('#ask textarea')!;
   textarea.addEventListener('keydown', event => {
     // Enter sends and Shift+Enter starts a new line; Enter that confirms an input method's composition does neither.
@@ -570,7 +667,7 @@ async function ask(text: string, attachments: AttachmentRef[]) {
   entries.push({ role: 'user', text, ...(attachments.length ? { attachments } : {}) }, answer);
   draw();
   const target = () => document.querySelector('#log .turn.assistant:last-child');
-  const update = () => { const node = target(); if (node) node.outerHTML = entryHtml({ ...answer, text: answer.text || t('tabularius.working') }); const log = document.getElementById('log'); if (log) log.scrollTop = log.scrollHeight; };
+  const update = () => { const node = target(); if (node) node.outerHTML = entryHtml(answer, busy); const log = document.getElementById('log'); if (log) log.scrollTop = log.scrollHeight; };
   update();
   try {
     const response = await fetch(conversationId ? `/api/v1/tabularius/conversations/${encodeURIComponent(conversationId)}/messages` : `/api/v1/tabularius/vaults/${encodeURIComponent(vaultId)}/conversations`, {
@@ -590,7 +687,7 @@ async function ask(text: string, attachments: AttachmentRef[]) {
         const event = /^event: (.*)$/m.exec(block)?.[1];
         const data = JSON.parse(/^data: (.*)$/m.exec(block)?.[1] ?? 'null');
         if (event === 'conversation') {
-          if (!conversationId) { conversationId = data.id; conversations.unshift({ id: data.id, title: data.title, updatedAt: Date.now() }); }
+          if (!conversationId) { conversationId = data.id; conversations.unshift({ id: data.id, title: data.title, updatedAt: Date.now(), projectId: null, archived: false }); }
         } else if (event === 'text') answer.text += data.text;
         else if (event === 'tool') answer.tools!.push(data);
         else if (event === 'approval') {

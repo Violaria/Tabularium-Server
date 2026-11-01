@@ -1,14 +1,14 @@
 // The Tabularium web application: one sign-in, one shell, and the modules home, web notes, Tabularius, administration
 // and account settings. Every path of the application loads this page; the path selects the module.
 import { t, type Language } from './i18n.js';
-import { api, ApiError, applyTheme, markShapes, notesStyles, captureLinks, chooseAction, connect, escape, form, icon, input, message, navigate, run, state, storedTheme, clearMessage, tip, type Session } from './core.js';
+import { api, ApiError, applyTheme, markShapes, notesStyles, captureLinks, chooseAction, connect, escape, form, icon, iconButton, input, message, navigate, run, state, storedTheme, clearMessage, tip, type Session } from './core.js';
 import { renderHome } from './home.js';
 import { renderAdmin } from './admin.js';
 import { renderAccount } from './account.js';
 import { renderTabularius } from './tabularius.js';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
-const mark = () => `<span class="brand-mark"><svg viewBox="0 0 64 64" aria-hidden="true">${markShapes()}</svg></span><div><strong>Tabularium</strong><small>${t('brand.subtitle')}</small></div>`;
+const mark = () => `<span class="brand-mark"><svg viewBox="0 0 64 64" aria-hidden="true">${markShapes()}</svg></span><strong>Tabularium</strong>`;
 const brand = () => `<div class="brand">${mark()}</div>`;
 
 type Module = 'home' | 'notes' | 'tabularius' | 'admin' | 'account';
@@ -89,7 +89,7 @@ function frame(current: Module) {
       ...(user.role === 'admin' ? [['admin', '/admin/', 'admin', t('nav.admin')] as [Module, string, string, string]] : []),
     ];
     app.innerHTML = `<div class="shell"><aside class="side"><a href="/" data-route class="brand">${mark()}</a><nav aria-label="${t('console.navLabel')}">${items.map(([module, href, glyph, label]) =>
-      `<a href="${href}" data-route data-module="${module}">${icon(glyph)}<span>${label}</span></a>`).join('')}</nav><div class="account"><a href="/account/" data-route data-module="account" class="who"><span class="avatar">${escape(user.username.slice(0, 1).toUpperCase())}</span><span><strong>${escape(user.username)}</strong><small>${user.role === 'admin' ? t('role.admin') : t('role.user')}</small></span></a><button id="logout" type="button">${t('common.signOut')}</button></div></aside><main class="content" id="content"></main></div>`;
+      `<a href="${href}" data-route data-module="${module}">${icon(glyph)}<span>${label}</span></a>`).join('')}</nav><div class="account"><a href="/account/" data-route data-module="account" class="who" title="${escape(t('account.title'))}"><span class="avatar">${escape(user.username.slice(0, 1).toUpperCase())}</span><span>${escape(user.username)}</span></a>${iconButton('logout', t('common.signOut'), 'id="logout"')}</div></aside><main class="content" id="content"></main></div>`;
     if (kept) document.getElementById('content')!.replaceWith(kept);
     document.getElementById('logout')!.addEventListener('click', () => void run(async () => {
       // A plain-text copy of notes left in a shared browser can be read by its next user: ask what to do with it.

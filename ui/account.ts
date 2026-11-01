@@ -52,7 +52,7 @@ export function deviceTable(devices: Device[], revocable: boolean) {
 
 async function vaultPage(content: HTMLElement, id: string) {
   const vault = await api<Vault>(`/vaults/${id}`);
-  const body = page(content, { title: vault.name, subtitle: t('vault.desc'), tabs: tabs(), actions: `<a class="button" href="/account/" data-route>${t('vault.back')}</a>` });
+  const body = page(content, { title: vault.name, subtitle: t('vault.desc'), tabs: tabs(), back: { href: '/account/', label: t('vault.back') } });
   const devices = await api<Device[]>(`/vaults/${id}/devices`);
   const rebuildCard = vault.state === 'ready' ? await rebuildSection(vault, devices) : '';
   body.innerHTML = `<section class="card"><h2>${t('vault.connection')}</h2><dl class="details"><dt>${t('vault.syncAddress')}</dt><dd>${escape(location.origin)}/sync</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl>${vault.state !== 'ready' ? `<br><button id="retry">${t('vault.retry')}</button>` : ''}</section><div id="new-secret"></div><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${deviceTable(devices, true)}</section>${vault.state === 'ready' ? `<section class="card"><h2>${t('vault.addDevice')}${tip(t('vault.clientHint'))}</h2><form id="issue-device" class="inline-form">${input(t('vault.deviceName'), 'name', 'text', `placeholder="${escape(t('vault.devicePlaceholder'))}" maxlength="128"`)}<button class="primary" type="submit">${t('vault.issue')}</button></form></section>` : ''}${rebuildCard}`;
@@ -155,7 +155,7 @@ function interfacePage(content: HTMLElement) {
   const recipe: Recipe = { ...(user.recipe ?? RECIPES.sakura) };
   const editing = current === 'custom';
   body.innerHTML = `<section class="card"><h2>${t('interface.language')}${tip(t('interface.languageDesc'))}</h2><div id="language-choice" class="language-choice"></div></section>
-    <section class="card"><h2>${t('theme.title')}${tip(t('theme.desc'))}</h2><div class="themes">${THEMES.map(theme => `<button type="button" class="theme-card" id="theme-${theme}" aria-pressed="${theme === current}"><span class="swatches ${theme}"><span></span><span></span><span></span></span><span>${t(`theme.${theme}`)}</span><small>${t(`theme.${theme}Desc`)}</small></button>`).join('')}</div>
+    <section class="card"><h2>${t('theme.title')}${tip(t('theme.desc'))}</h2><div class="themes">${THEMES.map(theme => `<button type="button" class="theme-card" id="theme-${theme}" aria-pressed="${theme === current}"><span class="swatches ${theme}"><span></span><span></span><span></span></span><span title="${escape(t(`theme.${theme}Desc`))}">${t(`theme.${theme}`)}</span></button>`).join('')}</div>
     <form id="recipe" class="recipe" ${editing ? '' : 'hidden'}><h3>${t('recipe.title')}${tip(t('recipe.hint'))}</h3><div class="recipe-fields">
       <label>${t('recipe.accent')}<input type="color" name="accent" value="${escape(recipe.accent)}"></label>
       <label>${t('recipe.tint')}<input type="range" name="tint" min="6" max="40" step="1" value="${recipe.tint}"></label>

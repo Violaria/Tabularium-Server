@@ -2,7 +2,7 @@
 // with the default one, the server's default prompt, and the knowledge base (RAGFlow). Keys are shown only by their last
 // four characters.
 import { t } from './i18n.js';
-import { api, ApiError, confirmAction, escape, message, run, tip } from './core.js';
+import { api, ApiError, confirmAction, escape, message, run, scroller, tip } from './core.js';
 import { FormError, modelName, modelOptions, paramForm, PROVIDER_NAMES as NAMES, type ModelOption, type Params, type ProviderName, type Rule } from './params.js';
 
 interface ModelEntry { id: string; name: string; context?: number; vision?: boolean }
@@ -88,7 +88,7 @@ export async function renderAiSettings(body: HTMLElement) {
   };
   const k = view.knowledge;
   // Drawn again after saving: stay where the page was.
-  const scrolled = window.scrollY;
+  const scrolled = scroller().scrollTop;
   const added = PROVIDERS.filter(name => view.providers[name].configured);
   body.innerHTML = `<section class="card"><div class="card-head"><h2>${t('ai.providersTitle')}${tip(t('ai.providersDesc'))}</h2>${added.length < PROVIDERS.length ? `<button type="button" id="add-provider">${t('ai.addProvider')}</button>` : ''}</div>
       <div id="providers" class="llm-recipes">${added.length ? added.map(providerItem).join('') : `<p class="muted">${t('ai.noProviders')}</p>`}</div></section>
@@ -131,7 +131,7 @@ export async function renderAiSettings(body: HTMLElement) {
         <label><span>${t('ai.attachmentLimit')}${tip(t('ai.attachmentLimitHint'))}</span><input name="attachmentMegabytes" type="number" min="1" max="100" value="${view.limits.attachmentMegabytes}"></label>
       </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form></section>`;
 
-  window.scrollTo(0, scrolled);
+  scroller().scrollTop = scrolled;
   const recipes: RecipeView[] = [...view.recipes];
   /** Saves the whole list with one recipe changed (or removed), then draws the page again where it was. */
   const saveRecipes = async (list: RecipeView[], defaultRecipe?: string) => {

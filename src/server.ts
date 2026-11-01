@@ -321,7 +321,7 @@ export async function createGateway(config: Config) {
         size, notes: assistant?.enabled ? (assistant as { notes: number }).notes : notes, devices, tabularius: Boolean(assistant?.enabled), recent });
     }
     const conversations = tabularius ? db.prepare(`SELECT c.id, c.title, c.vault_id AS vaultId, v.name AS vault, c.updated_at AS updatedAt
-      FROM tabularius_conversations c JOIN vaults v ON v.id=c.vault_id WHERE c.user_id=? ORDER BY c.updated_at DESC LIMIT 5`).all(user.id) : [];
+      FROM tabularius_conversations c JOIN vaults v ON v.id=c.vault_id WHERE c.user_id=? AND c.archived_at IS NULL ORDER BY c.updated_at DESC LIMIT 5`).all(user.id) : [];
     let server = null;
     if (user.role === 'admin') {
       let storage = false;
@@ -652,6 +652,8 @@ export async function createGateway(config: Config) {
           json(res, 200, t.status(vault)); return;
         }
         if (route.length === 4 && route[3] === 'conversations' && method === 'GET') { json(res, 200, t.conversations(vault.id, user)); return; }
+        if (route.length === 4 && route[3] === 'projects' && method === 'GET') { json(res, 200, t.projects(vault.id, user)); return; }
+        if (route.length === 4 && route[3] === 'projects' && method === 'POST') { json(res, 201, t.createProject(vault.id, user, (await body(req)).name)); return; }
         if (route.length === 4 && route[3] === 'conversations' && method === 'POST') {
           const data = await body(req, 131_072);
           // A message may be attachments alone; its text is then empty.
@@ -714,6 +716,10 @@ export async function createGateway(config: Config) {
           json(res, 200, result); return;
         }
         if (route.length === 4 && route[3] === 'discard' && method === 'POST') { json(res, 200, t.discard(route[2], user)); return; }
+      }
+      if (route[1] === 'projects' && route.length === 3) {
+        if (method === 'PATCH') { t.renameProject(route[2], user, (await body(req)).name); json(res, 200, { ok: true }); return; }
+        if (method === 'DELETE') { t.removeProject(route[2], user); json(res, 200, { ok: true }); return; }
       }
       if (route[1] === 'conversations' && route.length >= 3) {
         if (route.length === 3 && method === 'GET') { json(res, 200, t.conversation(route[2], user)); return; }

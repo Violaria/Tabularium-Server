@@ -65,7 +65,7 @@ async function vaultsPage(content: HTMLElement) {
 async function vaultPage(content: HTMLElement, id: string) {
   const vault = (await api<Vault[]>('/admin/vaults')).find(v => v.id === id);
   if (!vault) { frame(content).innerHTML = `<div class="empty">${t('vaults.none')}</div>`; return; }
-  const body = page(content, { title: vault.name, subtitle: t('admin.vaultDesc', { owner: vault.owner ?? '' }), tabs: tabs(), actions: `<a class="button" href="/admin/vaults" data-route>${t('vault.back')}</a>` });
+  const body = page(content, { title: vault.name, subtitle: t('admin.vaultDesc', { owner: vault.owner ?? '' }), tabs: tabs(), back: { href: '/admin/vaults', label: t('vault.back') } });
   const base = `/admin/vaults/${id}`;
   const devices = await api<Device[]>(`${base}/devices`);
   const own = vault.ownerId === state.session!.user.id;

@@ -1,7 +1,7 @@
 // Server settings, for administrators: mail and Kindle, sharing, and accounts and access. Everything the server used to
 // read from its environment at start is changed here and applies to the next request.
 import { t } from './i18n.js';
-import { api, askText, confirmAction, escape, form, message, run, tip } from './core.js';
+import { api, askText, confirmAction, escape, form, message, run, scroller, tip } from './core.js';
 
 interface Mail { host: string; port: number; security: 'tls' | 'starttls' | 'none'; user: string; from: string; passwordSet: boolean; passwordHint: string }
 interface View {
@@ -24,7 +24,7 @@ let lastTestTo = '';
 export async function renderServerSettings(body: HTMLElement) {
   const view = await api<View>('/admin/settings');
   const mail = view.mail ?? { host: '', port: 465, security: 'tls', user: '', from: '', passwordSet: false, passwordHint: '' };
-  const scrolled = window.scrollY;
+  const scrolled = scroller().scrollTop;
   body.innerHTML = `<section class="card"><h2>${t('settings.mailTitle')}${tip(t('settings.mailDesc'))}</h2><form id="mail" class="stack">
       <div class="recipe-fields">
         ${field(t('settings.mailHost'), `<input name="host" value="${escape(mail.host)}" placeholder="smtp.example.com">`, t('settings.mailHostHint'))}
@@ -50,7 +50,7 @@ export async function renderServerSettings(body: HTMLElement) {
     <section class="card"><h2>${t('settings.accessTitle')}</h2><form id="access" class="stack"><div class="recipe-fields">
         ${ACCESS.map(([name, min, max, step]) => field(t(`settings.access.${name}`), `<input name="${name}" type="number" min="${min}" max="${max}" step="${step}" value="${view.access[name]}">`, t(`settings.access.${name}Hint`))).join('')}
       </div><div class="actions"><button class="primary" type="submit">${t('common.save')}</button></div></form></section>`;
-  window.scrollTo(0, scrolled);
+  scroller().scrollTop = scrolled;
   const save = async (data: Record<string, unknown>) => { await api('/admin/settings', 'PUT', data); await renderServerSettings(body); message(t('settings.saved')); };
   form('mail', async data => {
     const host = String(data.get('host')).trim();

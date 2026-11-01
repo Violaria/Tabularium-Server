@@ -9,6 +9,7 @@ import { digest, token, type User, type Vault } from '../store.js';
 import { createClients, inspect, open, openBytes, seal, WrongPassphrase } from './client.js';
 import { checkMasks, createFilter, type Filter } from './filter.js';
 import { checkParams, PARAMS, ParamsError, type Params, type ProviderName } from './params.js';
+import { createProjects } from './projects.js';
 import { createSettings, parseModel, PROVIDERS, SettingsError, type InitialSettings } from './settings.js';
 import { addressPolicy, fetchPage, searxng, urlsIn, type WebOptions } from './web.js';
 import { createMemories, MemoryError } from './memory.js';
@@ -128,6 +129,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
   const indexErrors = new Map<string, string>();
   const row = (vaultId: string) => db.prepare('SELECT * FROM tabularius_vaults WHERE vault_id=?').get(vaultId) as unknown as Row | undefined;
   const settings = createSettings(db, config.key, config.initial);
+  const projects = createProjects(db, fail);
   // Parameters saved before they were kept per provider belong to the provider configured then.
   const formerProvider = parseModel(config.initial?.defaultModel ?? '')?.provider ?? 'anthropic';
   for (const r of db.prepare("SELECT vault_id, params FROM tabularius_vaults WHERE params<>''").all() as { vault_id: string; params: string }[]) {
@@ -236,6 +238,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     db.prepare('DELETE FROM tabularius_attachments WHERE vault_id=?').run(vaultId);
     db.prepare('DELETE FROM tabularius_messages WHERE conversation_id IN (SELECT id FROM tabularius_conversations WHERE vault_id=?)').run(vaultId);
     db.prepare('DELETE FROM tabularius_conversations WHERE vault_id=?').run(vaultId);
+    projects.forgetVault(vaultId);
     forget(db, vaultId);
     db.prepare('DELETE FROM tabularius_vaults WHERE vault_id=?').run(vaultId);
     db.exec('COMMIT');
@@ -806,6 +809,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     /** A conversation's recipe, extra prompt and adjusted parameters; they apply from its next answer. */
     configure(id: string, user: User, data: Record<string, unknown>) {
       const conversation = conversationFor(id, user);
+      projects.arrange(conversation, user, data);
       // null goes back to following the vault's recipe.
       if (data.recipe !== undefined && data.recipe !== null && (typeof data.recipe !== 'string' || !settings.usableRecipe(data.recipe))) fail(400, 'Recipe not available');
       if (data.prompt !== undefined && (typeof data.prompt !== 'string' || data.prompt.length > 8000)) fail(400, 'Invalid prompt');
@@ -830,8 +834,13 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       db.prepare('UPDATE tabularius_vaults SET mode=? WHERE vault_id=?').run(mode as Mode, vaultId);
     },
     conversations(vaultId: string, user: User) {
-      return db.prepare('SELECT id, title, created_at AS createdAt, updated_at AS updatedAt FROM tabularius_conversations WHERE vault_id=? AND user_id=? ORDER BY updated_at DESC').all(vaultId, user.id);
+      return (db.prepare('SELECT id, title, created_at AS createdAt, updated_at AS updatedAt, project_id AS projectId, archived_at AS archivedAt FROM tabularius_conversations WHERE vault_id=? AND user_id=? ORDER BY updated_at DESC')
+        .all(vaultId, user.id) as { archivedAt: number | null }[]).map(({ archivedAt, ...rest }) => ({ ...rest, archived: archivedAt !== null }));
     },
+    projects: (vaultId: string, user: User) => projects.list(vaultId, user),
+    createProject: (vaultId: string, user: User, name: unknown) => projects.create(vaultId, user, name),
+    renameProject: (id: string, user: User, name: unknown) => projects.rename(id, user, name),
+    removeProject: (id: string, user: User) => projects.remove(id, user),
     conversation(id: string, user: User) {
       const conversation = conversationFor(id, user);
       return { id, vaultId: conversation.vault_id, title: conversation.title, ...settingsOf(conversation), messages: transcript(id) };

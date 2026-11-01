@@ -68,8 +68,11 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await login(page, 'admin', password, '/admin/');
     await expect(page.getByRole('heading', { name: '修改初始密码' })).toBeVisible();
     await changePassword(page, password, 'admin-browser-password');
-    await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
-    await page.reload(); await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
+    // Administration opens on its overview; the tabs head the page, without a title that repeats the sidebar.
+    const overviewTab = page.getByRole('link', { name: '运行概览', exact: true });
+    await expect(overviewTab).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('heading', { name: '管理', exact: true })).toHaveCount(0);
+    await page.reload(); await expect(overviewTab).toHaveAttribute('aria-current', 'page');
     await expect(page.getByLabel('语言', { exact: true })).toHaveCount(0);
     const cookies = await context.cookies();
     assert.equal(cookies.find(c => c.name === 'tabularium_session').httpOnly, true);

@@ -517,7 +517,8 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert.match(await response.text(), /share-viewer\.js/);
       assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
       assert.match(response.headers.get('content-security-policy'), /script-src 'self';.*form-action 'none'/);
-      assert.doesNotMatch(response.headers.get('content-security-policy'), /unsafe|wasm/);
+      // Scripts are the page's own only; styles may be inline, for the diagrams Mermaid draws.
+      assert.doesNotMatch(response.headers.get('content-security-policy').replace("style-src 'self' 'unsafe-inline'", ''), /unsafe|wasm/);
       assert.equal((await api('/shares', 'GET', undefined, alice)).shares.find(share => share.id === encrypted.id).views, 1);
       // Size limit.
       await configure(v => { v.shares.maxMegabytes = 10 / 1024 / 1024; });

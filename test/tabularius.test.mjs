@@ -326,6 +326,42 @@ test('deleting a conversation deletes its attachments', async () => {
   } finally { db.close(); await rm(dir, { recursive: true }); }
 });
 
+test('projects group conversations; the archive keeps them; another user reaches neither', async () => {
+  const { createProjects } = await import('../dist/tabularius/projects.js');
+  const dir = await mkdtemp(join(tmpdir(), 'tabularium-projects-'));
+  const db = openStore(join(dir, 'app.sqlite'));
+  const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
+  try {
+    for (const [id, name] of [['u', 'alice'], ['w', 'eve']]) db.prepare("INSERT INTO users(id, username, password_hash, role) VALUES(?, ?, 'x', 'user')").run(id, name);
+    for (const id of ['v', 'v2']) db.prepare("INSERT INTO vaults(id, owner_id, name, database_name, state) VALUES(?, 'u', 'notes', ?, 'ready')").run(id, id);
+    for (const id of ['a', 'b']) db.prepare("INSERT INTO tabularius_conversations(id, user_id, vault_id, title, system, created_at, updated_at) VALUES(?, 'u', 'v', 't', '', 0, 0)").run(id);
+    const projects = createProjects(db, fail);
+    const alice = { id: 'u' }, eve = { id: 'w' };
+    const conversation = id => db.prepare('SELECT id, vault_id, title, project_id, archived_at FROM tabularius_conversations WHERE id=?').get(id);
+    const ops = projects.create('v', alice, '  运维 ');
+    assert.equal(ops.name, '运维');
+    assert.throws(() => projects.create('v', alice, ' '), /Invalid name/);
+    projects.arrange(conversation('a'), alice, { project: ops.id, title: '紫藤  端口', archived: true });
+    assert.deepEqual({ ...conversation('a') }, { id: 'a', vault_id: 'v', title: '紫藤 端口', project_id: ops.id, archived_at: conversation('a').archived_at });
+    assert(conversation('a').archived_at > 0);
+    projects.arrange(conversation('a'), alice, { archived: false });
+    assert.equal(conversation('a').archived_at, null);
+    // Another user's project, or one in another vault, cannot hold the conversation.
+    const other = projects.create('v', eve, 'eve');
+    const elsewhere = projects.create('v2', alice, '别处');
+    assert.throws(() => projects.arrange(conversation('b'), alice, { project: other.id }), /Project not found/);
+    assert.throws(() => projects.arrange(conversation('b'), alice, { project: elsewhere.id }), /Project not found/);
+    assert.throws(() => projects.rename(ops.id, eve, 'x'), /Project not found/);
+    assert.throws(() => projects.remove(ops.id, eve), /Project not found/);
+    assert.deepEqual(projects.list('v', alice).map(p => p.name), ['运维']);
+    projects.rename(ops.id, alice, '服务器');
+    // Deleting the project leaves its conversation ungrouped.
+    projects.remove(ops.id, alice);
+    assert.equal(conversation('a').project_id, null);
+    assert.equal(conversation('a').title, '紫藤 端口');
+  } finally { db.close(); await rm(dir, { recursive: true }); }
+});
+
 test('user masks run in linear time and RE2-incompatible ones are refused', async () => {
   const { checkMasks } = await import('../dist/tabularius/filter.js');
   const filter = createFilter('', 'ZETA-\\d+\n(a|aa)*b');

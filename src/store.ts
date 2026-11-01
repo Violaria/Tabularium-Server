@@ -327,6 +327,23 @@ export function openStore(path: string) {
   `);
     version = 17;
   }
-  if (version !== 17) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 17) {
+    // Projects group a user's conversations in a vault; deleting one leaves its conversations ungrouped. Archived
+    // conversations leave the list but stay readable and searchable.
+    db.exec(`
+    BEGIN;
+    CREATE TABLE tabularius_projects (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL REFERENCES vaults(id),
+      name TEXT NOT NULL, created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX tabularius_projects_user ON tabularius_projects(user_id, vault_id);
+    ALTER TABLE tabularius_conversations ADD COLUMN project_id TEXT REFERENCES tabularius_projects(id) ON DELETE SET NULL;
+    ALTER TABLE tabularius_conversations ADD COLUMN archived_at INTEGER;
+    PRAGMA user_version=18;
+    COMMIT;
+  `);
+    version = 18;
+  }
+  if (version !== 18) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

@@ -252,7 +252,8 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
     /** Handles a share route; returns false when the path is not one. */
     async handle(req: IncomingMessage, res: ServerResponse, path: string, route: string[], method: string) {
       if (path.startsWith('/s/') && ['GET', 'HEAD'].includes(method)) {
-        // The viewer page: its own scripts only; the content is fetched and rendered by the script.
+        // The viewer page: its own scripts only; the content is fetched and rendered by the script. Styles may be inline:
+        // Mermaid diagrams carry their own <style>, as they do in web notes.
         let share: (Share & { theme: string | null; theme_recipe: string | null }) | undefined;
         try {
           share = db.prepare('SELECT s.*, u.theme, u.theme_recipe FROM shares s JOIN users u ON u.id=s.owner_id WHERE s.slug=?')
@@ -261,7 +262,7 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
           ...(share?.indexable && state(share) === 'active' ? {} : { 'x-robots-tag': 'noindex, nofollow' }),
-          'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+          'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
         });
         res.end(method === 'HEAD' ? undefined : themed(viewer, share?.theme ?? null, share?.theme_recipe ?? null));
         return true;
