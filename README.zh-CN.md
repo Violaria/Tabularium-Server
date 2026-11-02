@@ -12,7 +12,7 @@
 - 发送到 Kindle：插件和云笔记生成 EPUB，服务器通过配置的 SMTP 账户发出。
 - 定时备份应用库和每个笔记库，分全量和增量，写入挂载的目录，可用 `deploy/backup/cli.ts restore-scheduled` 恢复。
 - Tabularius（书记员），可选的 AI 管理员，由笔记库所有者按笔记库开启。只有开启后，服务器才会保存该笔记库的密码短语（用 `TABULARIUS_SECRET_KEY` 加密）并维护一份明文工作副本。这样它才能检索笔记、带引用作答，并提出修改建议；修改要经所有者审阅后才写回。
-  - 提供商：Anthropic、OpenAI、Gemini、DeepSeek、vLLM 和 Ollama。
+  - 提供商：Anthropic、OpenAI、Gemini、DeepSeek、vLLM、Ollama 和 TensorRT-LLM；配方可以设置各提供商接口接受的全部参数。
   - 可选工具：本地 RAGFlow 知识库、联网搜索、对登记主机的 SSH，以及运行代码的沙箱。
   - 发给提供商的文字会经过出站过滤，凭据会被遮盖。
 
