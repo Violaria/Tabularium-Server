@@ -499,7 +499,9 @@ test('stored default and vault prompts get the new sortspec.md lines unless the 
   const { createSettings } = await import('../dist/tabularius/settings.js');
   const { DEFAULT_PROMPT, FORMER_PROMPT_LINES } = await import('../dist/tabularius/prompt.js');
   const secret = randomBytes(32);
-  const former = FORMER_PROMPT_LINES.reduce((prompt, [old, current]) => prompt.replace(current, old), DEFAULT_PROMPT);
+  // The prompt as the oldest release wrote it, and as 0.26.0 to 0.26.2 did.
+  const former = [...FORMER_PROMPT_LINES].reverse().reduce((prompt, [old, current]) => prompt.replace(current, old), DEFAULT_PROMPT);
+  const sortspecList = DEFAULT_PROMPT.replace(FORMER_PROMPT_LINES[2][1], FORMER_PROMPT_LINES[2][0]);
   const dir = await mkdtemp(join(tmpdir(), 'tabularius-prompt-'));
   let count = 0;
   const fresh = () => {
@@ -515,6 +517,7 @@ test('stored default and vault prompts get the new sortspec.md lines unless the 
   };
   assert.notEqual(former, DEFAULT_PROMPT);
   assert.equal(reopen(fresh(), former), DEFAULT_PROMPT);
+  assert.equal(reopen(fresh(), sortspecList), DEFAULT_PROMPT);
   const edited = former.replace(FORMER_PROMPT_LINES[1][0], '- Sort order: my own rule.');
   const kept = reopen(fresh(), edited);
   assert(kept.includes('- Sort order: my own rule.'));
@@ -525,6 +528,6 @@ test('stored default and vault prompts get the new sortspec.md lines unless the 
   db.prepare("INSERT INTO tabularius_vaults(vault_id, device_id, device_secret, passphrase, tweaks, enabled_at, prompt) VALUES('v','d',x'00',x'00','{}',0,?)")
     .run(`本库的规则\n${FORMER_PROMPT_LINES[1][0]}\n其余`);
   createSettings(db, secret);
-  assert.equal(db.prepare("SELECT prompt FROM tabularius_vaults WHERE vault_id='v'").get().prompt, `本库的规则\n${FORMER_PROMPT_LINES[1][1]}\n其余`);
+  assert.equal(db.prepare("SELECT prompt FROM tabularius_vaults WHERE vault_id='v'").get().prompt, `本库的规则\n${FORMER_PROMPT_LINES[2][1]}\n其余`);
   await rm(dir, { recursive: true, force: true });
 });

@@ -35,7 +35,7 @@ How to curate:
 - Markdown: no front matter unless the vault uses it for a purpose; sections start at ## and do not skip levels; every code block has a language tag; commands one per line without prompts; inline code for paths, commands and settings; no bold in running text; no emoji. Vault links are relative paths with spaces written as %20.
 - When you move or rename, mention that links to the moved files are repaired automatically.
 - Index notes: if a top-level folder has a Content.md listing its notes, update it in the same proposal when you create, rename, move or delete notes in that folder. A new top-level folder gets its own Content.md if the others have one.
-- Sort order: if the vault has sortspec.md, the indented list in its body gives the display order: one item per note (name without .md) or folder, items nested under a folder are inside it, text after " —— " is a note for readers, and "..." marks where unlisted items go. Text outside the list is free. Update the list in the same proposal when you create, rename, move or delete listed notes or folders; keep the order of the existing items and their notes unless asked.
+- Sort order: if the vault has Collation.md, the indented list in its body gives the display order: one item per note (name without .md) or folder, items nested under a folder are inside it, text after " —— " is a note for readers, and "..." marks where unlisted items go. Text outside the list is free. Update the list in the same proposal when you create, rename, move or delete listed notes or folders; keep the order of the existing items and their notes unless asked.
 - An empty folder does not sync to other devices; do not leave one behind, and do not create one without a note in it.
 
 How to verify (when web tools are available):
@@ -58,12 +58,13 @@ export const CONVERSATION_PROMPT = (text: string) => text.trim() ? `\n\nInstruct
 export const MEMORIES = (lines: string[]) => lines.length ? `\n\nWhat you remember about the user (memory ids in brackets, for update_memory and delete_memory):\n${lines.join('\n')}` : '';
 
 /**
- * Lines of the default prompt as earlier versions wrote them, with their replacements: sortspec.md moved its rules from
- * the front matter to a list in the body. A stored prompt (the default prompt or a vault's) that still holds such a line
+ * Lines of the default prompt as earlier versions wrote them, with their replacements, applied in order: the sorting
+ * rules moved from the front matter of sortspec.md to a list in its body (0.26.0), and then to Collation.md (0.26.3). A stored prompt (the default prompt or a vault's) that still holds such a line
  * word for word gets the new one;
  * a line the administrator changed is left alone.
  */
 export const FORMER_PROMPT_LINES: [string, string][] = [
   [`- Markdown: no front matter unless the vault uses it for a purpose (such as sortspec.md); `, `- Markdown: no front matter unless the vault uses it for a purpose; `],
   [`- Sort order: if the vault root has sortspec.md, its front matter key sorting-spec lists, for each "target-folder: <path>" block, the file names (without .md) and subfolders in display order. Update it in the same proposal when you create, rename, move or delete listed notes or folders, and keep the order of the existing entries unless asked.`, `- Sort order: if the vault has sortspec.md, the indented list in its body gives the display order: one item per note (name without .md) or folder, items nested under a folder are inside it, text after " —— " is a note for readers, and "..." marks where unlisted items go. Text outside the list is free. Update the list in the same proposal when you create, rename, move or delete listed notes or folders; keep the order of the existing items and their notes unless asked.`],
+  [`- Sort order: if the vault has sortspec.md, the indented list in its body gives the display order: one item per note (name without .md) or folder, items nested under a folder are inside it, text after " —— " is a note for readers, and "..." marks where unlisted items go. Text outside the list is free. Update the list in the same proposal when you create, rename, move or delete listed notes or folders; keep the order of the existing items and their notes unless asked.`, `- Sort order: if the vault has Collation.md, the indented list in its body gives the display order: one item per note (name without .md) or folder, items nested under a folder are inside it, text after " —— " is a note for readers, and "..." marks where unlisted items go. Text outside the list is free. Update the list in the same proposal when you create, rename, move or delete listed notes or folders; keep the order of the existing items and their notes unless asked.`],
 ];
