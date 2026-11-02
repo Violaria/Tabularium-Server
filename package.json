@@ -1,6 +1,8 @@
 {
   "name": "@tabularium/server",
   "version": "0.25.0",
+  "author": "Hanae Nanako",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
