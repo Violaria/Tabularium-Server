@@ -7,7 +7,7 @@ The server of [Tabularium](https://github.com/Violaria/Tabularium): a Node.js ga
 ## What it does
 
 - Accounts, vaults and device credentials. Registration is closed; administrators create accounts. Each vault is its own CouchDB database. Devices get their own credentials, valid for 30 days and renewed by the clients while in use.
-- Synchronisation gateway. The Obsidian plug-in (and other Self-hosted LiveSync 1.0 clients) replicate through `/sync`, including the long-lived change feed. The gateway rejects documents that are not end-to-end encrypted with path obfuscation, so the server only ever stores ciphertext. CouchDB is reachable only on the Compose internal network.
+- Synchronisation gateway. The Obsidian plug-in and the command-line client replicate through `/sync`, including the long-lived change feed. The gateway rejects documents that are not end-to-end encrypted with path obfuscation, so the server only ever stores ciphertext. CouchDB is reachable only on the Compose internal network.
 - Web app at `/`: the administration console, a browser client for vaults (decrypted in the browser with the vault passphrase, which never reaches the server), account settings, and shared note pages at `/s/<address>`.
 - Send to Kindle: the plug-in and the browser client build an EPUB and the server mails it through the configured SMTP account.
 - Scheduled backups of the application database and every vault, full and incremental, written to a mounted directory and restorable with `deploy/backup/cli.ts restore-scheduled`.
@@ -30,7 +30,7 @@ test/                API and browser tests
 Dockerfile
 ```
 
-The image also contains `notes-dist/` (the browser client) and `cli-dist/` (the LiveSync CLI used by Tabularius). Both are built from the plug-in repository by `npm run build:notes` and `npm run build:cli` in the parent repository, which is why the server cannot be built on its own.
+The image also contains `notes-dist/` (the browser client) and `cli-dist/` (the command-line client used by Tabularius). Both are built from the plug-in repository by `npm run build:notes` and `npm run build:cli` in the parent repository, which is why the server cannot be built on its own.
 
 ## Development
 

@@ -7,7 +7,7 @@
 ## 功能
 
 - 账户、笔记库和设备凭据。不开放注册，账户由管理员创建。每个笔记库是一个独立的 CouchDB 数据库。每台设备有自己的凭据，有效期 30 天，客户端在使用中会自动续期。
-- 同步网关。Obsidian 插件（以及其他 Self-hosted LiveSync 1.0 客户端）经 `/sync` 复制，包括长连接的变更流。网关拒绝没有端到端加密和路径混淆的文档，所以服务器只会存密文。CouchDB 只在 Compose 内部网络中可达。
+- 同步网关。Obsidian 插件和命令行客户端经 `/sync` 复制，包括长连接的变更流。网关拒绝没有端到端加密和路径混淆的文档，所以服务器只会存密文。CouchDB 只在 Compose 内部网络中可达。
 - `/` 下的网页应用：管理控制台、笔记库的浏览器客户端云笔记（用笔记库的密码短语在浏览器内解密，密码短语不会到达服务器）、账户设置，以及 `/s/<地址>` 下的笔记分享页。
 - 发送到 Kindle：插件和云笔记生成 EPUB，服务器通过配置的 SMTP 账户发出。
 - 定时备份应用库和每个笔记库，分全量和增量，写入挂载的目录，可用 `deploy/backup/cli.ts restore-scheduled` 恢复。
@@ -33,7 +33,7 @@ test/                API 与浏览器测试
 Dockerfile
 ```
 
-镜像里还包含 `notes-dist/`（云笔记）和 `cli-dist/`（Tabularius 使用的 LiveSync CLI）。两者都从插件仓库构建，由父仓库的 `npm run build:notes` 和 `npm run build:cli` 完成，所以服务器不能单独构建。
+镜像里还包含 `notes-dist/`（云笔记）和 `cli-dist/`（Tabularius 使用的命令行客户端）。两者都从插件仓库构建，由父仓库的 `npm run build:notes` 和 `npm run build:cli` 完成，所以服务器不能单独构建。
 
 ## 开发
 

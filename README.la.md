@@ -7,7 +7,7 @@ Ministrator [Tabularii](https://github.com/Violaria/Tabularium): porta Node.js a
 ## Quid facit
 
 - Rationes usorum, tabularia et testimonia instrumentorum. Inscriptio libera non est; administratores rationes creant. Quodque tabularium suum repositorium CouchDB est. Instrumenta testimonia sua accipiunt, triginta dies valida, quae clientes dum adhibentur renovant.
-- Porta synchronizationis. Additamentum Obsidian (et alii clientes Self-hosted LiveSync 1.0) per `/sync` replicant, fluxu mutationum diuturno incluso. Porta documenta reicit quae cryptographia ab extremo ad extremum cum viis obscuratis carent, ita ut ministrator nihil nisi textum cryptatum servet. CouchDB tantum in rete interno Compose attingi potest.
+- Porta synchronizationis. Additamentum Obsidian et cliens lineae mandatorum per `/sync` replicant, fluxu mutationum diuturno incluso. Porta documenta reicit quae cryptographia ab extremo ad extremum cum viis obscuratis carent, ita ut ministrator nihil nisi textum cryptatum servet. CouchDB tantum in rete interno Compose attingi potest.
 - Applicatio interretialis sub `/`: consola administrationis, commentarii interretiales, cliens tabulariorum in navigatro (in navigatro decrypti tessera arcana tabularii, quae ad ministratorem numquam pervenit), optiones rationis, paginae commentariorum communicatorum sub `/s/<inscriptio>`.
 - Missio ad Kindle: additamentum et commentarii interretiales EPUB faciunt, quod ministrator per rationem SMTP constitutam mittit.
 - Exempla tutelaria statuta repositorii applicationis et omnium tabulariorum, plena et incrementalia, in capsam insertam scripta, quae per `deploy/backup/cli.ts restore-scheduled` restitui possunt.
@@ -33,7 +33,7 @@ test/                probationes API et navigatri
 Dockerfile
 ```
 
-Imago etiam `notes-dist/` (commentarios interretiales) et `cli-dist/` (LiveSync CLI quo Tabularius utitur) continet. Utrumque ex repositorio additamenti per `npm run build:notes` et `npm run build:cli` in repositorio parente construitur; ideo ministrator solus construi non potest.
+Imago etiam `notes-dist/` (commentarios interretiales) et `cli-dist/` (clientem lineae mandatorum quo Tabularius utitur) continet. Utrumque ex repositorio additamenti per `npm run build:notes` et `npm run build:cli` in repositorio parente construitur; ideo ministrator solus construi non potest.
 
 ## Excolendi ratio
 
