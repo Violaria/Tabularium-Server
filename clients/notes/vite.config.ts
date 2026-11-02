@@ -40,5 +40,5 @@ export default defineConfig({
             },
         },
     },
-    define: { MANIFEST_VERSION: JSON.stringify(version), PACKAGE_VERSION: JSON.stringify(version), global: "globalThis" },
+    define: { MANIFEST_VERSION: JSON.stringify(version), PACKAGE_VERSION: JSON.stringify(version), global: "globalThis", self: "globalThis" },
 });
