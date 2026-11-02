@@ -29,11 +29,13 @@ src/smtp.ts          epistulae ad Kindle
 src/tabularius/      curator: cliens gubernatus, quaestio, praebitores, propositiones, SSH, interrete
 src/sandbox.ts       officium arenarii (eadem imago, continens separatum cum Docker socket)
 ui/                  applicatio interretialis (TypeScript, per build-ui.mjs constructa)
+clients/notes/       commentarii interretiales (Svelte, per Vite constructi)
+clients/cli/         cliens lineae mandatorum, cliens gubernatus Tabularii
 test/                probationes API et navigatri
 Dockerfile
 ```
 
-Imago etiam `notes-dist/` (commentarios interretiales) et `cli-dist/` (clientem lineae mandatorum quo Tabularius utitur) continet. Utrumque ex repositorio additamenti per `npm run build:notes` et `npm run build:cli` in repositorio parente construitur; ideo ministrator solus construi non potest.
+Imago etiam `notes-dist/` (commentarios interretiales) et `cli-dist/` (clientem lineae mandatorum quo Tabularius utitur) continet, ex `clients/` per `npm run build:notes` et `npm run build:cli` in repositorio parente constructos. Clientes nucleo synchronizationis et dependentiis additamenti utuntur (`clients/node_modules` ad additamenti nexum est); ideo ministrator solus construi non potest.
 
 ## Excolendi ratio
 

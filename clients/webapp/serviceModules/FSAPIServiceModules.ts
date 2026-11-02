@@ -1,0 +1,119 @@
+import type { InjectableServiceHub } from "@tabularium/sync-core/compat/services/implements/injectable/InjectableServiceHub";
+import { ServiceRebuilder } from "@tabularium/sync-core/compat/serviceModules/Rebuilder";
+
+import { StorageAccessManager } from "@tabularium/sync-core/compat/managers/StorageProcessingManager";
+import type { SyncCore } from "@/core/createCore";
+import type { ServiceContext } from "@tabularium/sync-core/context";
+import { FileAccessFSAPI } from "./FileAccessFSAPI";
+import { ServiceFileAccessFSAPI } from "./ServiceFileAccessImpl";
+import { ServiceDatabaseFileAccessFSAPI } from "./DatabaseFileAccess";
+import { StorageEventManagerFSAPI } from "@clients/webapp/managers/StorageEventManagerFSAPI";
+import type { ServiceModules } from "@tabularium/sync-core/compat/interfaces/ServiceModule";
+import { ServiceFileHandler } from "@/core/serviceModules/FileHandler";
+import { createFileReflectionProvenance } from "@/core/serviceModules/FileReflectionProvenance";
+
+export interface FSAPIServiceModules extends ServiceModules {
+    vaultAccess: FileAccessFSAPI;
+    storageEventManager: StorageEventManagerFSAPI;
+}
+
+/**
+ * Initialize service modules for FileSystem API webapp version
+ * This is the webapp equivalent of TabulariumPlugin.initialiseServiceModules
+ *
+ * @param rootHandle - The root FileSystemDirectoryHandle for the vault
+ * @param core - The SyncCore instance
+ * @param services - The service hub
+ * @returns ServiceModules containing all initialized service modules
+ */
+export function initialiseServiceModulesFSAPI(
+    rootHandle: FileSystemDirectoryHandle,
+    core: SyncCore<ServiceContext>,
+    services: InjectableServiceHub<ServiceContext>
+): FSAPIServiceModules {
+    const storageAccessManager = new StorageAccessManager();
+
+    // FileSystem API-specific file access
+    const vaultAccess = new FileAccessFSAPI(rootHandle, {
+        storageAccessManager: storageAccessManager,
+        vaultService: services.vault,
+        settingService: services.setting,
+        APIService: services.API,
+        pathService: services.path,
+    });
+
+    // FileSystem API-specific storage event manager
+    const storageEventManager = new StorageEventManagerFSAPI(rootHandle, core, {
+        fileProcessing: services.fileProcessing,
+        setting: services.setting,
+        vaultService: services.vault,
+        storageAccessManager: storageAccessManager,
+        APIService: services.API,
+    });
+
+    // Storage access using FileSystem API adapter
+    const storageAccess = new ServiceFileAccessFSAPI({
+        API: services.API,
+        setting: services.setting,
+        fileProcessing: services.fileProcessing,
+        vault: services.vault,
+        appLifecycle: services.appLifecycle,
+        storageEventManager: storageEventManager,
+        storageAccessManager: storageAccessManager,
+        vaultAccess: vaultAccess,
+    });
+
+    // Database file access (platform-independent)
+    const databaseFileAccess = new ServiceDatabaseFileAccessFSAPI({
+        events: services.context.events,
+        API: services.API,
+        database: services.database,
+        path: services.path,
+        storageAccess: storageAccess,
+        vault: services.vault,
+    });
+
+    // File handler (platform-independent)
+    const fileHandler = new ServiceFileHandler({
+        events: services.context.events,
+        API: services.API,
+        databaseFileAccess: databaseFileAccess,
+        conflict: services.conflict,
+        setting: services.setting,
+        fileProcessing: services.fileProcessing,
+        vault: services.vault,
+        path: services.path,
+        replication: services.replication,
+        storageAccess: storageAccess,
+        fileReflectionProvenance: createFileReflectionProvenance(services.keyValueDB),
+    });
+
+    // Rebuilder (platform-independent)
+    const rebuilder = new ServiceRebuilder({
+        path: services.path,
+        events: services.context.events,
+        API: services.API,
+        database: services.database,
+        appLifecycle: services.appLifecycle,
+        setting: services.setting,
+        remote: services.remote,
+        databaseEvents: services.databaseEvents,
+        replication: services.replication,
+        replicator: services.replicator,
+        UI: services.UI,
+        vault: services.vault,
+        fileHandler: fileHandler,
+        fileProcessing: services.fileProcessing,
+        storageAccess: storageAccess,
+        control: services.control,
+    });
+
+    return {
+        rebuilder,
+        fileHandler,
+        databaseFileAccess,
+        storageAccess,
+        vaultAccess,
+        storageEventManager,
+    };
+}

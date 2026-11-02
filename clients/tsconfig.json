@@ -1,0 +1,13 @@
+// Shared by the clients' own tsconfig files: the plug-in's compiler settings, its sources under @/, the sync core under
+// @lib/, and these clients under @clients/. Packages come from the plug-in's node_modules (the node_modules link here).
+{
+    "extends": "../../obsidian/tsconfig.json",
+    "compilerOptions": {
+        "paths": {
+            "@/*": ["../../obsidian/src/*"],
+            "@lib/*": ["../../obsidian/packages/sync-core/src/*"],
+            "@clients/*": ["./*"]
+        }
+    },
+    "include": []
+}

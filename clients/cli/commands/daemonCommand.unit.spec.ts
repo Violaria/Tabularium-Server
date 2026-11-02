@@ -1,0 +1,326 @@
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { createServiceContext } from "@tabularium/sync-core/context";
+import { NO_INTERACTION } from "@tabularium/sync-core/replication";
+import { runCommand } from "./runCommand";
+import type { CLIOptions } from "./types";
+
+// Track explicit scans: database preparation owns the daemon startup scan.
+vi.mock("@tabularium/sync-core/compat/serviceFeatures/offlineScanner", () => ({
+    performFullScan: vi.fn(async () => true),
+}));
+
+// Mock UnresolvedErrorManager to avoid event-hub side effects.
+vi.mock("@tabularium/sync-core/compat/services/base/UnresolvedErrorManager", () => ({
+    UnresolvedErrorManager: class UnresolvedErrorManager {
+        showError() {}
+        clearError() {}
+        clearErrors() {}
+    },
+}));
+
+import * as offlineScanner from "@tabularium/sync-core/compat/serviceFeatures/offlineScanner";
+
+function createCoreMock() {
+    const standardIo = {
+        readStdin: vi.fn(async () => ""),
+        prompt: vi.fn(async () => ""),
+        writeStdout: vi.fn((_chunk: string | Uint8Array) => undefined),
+        writeStderr: vi.fn((_chunk: string | Uint8Array) => undefined),
+    };
+    return {
+        services: {
+            context: Object.assign(createServiceContext(), { standardIo }),
+            control: {
+                activated: Promise.resolve(),
+                applySettings: vi.fn(async () => {}),
+            },
+            setting: {
+                applyPartial: vi.fn(async () => {}),
+                currentSettings: vi.fn(() => ({ liveSync: true, syncOnStart: false })),
+            },
+            replication: {
+                replicateUnattended: vi.fn(async () => ({ status: "completed" as const })),
+            },
+            appLifecycle: {
+                onUnload: {
+                    addHandler: vi.fn(),
+                },
+            },
+        },
+        serviceModules: {
+            fileHandler: {
+                dbToStorage: vi.fn(async () => true),
+                storeFileToDB: vi.fn(async () => true),
+            },
+            storageAccess: {
+                readFileAuto: vi.fn(async () => ""),
+                writeFileAuto: vi.fn(async () => {}),
+            },
+            databaseFileAccess: {
+                fetch: vi.fn(async () => undefined),
+            },
+        },
+    } as any;
+}
+
+function makeDaemonOptions(interval?: number): CLIOptions {
+    return {
+        command: "daemon",
+        commandArgs: [],
+        databasePath: "/tmp/vault",
+        verbose: false,
+        force: false,
+        interval,
+    };
+}
+
+const baseContext = {
+    vaultPath: "/tmp/vault",
+    settingsPath: "/tmp/vault/.tabularium/settings.json",
+    originalSyncSettings: {
+        liveSync: true,
+        syncOnStart: false,
+        periodicReplication: false,
+        syncOnSave: false,
+        syncOnEditorSave: false,
+        syncOnFileOpen: false,
+        syncAfterMerge: false,
+    },
+} as any;
+
+function createDaemonContext(core: ReturnType<typeof createCoreMock>) {
+    return {
+        ...baseContext,
+        core,
+        replicationScheduling: {
+            setExternalPollingMode: vi.fn(),
+            markInitialOneShotSatisfied: vi.fn(),
+        },
+    } as any;
+}
+
+describe("daemon command", () => {
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        vi.mocked(offlineScanner.performFullScan).mockClear();
+        vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("does not repeat the startup scan after initial replication", async () => {
+        const core = createCoreMock();
+
+        expect(await runCommand(makeDaemonOptions(), createDaemonContext(core))).toBe(true);
+
+        expect(offlineScanner.performFullScan).not.toHaveBeenCalled();
+    });
+
+    it("polling mode: calls setTimeout when interval option is set", async () => {
+        const core = createCoreMock();
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+
+        const context = createDaemonContext(core);
+        await runCommand(makeDaemonOptions(30), context);
+
+        expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+        expect(context.replicationScheduling.setExternalPollingMode).toHaveBeenCalledWith(true);
+        // Interval should be in milliseconds (30s → 30000ms)
+        expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30000);
+    });
+
+    it("polling mode: applies settings with suspendFileWatching=false before setting interval", async () => {
+        const core = createCoreMock();
+
+        await runCommand(makeDaemonOptions(10), createDaemonContext(core));
+
+        expect(core.services.setting.applyPartial).toHaveBeenCalledWith(
+            expect.objectContaining({ suspendFileWatching: false }),
+            true
+        );
+        expect(core.services.control.applySettings).toHaveBeenCalledTimes(1);
+    });
+
+    it("liveSync mode: calls applyPartial and applySettings", async () => {
+        const core = createCoreMock();
+
+        await runCommand(makeDaemonOptions(), createDaemonContext(core));
+
+        expect(core.services.setting.applyPartial).toHaveBeenCalledWith(
+            expect.objectContaining({
+                ...baseContext.originalSyncSettings,
+                suspendFileWatching: false,
+            }),
+            true
+        );
+        expect(core.services.control.applySettings).toHaveBeenCalledTimes(1);
+    });
+
+    it("liveSync mode: logs warning when both liveSync and syncOnStart are false", async () => {
+        const core = createCoreMock();
+        core.services.setting.currentSettings = vi.fn(() => ({
+            liveSync: false,
+            syncOnStart: false,
+        }));
+
+        const result = await runCommand(makeDaemonOptions(), createDaemonContext(core));
+
+        expect(result).toBe(true);
+        const warningCalls = core.services.context.standardIo.writeStderr.mock.calls.filter(
+            ([chunk]: [string | Uint8Array]) =>
+                typeof chunk === "string" && chunk.includes("liveSync and syncOnStart are both disabled")
+        );
+        expect(warningCalls.length).toBeGreaterThan(0);
+    });
+
+    it("liveSync mode: no warning when liveSync is true", async () => {
+        const core = createCoreMock();
+        core.services.setting.currentSettings = vi.fn(() => ({
+            liveSync: true,
+            syncOnStart: false,
+        }));
+
+        await runCommand(makeDaemonOptions(), createDaemonContext(core));
+
+        const warningCalls = core.services.context.standardIo.writeStderr.mock.calls.filter(
+            ([chunk]: [string | Uint8Array]) =>
+                typeof chunk === "string" && chunk.includes("liveSync and syncOnStart are both disabled")
+        );
+        expect(warningCalls.length).toBe(0);
+    });
+
+    it("completes initial replication before restoring automatic synchronisation", async () => {
+        const core = createCoreMock();
+        const callOrder: string[] = [];
+        core.services.replication.replicateUnattended = vi.fn(async () => {
+            callOrder.push("replicate");
+            return { status: "completed" as const };
+        });
+        core.services.control.applySettings.mockImplementation(async () => {
+            callOrder.push("restoreSettings");
+        });
+
+        const context = createDaemonContext(core);
+        await runCommand(makeDaemonOptions(), context);
+
+        expect(callOrder).toEqual(["replicate", "restoreSettings"]);
+        expect(core.services.replication.replicateUnattended).toHaveBeenCalledWith({
+            trigger: "daemon",
+            interaction: NO_INTERACTION,
+        });
+        expect(context.replicationScheduling.markInitialOneShotSatisfied).toHaveBeenCalledOnce();
+    });
+
+    it("returns false when initial replication fails", async () => {
+        const core = createCoreMock();
+        core.services.replication.replicateUnattended = vi.fn(async () => ({
+            status: "failed" as const,
+            error: new Error("initial replication failed"),
+        }));
+
+        const result = await runCommand(makeDaemonOptions(), createDaemonContext(core));
+
+        expect(result).toBe(false);
+        expect(core.services.control.applySettings).not.toHaveBeenCalled();
+        expect(offlineScanner.performFullScan).not.toHaveBeenCalled();
+        expect(core.services.replication.replicateUnattended).toHaveBeenCalledWith({
+            trigger: "daemon",
+            interaction: NO_INTERACTION,
+        });
+    });
+
+    it("polling mode: registers onUnload handler that clears timeout", async () => {
+        const core = createCoreMock();
+
+        await runCommand(makeDaemonOptions(10), createDaemonContext(core));
+
+        // onUnload handler should have been registered
+        expect(core.services.appLifecycle.onUnload.addHandler).toHaveBeenCalledTimes(1);
+        const handler = core.services.appLifecycle.onUnload.addHandler.mock.calls[0][0];
+
+        // Get the timeout ID that was created
+        const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+        await handler();
+        expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("polling backoff: interval escalates on failure, caps at 300000ms, then halves on recovery", async () => {
+        const core = createCoreMock();
+
+        // startup replicate (call 1) succeeds; poll calls 2–7 fail; call 8 succeeds.
+        let callCount = 0;
+        core.services.replication.replicateUnattended = vi.fn(async () => {
+            callCount++;
+            if (callCount === 1) return { status: "completed" as const }; // initial startup replicate
+            if (callCount <= 7) throw new Error("network failure");
+            return { status: "completed" as const }; // recovery
+        });
+
+        const baseMs = 30 * 1000;
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+
+        await runCommand(makeDaemonOptions(30), createDaemonContext(core));
+
+        // After runCommand returns the first setTimeout has been scheduled.
+        // setTimeoutSpy.mock.calls[0] is the initial schedule (baseMs).
+        expect(setTimeoutSpy.mock.calls[0][1]).toBe(baseMs);
+
+        // Advance through 6 failure polls. After each failure the next setTimeout
+        // should be scheduled with a larger (or capped) interval.
+        // formula: min(base * 2^n, 300000). base=30000ms.
+        // failure 1: 30000*2=60000, failure 2: 30000*4=120000,
+        // failure 3: 30000*8=240000, failure 4: 30000*16=480000→capped, 5→cap, 6→cap
+        const expectedIntervals = [
+            baseMs * 2, // after failure 1: 60000
+            baseMs * 4, // after failure 2: 120000
+            baseMs * 8, // after failure 3: 240000
+            300_000, // after failure 4 (would be 480000, capped)
+            300_000, // after failure 5 (cap)
+            300_000, // after failure 6 (cap)
+        ];
+
+        for (const expected of expectedIntervals) {
+            const prevCallCount = setTimeoutSpy.mock.calls.length;
+            await vi.advanceTimersByTimeAsync(setTimeoutSpy.mock.calls[prevCallCount - 1][1] as number);
+            const newCallCount = setTimeoutSpy.mock.calls.length;
+            expect(newCallCount).toBeGreaterThan(prevCallCount);
+            expect(setTimeoutSpy.mock.calls[newCallCount - 1][1]).toBe(expected);
+        }
+
+        // Now trigger the success poll — interval should halve each time toward base.
+        // After failure 6, consecutiveFailures=6, currentIntervalMs=300000.
+        // On success: consecutiveFailures=5, currentIntervalMs=150000.
+        const prevCallCount = setTimeoutSpy.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(setTimeoutSpy.mock.calls[prevCallCount - 1][1] as number);
+        const afterSuccessCallCount = setTimeoutSpy.mock.calls.length;
+        expect(afterSuccessCallCount).toBeGreaterThan(prevCallCount);
+        // The interval after one success should be halved (300000 / 2 = 150000).
+        expect(setTimeoutSpy.mock.calls[afterSuccessCallCount - 1][1]).toBe(150_000);
+    });
+
+    it("polling error handling: replicate rejection is caught and written to standard error", async () => {
+        const core = createCoreMock();
+
+        // Make replicate succeed on the initial call (startup), then fail on the poll.
+        let callCount = 0;
+        core.services.replication.replicateUnattended = vi.fn(async () => {
+            callCount++;
+            if (callCount === 1) return { status: "completed" as const }; // startup replicate
+            throw new Error("network failure");
+        });
+
+        const intervalMs = 30 * 1000;
+        await runCommand(makeDaemonOptions(30), createDaemonContext(core));
+
+        // Advance time to trigger the first poll callback and flush its async work.
+        await vi.advanceTimersByTimeAsync(intervalMs);
+
+        // No unhandled rejection — the error was caught internally.
+        const errorCalls = core.services.context.standardIo.writeStderr.mock.calls.filter(
+            ([chunk]: [string | Uint8Array]) => typeof chunk === "string" && chunk.includes("Poll error")
+        );
+        expect(errorCalls.length).toBeGreaterThan(0);
+    });
+});

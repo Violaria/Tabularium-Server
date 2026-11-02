@@ -1,0 +1,725 @@
+import { NodeServiceContext, NodeServiceHub } from "./services/NodeServiceHub";
+import { CLI_DIRECTORY, moveToCurrentNames } from "./currentNames";
+import { FORMER_NAMES, SuffixDatabaseName } from "@tabularium/sync-core/compat/common/types";
+import { createCore, type StartupDatabaseOptions } from "@/core/createCore";
+import { initialiseServiceModulesCLI } from "./serviceModules/CLIServiceModules";
+import {
+    LOG_LEVEL_VERBOSE,
+    type LOG_LEVEL,
+    type SyncSettings,
+} from "@tabularium/sync-core/compat/common/types";
+import type { InjectableSettingService } from "@tabularium/sync-core/compat/services/implements/injectable/InjectableSettingService";
+import {
+    LOG_LEVEL_DEBUG,
+    setGlobalLogFunction,
+    defaultLoggerEnv,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_URGENT,
+    LOG_LEVEL_NOTICE,
+} from "octagonal-wheels/common/logger";
+import { runCommand } from "./commands/runCommand";
+import { isCLICommand } from "./commands/types";
+import type { CLICommand, CLICommandContext, CLIOptions } from "./commands/types";
+import { getForceRequirementError } from "./commands/utils";
+import { getPathFromUXFileInfo } from "@tabularium/sync-core/compat/common/typeUtils";
+import { stripAllPrefixes } from "@tabularium/sync-core/compat/string_and_binary/path";
+import { IgnoreRules } from "./serviceModules/IgnoreRules";
+import { useOfflineScanner } from "@tabularium/sync-core/compat/serviceFeatures/offlineScanner";
+import type { ReplicationSchedulingControl } from "@/core/serviceFeatures/replicationScheduling";
+import { createNodeStandardIo, fsPromises as fs, path } from "@clients/cli/platform";
+import type { StandardIo } from "@tabularium/sync-core/context";
+import { writeStderrLine, writeStdoutLine } from "./cliOutput";
+import { createDefaultCliSettings } from "./cliSettingsDefaults";
+import {
+    applyStoredSetting,
+    changedSettingKeys,
+    CLI_RUNTIME_ONLY_SETTING_KEYS,
+    cloneSettings,
+    isSettingsWriteCommand,
+    preserveStoredSetting,
+    reconcileDurableSettings,
+    settingsEqual,
+} from "./settingsPersistence";
+
+const SETTINGS_FILE = `${CLI_DIRECTORY}/settings.json`;
+
+interface CLIVaultSyncMode {
+    readonly watchFiles: boolean;
+    readonly reflectReplicationResults: boolean;
+    readonly scanOnStartup?: boolean;
+    readonly startupDatabaseOptions: StartupDatabaseOptions;
+}
+
+// Commands which synchronise a physical Vault with the local database.
+const VAULT_SYNC_MODES: Readonly<Partial<Record<CLICommand, CLIVaultSyncMode>>> = {
+    daemon: {
+        watchFiles: true,
+        reflectReplicationResults: true,
+        startupDatabaseOptions: { ignoreSuspending: false, continueOnFileFailure: true },
+    },
+    mirror: {
+        watchFiles: false,
+        reflectReplicationResults: false,
+        startupDatabaseOptions: { ignoreSuspending: true, continueOnFileFailure: false },
+    },
+    rebuild: {
+        watchFiles: false,
+        reflectReplicationResults: false,
+        scanOnStartup: false,
+        startupDatabaseOptions: { ignoreSuspending: false, continueOnFileFailure: false },
+    },
+    fetch: {
+        watchFiles: false,
+        reflectReplicationResults: true,
+        scanOnStartup: false,
+        startupDatabaseOptions: { ignoreSuspending: false, continueOnFileFailure: false },
+    },
+};
+
+defaultLoggerEnv.minLogLevel = LOG_LEVEL_DEBUG;
+
+/** Injectable command boundary used by CLI integration probes. */
+export type CliCommandRunner = (options: CLIOptions, context: CLICommandContext) => Promise<boolean>;
+
+function printHelp(standardIo: StandardIo): void {
+    writeStdoutLine(
+        standardIo,
+        `
+Tabularium CLI
+
+Usage:
+  tabularium-cli <database-path> [options] <command> [command-args]
+  tabularium-cli init-settings [path]
+
+Arguments:
+  database-path           Path to the local database directory
+
+Commands:
+    daemon                  (default) Run mirror scan then continuously sync CouchDB <-> local filesystem
+    sync                    Run one replication cycle and exit
+    rebuild                 Rebuild local and remote databases from the selected Vault (requires --force)
+    fetch                   Replace the local database with remote state and reflect it to the Vault (requires --force)
+    push <src> <dst>        Push local file <src> into local database path <dst>
+    pull <src> <dst>        Pull file <src> from local database into local file <dst>
+    pull-rev <src> <dst> <rev>   Pull file <src> at specific revision <rev> into local file <dst>
+    put <dst>               Read UTF-8 content from stdin and write to local database path <dst>
+    cat <src>               Read file <src> from local database and write to stdout
+    cat-rev <src> <rev>     Read file <src> at specific revision <rev> and write to stdout
+    ls [prefix]             List DB files as path\tsize\tmtime\trevision[*]
+    info <path>             Show detailed metadata for a file (ID, revision, conflicts, chunks)
+    rm <path>               Mark a file as deleted in local database
+    resolve <path> <rev>    Resolve conflicts by keeping <rev> and deleting others
+    mirror [vault-path]     Mirror database contents to the local file system (vault-path takes precedence over --vault; defaults to vault from --vault / database-path)
+    remote-add <name> <connstr>
+                            Add a remote configuration from a connection string
+    remote-rm <remote-id>    Remove a remote configuration by ID
+    remote-ls                List stored remote configurations
+    remote-export <remote-id>
+                            Export a remote connection string by ID
+    remote-set <remote-id> <connstr>
+                            Replace a stored remote connection string by ID
+    remote-activate <remote-id>
+                            Activate a stored remote configuration by ID
+    mark-resolved [remote-id]
+                            Resolve remote synchronisation status
+    unlock-remote [remote-id]
+                            Unlock remote database
+    lock-remote [remote-id]
+                            Lock remote database
+    remote-status [remote-id]
+                            Show remote database status
+
+Options:
+  --vault <path>, -V <path>  (daemon/mirror/rebuild/fetch) Path to the vault directory containing .md files
+                              (defaults to database-path; allows separate PouchDB and vault dirs)
+  --force, -f             Required for rebuild and fetch because they replace databases
+  --interval <N>, -i <N>  (daemon only) Poll CouchDB every N seconds instead of using the _changes feed
+  --write-settings         Write setting changes after a successful command
+  --compat-remote-admin-exit-zero
+                           Preserve the former zero exit code when remote-administration verification fails
+
+Examples:
+    tabularium-cli ./my-database                        Run daemon (live sync mode)
+    tabularium-cli ./my-database --interval 30          Run daemon (polling every 30s)
+    tabularium-cli ./my-database sync
+    tabularium-cli ./my-database --settings ./custom-settings.json push ./note.md folder/note.md
+    tabularium-cli ./my-database pull folder/note.md ./exports/note.md
+    tabularium-cli ./my-database pull-rev folder/note.md ./exports/note.old.md 3-abcdef
+    echo "Hello" | tabularium-cli ./my-database put notes/hello.md
+    tabularium-cli ./my-database cat notes/hello.md
+    tabularium-cli ./my-database cat-rev notes/hello.md 3-abcdef
+    tabularium-cli ./my-database ls notes/
+    tabularium-cli ./my-database info notes/hello.md
+    tabularium-cli ./my-database rm notes/hello.md
+    tabularium-cli ./my-database resolve notes/hello.md 3-abcdef
+    tabularium-cli ./my-database remote-add my-remote "sls+https://user:pass@example.com/db"
+    tabularium-cli ./my-database remote-ls
+    tabularium-cli ./my-database remote-export remote-abc123
+    tabularium-cli ./my-database remote-set remote-abc123 "sls+s3://ak:sk@example.com/?endpoint=https%3A%2F%2Fs3.example.com&bucket=mybucket"
+    tabularium-cli ./my-database remote-activate remote-abc123
+    tabularium-cli ./my-database remote-rm remote-abc123
+    tabularium-cli ./my-database mark-resolved remote-abc123
+    tabularium-cli ./my-database unlock-remote remote-abc123
+    tabularium-cli ./my-database lock-remote remote-abc123
+    tabularium-cli ./my-database remote-status remote-abc123
+    tabularium-cli init-settings ./data.json
+    tabularium-cli ./my-database --verbose
+        `
+    );
+}
+
+export function parseArgs(standardIo: StandardIo = createNodeStandardIo()): CLIOptions {
+    const args = process.argv.slice(2);
+
+    if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+        printHelp(standardIo);
+        process.exit(0);
+    }
+
+    let databasePath: string | undefined;
+    let vaultPath: string | undefined;
+    let settingsPath: string | undefined;
+    let verbose = false;
+    let debug = false;
+    let force = false;
+    let writeSettings = false;
+    let compatRemoteAdminExitZero = false;
+    let interval: number | undefined;
+    let command: CLICommand = "daemon";
+    const commandArgs: string[] = [];
+
+    for (let i = 0; i < args.length; i++) {
+        const token = args[i];
+        switch (token) {
+            case "--vault":
+            case "-V": {
+                i++;
+                if (!args[i]) {
+                    writeStderrLine(standardIo, `Error: Missing value for ${token}`);
+                    process.exit(1);
+                }
+                vaultPath = args[i];
+                break;
+            }
+            case "--settings":
+            case "-s": {
+                i++;
+                if (!args[i]) {
+                    writeStderrLine(standardIo, `Error: Missing value for ${token}`);
+                    process.exit(1);
+                }
+                settingsPath = args[i];
+                break;
+            }
+            case "--interval":
+            case "-i": {
+                i++;
+                if (!args[i]) {
+                    writeStderrLine(standardIo, `Error: Missing value for ${token}`);
+                    process.exit(1);
+                }
+                const n = parseInt(args[i], 10);
+                if (!Number.isInteger(n) || n <= 0) {
+                    writeStderrLine(standardIo, `Error: --interval requires a positive integer, got '${args[i]}'`);
+                    process.exit(1);
+                }
+                interval = n;
+                break;
+            }
+            case "--debug":
+            case "-d":
+                // debugging automatically enables verbose logging, as it is intended for debugging issues.
+                debug = true;
+                verbose = true;
+                break;
+            case "--verbose":
+            case "-v":
+                verbose = true;
+                break;
+            case "--force":
+            case "-f":
+                force = true;
+                break;
+            case "--write-settings":
+                writeSettings = true;
+                break;
+            case "--compat-remote-admin-exit-zero":
+                compatRemoteAdminExitZero = true;
+                break;
+            default: {
+                if (!databasePath) {
+                    if (command === "daemon" && isCLICommand(token)) {
+                        command = token;
+                        break;
+                    }
+                    if (command === "init-settings") {
+                        commandArgs.push(token);
+                        break;
+                    }
+                    databasePath = token;
+                    break;
+                }
+                if (command === "daemon" && isCLICommand(token)) {
+                    command = token;
+                    break;
+                }
+                commandArgs.push(token);
+                break;
+            }
+        }
+    }
+
+    if (!databasePath && command !== "init-settings") {
+        writeStderrLine(standardIo, "Error: database-path is required");
+        process.exit(1);
+    }
+
+    if (command === "daemon" && commandArgs.length > 0) {
+        writeStderrLine(standardIo, `Error: Unknown command '${commandArgs[0]}'`);
+        process.exit(1);
+    }
+
+    return {
+        databasePath,
+        vaultPath,
+        settingsPath,
+        verbose,
+        debug,
+        force,
+        writeSettings,
+        compatRemoteAdminExitZero,
+        command,
+        commandArgs,
+        interval,
+    };
+}
+
+async function createDefaultSettingsFile(options: CLIOptions, standardIo: StandardIo) {
+    const targetPath = options.settingsPath
+        ? path.resolve(options.settingsPath)
+        : options.commandArgs[0]
+          ? path.resolve(options.commandArgs[0])
+          : path.resolve(process.cwd(), "data.json");
+
+    if (!options.force) {
+        try {
+            await fs.stat(targetPath);
+            throw new Error(`Settings file already exists: ${targetPath} (use --force to overwrite)`);
+        } catch (ex) {
+            if (!(ex && (ex as { code?: string })?.code === "ENOENT")) {
+                throw ex;
+            }
+        }
+    }
+
+    const settings = createDefaultCliSettings();
+
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, JSON.stringify(settings, null, 2), "utf-8");
+    writeStdoutLine(standardIo, `[Done] Created settings file: ${targetPath}`);
+}
+
+export async function main(
+    standardIo: StandardIo = createNodeStandardIo(),
+    commandRunner: CliCommandRunner = runCommand
+) {
+    const options = parseArgs(standardIo);
+    const forceRequirementError = getForceRequirementError(options.command, options.force);
+    if (forceRequirementError) {
+        writeStderrLine(standardIo, `[Error] ${forceRequirementError}`);
+        process.exitCode = 1;
+        return;
+    }
+    const vaultSyncMode = VAULT_SYNC_MODES[options.command];
+    if (options.interval && options.command !== "daemon") {
+        writeStderrLine(
+            standardIo,
+            `Warning: --interval is only used in daemon mode, ignored for '${options.command}'`
+        );
+    }
+    const avoidStdoutNoise =
+        options.command === "cat" ||
+        options.command === "cat-rev" ||
+        options.command === "ls" ||
+        options.command === "remote-add" ||
+        options.command === "remote-ls" ||
+        options.command === "remote-export" ||
+        options.command === "info" ||
+        options.command === "rm" ||
+        options.command === "resolve" ||
+        options.command === "mark-resolved" ||
+        options.command === "unlock-remote" ||
+        options.command === "lock-remote" ||
+        options.command === "remote-status";
+    const infoLog = (...values: readonly unknown[]) => {
+        const writeLine = avoidStdoutNoise ? writeStderrLine : writeStdoutLine;
+        writeLine(standardIo, ...values);
+    };
+    if (options.debug) {
+        setGlobalLogFunction((msg, level) => {
+            writeStderrLine(standardIo, `[${level}]`, msg);
+        });
+    } else {
+        setGlobalLogFunction((msg, level) => {
+            // NO OP, leave it to logFunction
+        });
+    }
+    if (options.command === "init-settings") {
+        await createDefaultSettingsFile(options, standardIo);
+        return;
+    }
+
+    // Resolve database path
+    const databasePath = path.resolve(options.databasePath!);
+    // Check if database directory exists
+    try {
+        const stat = await fs.stat(databasePath);
+        if (!stat.isDirectory()) {
+            writeStderrLine(standardIo, `Error: ${databasePath} is not a directory`);
+            process.exit(1);
+        }
+    } catch {
+        writeStderrLine(standardIo, `Error: Database directory ${databasePath} does not exist`);
+        process.exit(1);
+    }
+
+    // Resolve settings path
+    const settingsPath = options.settingsPath
+        ? path.resolve(options.settingsPath)
+        : path.join(databasePath, SETTINGS_FILE);
+    // Resolve vault path: mirror positional argument takes priority,
+    // then --vault flag, otherwise fall back to databasePath.
+    const vaultPath =
+        options.command === "mirror" && options.commandArgs[0]
+            ? path.resolve(options.commandArgs[0])
+            : options.vaultPath
+              ? path.resolve(options.vaultPath)
+              : databasePath;
+
+    // Check if vault directory exists
+    try {
+        const stat = await fs.stat(vaultPath);
+        if (!stat.isDirectory()) {
+            writeStderrLine(standardIo, `Error: Vault path ${vaultPath} is not a directory`);
+            process.exit(1);
+        }
+    } catch {
+        writeStderrLine(standardIo, `Error: Vault directory ${vaultPath} does not exist`);
+        process.exit(1);
+    }
+    await moveToCurrentNames(databasePath, vaultPath);
+
+    infoLog(`Tabularium CLI`);
+    infoLog(`Database Path: ${databasePath}`);
+    infoLog(`Vault Path:    ${vaultPath}`);
+    infoLog(`Settings: ${settingsPath}`);
+    infoLog("");
+    let ignoreRules: IgnoreRules | undefined;
+    if (vaultSyncMode) {
+        ignoreRules = new IgnoreRules(vaultPath, (message, detail) => {
+            if (detail === undefined) {
+                writeStderrLine(standardIo, message);
+            } else {
+                writeStderrLine(standardIo, message, detail);
+            }
+        });
+        await ignoreRules.load();
+    }
+
+    // Create service context and hub
+    const context = new NodeServiceContext(databasePath, standardIo);
+    const serviceHubInstance = new NodeServiceHub<NodeServiceContext>(databasePath, context);
+    serviceHubInstance.API.addLog.setHandler((message: unknown, level: LOG_LEVEL) => {
+        let levelStr = "";
+        switch (level) {
+            case LOG_LEVEL_DEBUG:
+                levelStr = "debug";
+                break;
+            case LOG_LEVEL_VERBOSE:
+                levelStr = "Verbose";
+                break;
+            case LOG_LEVEL_INFO:
+                levelStr = "Info";
+                break;
+            case LOG_LEVEL_NOTICE:
+                levelStr = "Notice";
+                break;
+            case LOG_LEVEL_URGENT:
+                levelStr = "Urgent";
+                break;
+            default:
+                levelStr = String(level);
+        }
+        const prefix = `(${levelStr})`;
+        if (level <= LOG_LEVEL_INFO) {
+            if (!options.verbose) return;
+        }
+        writeStderrLine(standardIo, prefix, message);
+    }, true);
+    // Only modes which reflect replication results use the default filesystem handler.
+    if (!vaultSyncMode?.reflectReplicationResults) {
+        serviceHubInstance.replication.processSynchroniseResult.addHandler(async () => {
+            writeStderrLine(
+                standardIo,
+                `[Info] Replication result received, but not processed automatically in CLI mode.`
+            );
+            return await Promise.resolve(true);
+        }, -100);
+    }
+
+    // Setup settings handlers
+    const settingService = serviceHubInstance.setting;
+    const originalSettingsText = await fs.readFile(settingsPath, "utf-8").catch(() => undefined);
+    let latestPreparedSettingsText: string | undefined;
+    let preparedSettingsRevision = 0;
+
+    (settingService as InjectableSettingService<NodeServiceContext>).saveData.setHandler(
+        async (data: SyncSettings) => {
+            try {
+                latestPreparedSettingsText = JSON.stringify(data, null, 2);
+                preparedSettingsRevision++;
+                if (options.verbose) {
+                    writeStderrLine(standardIo, `[Settings] Prepared an update for ${settingsPath}`);
+                }
+            } catch (error) {
+                writeStderrLine(standardIo, `[Settings] Failed to prepare an update:`, error);
+                throw error;
+            }
+        }
+    );
+
+    (settingService as InjectableSettingService<NodeServiceContext>).loadData.setHandler(
+        async (): Promise<SyncSettings | undefined> => {
+            try {
+                const content = await fs.readFile(settingsPath, "utf-8");
+                const data = JSON.parse(content) as SyncSettings;
+                if (options.verbose) {
+                    writeStderrLine(standardIo, `[Settings] Loaded from ${settingsPath}`);
+                }
+                // Force disable IndexedDB adapter in CLI environment without mutating the loaded settings object.
+                return { ...data, useIndexedDBAdapter: false };
+            } catch {
+                if (options.verbose) {
+                    writeStderrLine(standardIo, `[Settings] File not found, using defaults`);
+                }
+                return undefined;
+            }
+        }
+    );
+
+    // Create Tabularium core
+    let replicationScheduling: ReplicationSchedulingControl | undefined;
+    const core = createCore<NodeServiceContext>({
+        hub: serviceHubInstance,
+        serviceModules: (core, serviceHub) =>
+            initialiseServiceModulesCLI(vaultPath, core, serviceHub, ignoreRules, vaultSyncMode?.watchFiles ?? false),
+        features: (core, coreFeatureViews) => {
+            replicationScheduling = coreFeatureViews.replicationScheduling;
+            if (vaultSyncMode && vaultSyncMode.scanOnStartup !== false) {
+                useOfflineScanner(core);
+            }
+            // Add target filter to prevent internal files are handled
+            core.services.vault.isTargetFile.addHandler(async (target) => {
+                const targetPath = stripAllPrefixes(getPathFromUXFileInfo(target));
+                const parts = targetPath.split(path.sep);
+                // if some part of the path starts with dot, treat it as internal file and ignore.
+                if (parts.some((part) => part.startsWith("."))) {
+                    return await Promise.resolve(false);
+                }
+                // PouchDB LevelDB database directory lives in the vault directory.
+                if (parts[0]?.endsWith(SuffixDatabaseName) || parts[0]?.endsWith(FORMER_NAMES.databaseSuffix)) {
+                    return await Promise.resolve(false);
+                }
+                return await Promise.resolve(true);
+            }, -1 /* highest priority */);
+
+            // Apply user-defined ignore rules after the dotfile check.
+            if (ignoreRules) {
+                const rules = ignoreRules;
+                core.services.vault.isTargetFile.addHandler(async (target) => {
+                    const targetPath = stripAllPrefixes(getPathFromUXFileInfo(target));
+                    if (rules.shouldIgnore(targetPath)) {
+                        return false;
+                    }
+                    // At least this handler think it is a target file, but other handlers may still veto it.
+                    return true;
+                }, 0);
+            }
+        },
+        startupDatabaseOptions: vaultSyncMode?.startupDatabaseOptions,
+    });
+    if (!replicationScheduling) {
+        throw new Error("Replication scheduling was not provided during core feature composition.");
+    }
+
+    // Setup signal handlers for graceful shutdown
+    const shutdown = async (signal: string) => {
+        writeStdoutLine(standardIo);
+        writeStdoutLine(standardIo, `[Shutdown] Received ${signal}, shutting down gracefully...`);
+        try {
+            await core.services.control.onUnload();
+            writeStdoutLine(standardIo, `[Shutdown] Complete`);
+            process.exit(0);
+        } catch (error) {
+            writeStderrLine(standardIo, `[Shutdown] Error:`, error);
+            process.exit(1);
+        }
+    };
+
+    process.on("SIGINT", () => void shutdown("SIGINT"));
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+    const writeSettingsAtomically = async (content: string | undefined): Promise<void> => {
+        if (content === undefined || content === originalSettingsText) return;
+        const temporaryPath = `${settingsPath}.${process.pid}.tmp`;
+        await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+        try {
+            await fs.writeFile(temporaryPath, content, "utf-8");
+            await fs.rename(temporaryPath, settingsPath);
+            if (options.verbose) {
+                writeStderrLine(standardIo, `[Settings] Saved to ${settingsPath}`);
+            }
+        } catch (error) {
+            await fs.unlink(temporaryPath).catch(() => {});
+            throw error;
+        }
+    };
+
+    // Start the core
+    try {
+        infoLog(`[Starting] Initializing Tabularium...`);
+
+        const loadResult = await core.services.control.onLoad();
+        if (!loadResult) {
+            writeStderrLine(standardIo, `[Error] Failed to initialize Tabularium`);
+            process.exit(1);
+        }
+        const settingsAfterLoadText = latestPreparedSettingsText
+            ? preserveStoredSetting(latestPreparedSettingsText, originalSettingsText, "useIndexedDBAdapter")
+            : originalSettingsText;
+
+        // Capture configured policy before temporary CLI startup suspension.
+        // Long-running commands restore only the settings they own.
+        const settingsBeforeSuspend = cloneSettings(core.services.setting.currentSettings());
+        const durableSettingsBeforeSuspend = cloneSettings(settingsBeforeSuspend);
+        applyStoredSetting(durableSettingsBeforeSuspend, settingsAfterLoadText, "useIndexedDBAdapter");
+        const originalSyncSettings = {
+            liveSync: settingsBeforeSuspend.liveSync,
+            syncOnStart: settingsBeforeSuspend.syncOnStart,
+            periodicReplication: settingsBeforeSuspend.periodicReplication,
+            syncOnSave: settingsBeforeSuspend.syncOnSave,
+            syncOnEditorSave: settingsBeforeSuspend.syncOnEditorSave,
+            syncOnFileOpen: settingsBeforeSuspend.syncOnFileOpen,
+            syncAfterMerge: settingsBeforeSuspend.syncAfterMerge,
+        };
+        await core.services.setting.suspendAllSync();
+        const settingsAfterSuspend = cloneSettings(core.services.setting.currentSettings());
+        let readyResult = false;
+        try {
+            readyResult = await core.services.control.onReady();
+        } finally {
+            if (!readyResult) await core.services.control.onUnload();
+        }
+        if (!readyResult) {
+            throw new Error("Failed to initialise Tabularium.");
+        }
+        if (vaultSyncMode?.scanOnStartup === false) {
+            // Keep the startup reset clean, then enable scans for the explicit Rebuild or Fetch operation.
+            useOfflineScanner(core);
+        }
+        const settingsBeforeCommand = cloneSettings(core.services.setting.currentSettings());
+        const transientSettingKeys = changedSettingKeys(settingsBeforeSuspend, settingsAfterSuspend);
+        for (const key of CLI_RUNTIME_ONLY_SETTING_KEYS) {
+            transientSettingKeys.add(key);
+        }
+        const durableSettingsBeforeCommand = reconcileDurableSettings({
+            durableBase: durableSettingsBeforeSuspend,
+            runtimeBaseline: settingsAfterSuspend,
+            runtimeCurrent: settingsBeforeCommand,
+            preserveKeys: transientSettingKeys,
+        });
+
+        infoLog(`[Ready] Tabularium is running`);
+        infoLog(`[Ready] Press Ctrl+C to stop`);
+        infoLog("");
+
+        // Check if configured
+        const settings = core.services.setting.currentSettings();
+        if (!settings.isConfigured) {
+            writeStderrLine(standardIo, `[Warning] Tabularium is not configured yet`);
+            writeStderrLine(standardIo, `[Warning] Please edit ${settingsPath} to configure CouchDB connection`);
+            writeStderrLine(standardIo);
+            writeStderrLine(standardIo, `Required settings:`);
+            writeStderrLine(standardIo, `  - couchDB_URI: CouchDB server URL`);
+            writeStderrLine(standardIo, `  - couchDB_USER: CouchDB username`);
+            writeStderrLine(standardIo, `  - couchDB_PASSWORD: CouchDB password`);
+            writeStderrLine(standardIo, `  - couchDB_DBNAME: Database name`);
+            writeStderrLine(standardIo);
+        } else {
+            infoLog(`[Info] Tabularium is configured and ready`);
+            infoLog(`[Info] Database: ${settings.couchDB_URI}/${settings.couchDB_DBNAME}`);
+            infoLog("");
+        }
+
+        const result = await commandRunner(options, {
+            databasePath,
+            vaultPath,
+            core,
+            replicationScheduling,
+            settingsPath,
+            originalSyncSettings,
+        });
+
+        let settingsTextToCommit: string | undefined;
+        if (result && (isSettingsWriteCommand(options.command) || options.writeSettings)) {
+            const runtimeSettingsAfterCommand = cloneSettings(core.services.setting.currentSettings());
+            const durableSettingsAfterCommand = reconcileDurableSettings({
+                durableBase: durableSettingsBeforeCommand,
+                runtimeBaseline: settingsBeforeCommand,
+                runtimeCurrent: runtimeSettingsAfterCommand,
+                preserveKeys: transientSettingKeys,
+                command: options.command,
+            });
+
+            if (
+                isSettingsWriteCommand(options.command) ||
+                !settingsEqual(durableSettingsAfterCommand, durableSettingsBeforeSuspend)
+            ) {
+                const runtimeSettings = cloneSettings(core.services.setting.currentSettings());
+                const revisionBeforeSave = preparedSettingsRevision;
+                try {
+                    await core.services.setting.updateSettings(() => cloneSettings(durableSettingsAfterCommand), true);
+                    if (preparedSettingsRevision === revisionBeforeSave || latestPreparedSettingsText === undefined) {
+                        throw new Error("The setting service did not prepare the requested settings update.");
+                    }
+                    settingsTextToCommit = latestPreparedSettingsText;
+                } finally {
+                    await core.services.setting.updateSettings(() => runtimeSettings, false);
+                }
+            } else {
+                settingsTextToCommit = settingsAfterLoadText;
+            }
+        }
+
+        if (!result) {
+            writeStderrLine(standardIo, `[Error] Command '${options.command}' failed`);
+            process.exitCode = 1;
+        } else if (options.command !== "daemon") {
+            infoLog(`[Done] Command '${options.command}' completed`);
+        }
+
+        if (options.command === "daemon" && result) {
+            await writeSettingsAtomically(settingsTextToCommit);
+            // Keep the process running
+            await new Promise(() => {});
+        } else {
+            await core.services.control.onUnload();
+            await writeSettingsAtomically(settingsTextToCommit);
+        }
+    } catch (error) {
+        writeStderrLine(standardIo, `[Error] Failed to start:`, error);
+        process.exit(1);
+    }
+    // To prevent unexpected hanging in webRTC connections.
+    process.exit(process.exitCode ?? 0);
+}

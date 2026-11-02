@@ -1,11 +1,11 @@
-// Collects the upstream CLI bundle and the packages it loads at run time into cli-dist/, for Tabularius's hosted clients.
+// Collects the CLI bundle (clients/cli) and the packages it loads at run time into cli-dist/, for Tabularius's hosted clients.
 // The packages come from the plug-in workspace's locked node_modules, so the image gets the versions the CLI was tested with.
 import { cp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
 import { dirname, join, relative } from 'node:path';
 
 const plugin = new URL('../obsidian', import.meta.url).pathname;
-const bundle = join(plugin, 'src/apps/cli/dist');
+const bundle = new URL('./clients/cli/dist', import.meta.url).pathname;
 const out = new URL('./cli-dist/', import.meta.url).pathname;
 await rm(out, { recursive: true, force: true });
 await cp(bundle, out, { recursive: true });

@@ -26,11 +26,13 @@ src/smtp.ts          mail for Send to Kindle
 src/tabularius/      the AI curator: managed client, search, providers, proposals, SSH, web
 src/sandbox.ts       the sandbox service (same image, separate container with the Docker socket)
 ui/                  web app (TypeScript, built by build-ui.mjs)
+clients/notes/       web notes (Svelte, built by Vite)
+clients/cli/         command-line client, the managed client of Tabularius
 test/                API and browser tests
 Dockerfile
 ```
 
-The image also contains `notes-dist/` (the browser client) and `cli-dist/` (the command-line client used by Tabularius). Both are built from the plug-in repository by `npm run build:notes` and `npm run build:cli` in the parent repository, which is why the server cannot be built on its own.
+The image also contains `notes-dist/` (the web notes) and `cli-dist/` (the command-line client used by Tabularius), built from `clients/` by `npm run build:notes` and `npm run build:cli` in the parent repository. The clients use the plug-in's sync core and dependencies (`clients/node_modules` links to the plug-in's), which is why the server cannot be built on its own.
 
 ## Development
 

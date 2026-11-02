@@ -1,0 +1,1114 @@
+import { fsPromises as fs, os, path } from "@clients/cli/platform";
+import { ConnectionStringParser } from "@tabularium/sync-core/compat/common/ConnectionString";
+import {
+    DEFAULT_SETTINGS,
+    REMOTE_COUCHDB,
+    REMOTE_MINIO,
+    REMOTE_P2P,
+} from "@tabularium/sync-core/compat/common/types";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { runCommand } from "./runCommand";
+import type { CLIOptions } from "./types";
+import {
+    CENTRAL_REMOTE_ADMINISTRATION_ACTIONS,
+    CENTRAL_REMOTE_ADMINISTRATION_FAILURE_REASONS,
+    CENTRAL_REMOTE_ADMINISTRATION_OBSERVATION_KINDS,
+    CENTRAL_REMOTE_ADMINISTRATION_RESULT_STATUSES,
+    REMOTE_RESOURCE_KINDS,
+    CENTRAL_COMPATIBILITY_REJECTION_REASONS,
+    REPLICATION_COMPLETED,
+    REPLICATION_PROGRESS_PRESENTATIONS,
+    replicationFailed,
+} from "@tabularium/sync-core/replication";
+
+vi.mock("node:fs/promises", { spy: true });
+
+function createStandardIoMock() {
+    return {
+        readStdin: vi.fn(async () => ""),
+        prompt: vi.fn(async () => ""),
+        writeStdout: vi.fn((_chunk: string | Uint8Array) => undefined),
+        writeStderr: vi.fn((_chunk: string | Uint8Array) => undefined),
+    };
+}
+
+function createCoreMock() {
+    const liveSettings = {
+        ...DEFAULT_SETTINGS,
+        remoteConfigurations: {},
+        activeConfigurationId: "",
+        P2P_ActiveRemoteConfigurationId: "",
+    } as any;
+    return {
+        services: {
+            context: {
+                standardIo: createStandardIoMock(),
+            },
+            control: {
+                activated: Promise.resolve(),
+                applySettings: vi.fn(async () => {}),
+            },
+            setting: {
+                applyExternalSettings: vi.fn(async () => {}),
+                applyPartial: vi.fn(async () => {}),
+                currentSettings: vi.fn(() => liveSettings),
+                updateSettings: vi.fn(async (updater: any) => {
+                    updater(liveSettings);
+                }),
+            },
+            replication: {
+                markResolved: vi.fn(async () => {}),
+                markUnlocked: vi.fn(async () => {}),
+                markLocked: vi.fn(async () => {}),
+                replicateUserInitiated: vi.fn(async () => REPLICATION_COMPLETED),
+            },
+            replicator: {
+                runCentralRemoteAdministration: vi.fn(async ({ action }) => ({
+                    status: CENTRAL_REMOTE_ADMINISTRATION_RESULT_STATUSES.VERIFIED,
+                    observation: {
+                        kind: CENTRAL_REMOTE_ADMINISTRATION_OBSERVATION_KINDS.MILESTONE,
+                        locked: action === CENTRAL_REMOTE_ADMINISTRATION_ACTIONS.LOCK,
+                        accepted: true,
+                        nodeId: "test-node-id",
+                    },
+                })),
+                createRemoteResource: vi.fn(async () => ({
+                    check: vi.fn(async () => ({ ok: true as const })),
+                    getStatus: vi.fn(async () => ({
+                        db_name: "test-db",
+                        doc_count: 42,
+                    })),
+                    dispose: vi.fn(async () => undefined),
+                })),
+                getActiveReplicator: vi.fn(() => ({
+                    nodeid: "test-node-id",
+                    initializeDatabaseForReplication: vi.fn(async () => {}),
+                    connectRemoteCouchDBWithSetting: vi.fn(async () => ({
+                        db: {
+                            get: vi.fn(async (id) => {
+                                if (id.includes("milestone")) {
+                                    return {
+                                        locked: false,
+                                        accepted_nodes: ["test-node-id"],
+                                    };
+                                }
+                                throw new Error("not found");
+                            }),
+                        },
+                    })),
+                    getRemoteStatus: vi.fn(async () => ({
+                        db_name: "test-db",
+                        doc_count: 42,
+                    })),
+                })),
+            },
+        },
+        serviceModules: {
+            fileHandler: {
+                dbToStorage: vi.fn(async () => true),
+                storeFileToDB: vi.fn(async () => true),
+            },
+            storageAccess: {
+                readFileAuto: vi.fn(async () => ""),
+                writeFileAuto: vi.fn(async () => {}),
+            },
+            databaseFileAccess: {
+                fetch: vi.fn(async () => undefined),
+                storeContent: vi.fn(async () => true),
+            },
+            rebuilder: {
+                $rebuildEverything: vi.fn(async () => undefined),
+                $fetchLocal: vi.fn(async () => undefined),
+            },
+        },
+    } as any;
+}
+
+function makeOptions(command: CLIOptions["command"], commandArgs: string[]): CLIOptions {
+    return {
+        command,
+        commandArgs,
+        databasePath: "/tmp/vault",
+        verbose: false,
+        force: false,
+        compatRemoteAdminExitZero: false,
+    };
+}
+
+function captureStdout(core: ReturnType<typeof createCoreMock>) {
+    const spy = core.services.context.standardIo.writeStdout;
+    spy.mockClear();
+    return {
+        spy,
+        lines: () =>
+            spy.mock.calls
+                .map(([chunk]: [string | Uint8Array]) =>
+                    typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk)
+                )
+                .join("")
+                .split("\n")
+                .map((entry: string) => entry.trim())
+                .filter((entry: string) => entry.length > 0),
+    };
+}
+
+function parseAddedRemoteIdFromLines(lines: string[]): string {
+    // remote-add prints: <id>\t<name>\t<redacted-connstr>
+    const last = lines.length > 0 ? lines[lines.length - 1] : "";
+    return last.split("\t")[0] || "";
+}
+
+type ProtocolFixture = {
+    protocol: string;
+    connectionString: string;
+    assertProjectedFields: (settings: any) => void;
+};
+
+const protocolFixtures: ProtocolFixture[] = [
+    {
+        protocol: "couchdb",
+        connectionString: ConnectionStringParser.serialize({
+            type: "couchdb",
+            settings: {
+                couchDB_URI: "https://db.example.com:5984",
+                couchDB_USER: "user1",
+                couchDB_PASSWORD: "pass1",
+                couchDB_DBNAME: "vault1",
+                couchDB_CustomHeaders: "",
+                useJWT: false,
+                jwtAlgorithm: "",
+                jwtKey: "",
+                jwtKid: "",
+                jwtSub: "",
+                jwtExpDuration: 5,
+                useRequestAPI: false,
+            },
+        }),
+        assertProjectedFields: (settings) => {
+            expect(settings.remoteType).toBe(REMOTE_COUCHDB);
+            expect(settings.couchDB_URI).toBe("https://db.example.com:5984");
+            expect(settings.couchDB_USER).toBe("user1");
+            expect(settings.couchDB_PASSWORD).toBe("pass1");
+            expect(settings.couchDB_DBNAME).toBe("vault1");
+        },
+    },
+    {
+        protocol: "s3",
+        connectionString: ConnectionStringParser.serialize({
+            type: "s3",
+            settings: {
+                accessKey: "ak",
+                secretKey: "sk",
+                endpoint: "https://s3.example.com",
+                bucket: "bucket-1",
+                region: "ap-northeast-1",
+                bucketPrefix: "vault/",
+                useCustomRequestHandler: true,
+                bucketCustomHeaders: "x-test:1",
+                forcePathStyle: false,
+            },
+        }),
+        assertProjectedFields: (settings) => {
+            expect(settings.remoteType).toBe(REMOTE_MINIO);
+            expect(settings.accessKey).toBe("ak");
+            expect(settings.secretKey).toBe("sk");
+            expect(settings.endpoint).toBe("https://s3.example.com");
+            expect(settings.bucket).toBe("bucket-1");
+            expect(settings.region).toBe("ap-northeast-1");
+        },
+    },
+    {
+        protocol: "p2p",
+        connectionString: ConnectionStringParser.serialize({
+            type: "p2p",
+            settings: {
+                P2P_Enabled: false,
+                P2P_roomID: "room-abc",
+                P2P_passphrase: "pass-123",
+                P2P_relays: "wss://relay.example",
+                P2P_AppID: "self-hosted-livesync",
+                P2P_AutoStart: true,
+                P2P_AutoBroadcast: false,
+                P2P_turnServers: "turn:turn.example:3478",
+                P2P_turnUsername: "turn-user",
+                P2P_turnCredential: "turn-pass",
+            },
+        }),
+        assertProjectedFields: (settings) => {
+            expect(settings.remoteType).toBe(REMOTE_P2P);
+            expect(settings.P2P_roomID).toBe("room-abc");
+            expect(settings.P2P_passphrase).toBe("pass-123");
+            expect(settings.P2P_relays).toBe("wss://relay.example");
+            expect(settings.P2P_AppID).toBe("self-hosted-livesync");
+        },
+    },
+];
+
+describe("runCommand abnormal cases", () => {
+    const context = {
+        databasePath: "/tmp/vault",
+        settingsPath: "/tmp/vault/.tabularium/settings.json",
+    } as any;
+
+    beforeEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it.each(["rebuild", "fetch"] as const)("requires --force before activating for %s", async (command) => {
+        const core = createCoreMock();
+        const activated = vi.fn(() => Promise.resolve());
+        Object.defineProperty(core.services.control, "activated", { get: activated });
+
+        await expect(runCommand(makeOptions(command, []), { ...context, core })).resolves.toBe(false);
+
+        expect(activated).not.toHaveBeenCalled();
+        expect(core.serviceModules.rebuilder.$rebuildEverything).not.toHaveBeenCalled();
+        expect(core.serviceModules.rebuilder.$fetchLocal).not.toHaveBeenCalled();
+        expect(core.services.context.standardIo.writeStderr).toHaveBeenCalledWith(
+            expect.stringContaining("requires --force")
+        );
+    });
+
+    it("dispatches a forced rebuild to the existing Rebuilder service", async () => {
+        const core = createCoreMock();
+        const options = makeOptions("rebuild", []);
+        options.force = true;
+
+        await expect(runCommand(options, { ...context, core })).resolves.toBe(true);
+
+        expect(core.serviceModules.rebuilder.$rebuildEverything).toHaveBeenCalledOnce();
+        expect(core.serviceModules.rebuilder.$fetchLocal).not.toHaveBeenCalled();
+    });
+
+    it("dispatches a forced fetch without saving legacy Vault files first", async () => {
+        const core = createCoreMock();
+        const options = makeOptions("fetch", []);
+        options.force = true;
+
+        await expect(runCommand(options, { ...context, core })).resolves.toBe(true);
+
+        expect(core.serviceModules.rebuilder.$fetchLocal).toHaveBeenCalledOnce();
+        expect(core.serviceModules.rebuilder.$fetchLocal).toHaveBeenCalledWith(false, true);
+        expect(core.serviceModules.rebuilder.$rebuildEverything).not.toHaveBeenCalled();
+    });
+
+    it("rejects fetch in remediation mode even when forced", async () => {
+        const core = createCoreMock();
+        core.services.setting.currentSettings().maxMTimeForReflectEvents = 1;
+        const options = makeOptions("fetch", []);
+        options.force = true;
+
+        await expect(runCommand(options, { ...context, core })).resolves.toBe(false);
+
+        expect(core.serviceModules.rebuilder.$fetchLocal).not.toHaveBeenCalled();
+        expect(core.services.context.standardIo.writeStderr).toHaveBeenCalledWith(
+            expect.stringContaining("remediation mode")
+        );
+    });
+
+    it("surfaces an internal rebuild refusal as a failed command", async () => {
+        const core = createCoreMock();
+        core.serviceModules.rebuilder.$rebuildEverything.mockRejectedValue(
+            new Error("Rebuilding is not available while remediation mode is active.")
+        );
+        const options = makeOptions("rebuild", []);
+        options.force = true;
+
+        await expect(runCommand(options, { ...context, core })).resolves.toBe(false);
+
+        expect(core.services.context.standardIo.writeStderr).toHaveBeenCalledWith(
+            expect.stringContaining("Rebuilding is not available while remediation mode is active")
+        );
+    });
+
+    it("retains visible progress for the interactive sync command", async () => {
+        const core = createCoreMock();
+
+        await expect(
+            runCommand(makeOptions("sync", []), {
+                ...context,
+                core,
+            })
+        ).resolves.toBe(true);
+
+        expect(core.services.replication.replicateUserInitiated).toHaveBeenCalledWith(
+            expect.objectContaining({ progressPresentation: REPLICATION_PROGRESS_PRESENTATIONS.NOTICE })
+        );
+    });
+
+    it("reports a lock from the exact sync outcome without inspecting a replacement Replicator", async () => {
+        const core = createCoreMock();
+        core.services.replication.replicateUserInitiated.mockResolvedValue(
+            replicationFailed(new Error("locked"), {
+                reason: CENTRAL_COMPATIBILITY_REJECTION_REASONS.NODE_LOCKED,
+            })
+        );
+
+        await expect(
+            runCommand(makeOptions("sync", []), {
+                ...context,
+                core,
+            })
+        ).resolves.toBe(false);
+
+        expect(core.services.context.standardIo.writeStderr).toHaveBeenCalledWith(
+            expect.stringContaining("remote database is locked")
+        );
+        expect(core.services.replicator.getActiveReplicator).not.toHaveBeenCalled();
+    });
+
+    it("pull returns false for non-existing path", async () => {
+        const core = createCoreMock();
+        core.serviceModules.fileHandler.dbToStorage.mockResolvedValue(false);
+
+        const result = await runCommand(makeOptions("pull", ["missing.md", "/tmp/out.md"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(false);
+        expect(core.serviceModules.fileHandler.dbToStorage).toHaveBeenCalled();
+    });
+
+    it("pull-rev throws on empty revision", async () => {
+        const core = createCoreMock();
+
+        await expect(
+            runCommand(makeOptions("pull-rev", ["file.md", "/tmp/out.md", "   "]), {
+                ...context,
+                core,
+            })
+        ).rejects.toThrow("pull-rev requires a non-empty revision");
+    });
+
+    it("pull-rev returns false for invalid revision", async () => {
+        const core = createCoreMock();
+        core.serviceModules.databaseFileAccess.fetch.mockResolvedValue(undefined);
+
+        const result = await runCommand(makeOptions("pull-rev", ["file.md", "/tmp/out.md", "9-invalid"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(false);
+        expect(core.serviceModules.databaseFileAccess.fetch).toHaveBeenCalledWith("file.md", "9-invalid", true);
+    });
+
+    it("cat-rev throws on empty revision", async () => {
+        const core = createCoreMock();
+
+        await expect(
+            runCommand(makeOptions("cat-rev", ["file.md", "   "]), {
+                ...context,
+                core,
+            })
+        ).rejects.toThrow("cat-rev requires a non-empty revision");
+    });
+
+    it("cat-rev returns false for invalid revision", async () => {
+        const core = createCoreMock();
+        core.serviceModules.databaseFileAccess.fetch.mockResolvedValue(undefined);
+
+        const result = await runCommand(makeOptions("cat-rev", ["file.md", "9-invalid"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(false);
+        expect(core.serviceModules.databaseFileAccess.fetch).toHaveBeenCalledWith("file.md", "9-invalid", true);
+    });
+
+    it.each([
+        { birthtimeMs: 1000.9, expectedCtime: 1000 },
+        { birthtimeMs: 0, expectedCtime: 2000 },
+    ])(
+        "push selects the source creation time with a change-time fallback (%j)",
+        async ({ birthtimeMs, expectedCtime }) => {
+            const core = createCoreMock();
+            const directory = await fs.mkdtemp(path.join(os.tmpdir(), "livesync-push-time-"));
+            const source = path.join(directory, "source.md");
+            await fs.writeFile(source, "content");
+            const sourceStat = await fs.stat(source);
+            const stat = vi
+                .spyOn(fs, "stat")
+                .mockResolvedValue({ ...sourceStat, birthtimeMs, ctimeMs: 2000.8, mtimeMs: 3000.7 });
+            try {
+                const context = { core, vaultPath: "/tmp/vault", databasePath: "/tmp/vault" } as any;
+                expect(await runCommand(makeOptions("push", [source, "note.md"]), context)).toBe(true);
+                expect(core.serviceModules.storageAccess.writeFileAuto).toHaveBeenCalledWith(
+                    "note.md",
+                    expect.any(ArrayBuffer),
+                    {
+                        ctime: expectedCtime,
+                        mtime: 3000,
+                    }
+                );
+            } finally {
+                stat.mockRestore();
+                await fs.rm(directory, { recursive: true, force: true });
+            }
+        }
+    );
+
+    it("push rejects when source file does not exist", async () => {
+        const core = createCoreMock();
+
+        await expect(
+            runCommand(makeOptions("push", ["/tmp/livesync-missing-src-file.md", "dst.md"]), {
+                ...context,
+                core,
+            })
+        ).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("put reads content from the injected standard input", async () => {
+        const core = createCoreMock();
+        core.services.context.standardIo.readStdin.mockResolvedValue("content from stdin");
+
+        const result = await runCommand(makeOptions("put", ["notes/input.md"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(true);
+        expect(core.services.context.standardIo.readStdin).toHaveBeenCalledOnce();
+        expect(core.serviceModules.databaseFileAccess.storeContent).toHaveBeenCalledWith(
+            "notes/input.md",
+            "content from stdin"
+        );
+    });
+
+    it("cat writes text to the injected standard output without adding a delimiter", async () => {
+        const core = createCoreMock();
+        core.serviceModules.databaseFileAccess.fetch.mockResolvedValue({
+            deleted: false,
+            body: new Blob(["exact text"], { type: "text/plain" }),
+        });
+
+        const result = await runCommand(makeOptions("cat", ["notes/output.md"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(true);
+        expect(core.services.context.standardIo.writeStdout).toHaveBeenCalledWith("exact text");
+    });
+
+    it("cat preserves binary bytes through the injected standard output", async () => {
+        const core = createCoreMock();
+        const expected = Uint8Array.from([0x00, 0x7f, 0x80, 0xff]);
+        core.serviceModules.databaseFileAccess.fetch.mockResolvedValue({
+            deleted: false,
+            body: new Blob([expected], { type: "application/octet-stream" }),
+        });
+
+        const result = await runCommand(makeOptions("cat", ["binary/output.bin"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(true);
+        const chunk = core.services.context.standardIo.writeStdout.mock.calls.at(-1)?.[0];
+        expect(chunk).toBeInstanceOf(Uint8Array);
+        expect([...(chunk as Uint8Array)]).toEqual([...expected]);
+    });
+
+    it("remote-add stores canonical URI and prints the created id", async () => {
+        const core = createCoreMock();
+        const stdout = core.services.context.standardIo.writeStdout;
+
+        const result = await runCommand(makeOptions("remote-add", ["my-remote", "sls+https://example.com/db"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(true);
+        const settings = core.services.setting.currentSettings();
+        const ids = Object.keys(settings.remoteConfigurations);
+        expect(ids.length).toBe(1);
+        expect(settings.remoteConfigurations[ids[0]].name).toBe("my-remote");
+        expect(settings.remoteConfigurations[ids[0]].uri).toContain("sls+https://example.com/db");
+        expect(settings.activeConfigurationId).toBe(ids[0]);
+        expect(stdout).toHaveBeenCalled();
+    });
+
+    it("remote-activate switches active remote and applies settings", async () => {
+        const core = createCoreMock();
+        const settings = core.services.setting.currentSettings();
+        settings.remoteConfigurations.r1 = {
+            id: "r1",
+            name: "R1",
+            uri: "sls+https://example.com/db1",
+            isEncrypted: false,
+        };
+        settings.remoteConfigurations.r2 = {
+            id: "r2",
+            name: "R2",
+            uri: "sls+https://example.com/db2",
+            isEncrypted: false,
+        };
+        settings.activeConfigurationId = "r1";
+
+        const result = await runCommand(makeOptions("remote-activate", ["r2"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(true);
+        expect(settings.activeConfigurationId).toBe("r2");
+        expect(core.services.control.applySettings).toHaveBeenCalledTimes(1);
+    });
+
+    it("remote-rm removes active remote and promotes first remaining", async () => {
+        const core = createCoreMock();
+        const settings = core.services.setting.currentSettings();
+        settings.remoteConfigurations.r1 = {
+            id: "r1",
+            name: "R1",
+            uri: "sls+https://example.com/db1",
+            isEncrypted: false,
+        };
+        settings.remoteConfigurations.r2 = {
+            id: "r2",
+            name: "R2",
+            uri: "sls+https://example.com/db2",
+            isEncrypted: false,
+        };
+        settings.activeConfigurationId = "r1";
+
+        const result = await runCommand(makeOptions("remote-rm", ["r1"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(true);
+        expect(settings.remoteConfigurations.r1).toBeUndefined();
+        expect(settings.activeConfigurationId).toBe("r2");
+        expect(core.services.control.applySettings).toHaveBeenCalledTimes(1);
+    });
+
+    it("remote-export prints the exact stored connection string", async () => {
+        const core = createCoreMock();
+        const settings = core.services.setting.currentSettings();
+        settings.remoteConfigurations.r1 = {
+            id: "r1",
+            name: "R1",
+            uri: "sls+https://example.com/db?db=vault",
+            isEncrypted: false,
+        };
+        const stdout = captureStdout(core);
+
+        const result = await runCommand(makeOptions("remote-export", ["r1"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(true);
+        const outLines = stdout.lines();
+        expect(outLines.length > 0 ? outLines[outLines.length - 1] : "").toBe("sls+https://example.com/db?db=vault");
+        expect(stdout.spy).toHaveBeenCalled();
+    });
+
+    it("remote-set updates URI and applies settings when target is active", async () => {
+        const core = createCoreMock();
+        const settings = core.services.setting.currentSettings();
+        settings.remoteConfigurations.r1 = {
+            id: "r1",
+            name: "R1",
+            uri: "sls+https://old.example/db",
+            isEncrypted: false,
+        };
+        settings.activeConfigurationId = "r1";
+
+        const result = await runCommand(makeOptions("remote-set", ["r1", "sls+https://new.example/db"]), {
+            ...context,
+            core,
+        });
+
+        expect(result).toBe(true);
+        expect(settings.remoteConfigurations.r1.uri).toContain("sls+https://new.example/db");
+        expect(core.services.control.applySettings).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(protocolFixtures)(
+        "remote-activate projects effective settings for $protocol",
+        async ({ connectionString, assertProjectedFields }) => {
+            const core = createCoreMock();
+            const settings = core.services.setting.currentSettings();
+            settings.remoteConfigurations.r1 = {
+                id: "r1",
+                name: "R1",
+                uri: "sls+https://old.example/?db=old",
+                isEncrypted: false,
+            };
+            settings.remoteConfigurations.r2 = {
+                id: "r2",
+                name: "R2",
+                uri: connectionString,
+                isEncrypted: false,
+            };
+            settings.activeConfigurationId = "r1";
+
+            const result = await runCommand(makeOptions("remote-activate", ["r2"]), {
+                ...context,
+                core,
+            });
+
+            expect(result).toBe(true);
+            expect(settings.activeConfigurationId).toBe("r2");
+            assertProjectedFields(settings);
+        }
+    );
+
+    it.each(protocolFixtures)(
+        "remote-set projects effective settings for active remote ($protocol)",
+        async ({ connectionString, assertProjectedFields }) => {
+            const core = createCoreMock();
+            const settings = core.services.setting.currentSettings();
+            settings.remoteConfigurations.r1 = {
+                id: "r1",
+                name: "R1",
+                uri: "sls+https://old.example/?db=old",
+                isEncrypted: false,
+            };
+            settings.activeConfigurationId = "r1";
+
+            const result = await runCommand(makeOptions("remote-set", ["r1", connectionString]), {
+                ...context,
+                core,
+            });
+
+            expect(result).toBe(true);
+            assertProjectedFields(settings);
+        }
+    );
+
+    it.each(protocolFixtures)(
+        "remote-rm projects promoted active remote effective settings for $protocol",
+        async ({ connectionString, assertProjectedFields }) => {
+            const core = createCoreMock();
+            const settings = core.services.setting.currentSettings();
+            settings.remoteConfigurations.r1 = {
+                id: "r1",
+                name: "R1",
+                uri: "sls+https://old.example/?db=old",
+                isEncrypted: false,
+            };
+            settings.remoteConfigurations.r2 = {
+                id: "r2",
+                name: "R2",
+                uri: connectionString,
+                isEncrypted: false,
+            };
+            settings.activeConfigurationId = "r1";
+
+            const result = await runCommand(makeOptions("remote-rm", ["r1"]), {
+                ...context,
+                core,
+            });
+
+            expect(result).toBe(true);
+            expect(settings.activeConfigurationId).toBe("r2");
+            assertProjectedFields(settings);
+        }
+    );
+
+    it.each([
+        ["couchdb", "sls+https://user:pass@example.com:5984/?db=vault"] as const,
+        [
+            "s3",
+            "sls+s3://ak:sk@example.com/?endpoint=https%3A%2F%2Fs3.example.com&bucket=my-bucket&region=ap-northeast-1",
+        ] as const,
+        [
+            "p2p",
+            "sls+p2p://room-abc?passphrase=pass-123&relays=wss%3A%2F%2Frelay.example&appId=self-hosted-livesync",
+        ] as const,
+    ])("remote command round-trip works for %s", async (_protocol, initialConnStr) => {
+        const core = createCoreMock();
+
+        const addOut = captureStdout(core);
+        const addResult = await runCommand(makeOptions("remote-add", ["rt", initialConnStr]), {
+            ...context,
+            core,
+        });
+        expect(addResult).toBe(true);
+        const remoteId = parseAddedRemoteIdFromLines(addOut.lines());
+        expect(remoteId).not.toBe("");
+
+        const export1Out = captureStdout(core);
+        const export1Result = await runCommand(makeOptions("remote-export", [remoteId]), {
+            ...context,
+            core,
+        });
+        expect(export1Result).toBe(true);
+        const export1Lines = export1Out.lines();
+        const exported1 = export1Lines.length > 0 ? export1Lines[export1Lines.length - 1] : "";
+        expect(exported1).toBe(ConnectionStringParser.serialize(ConnectionStringParser.parse(initialConnStr)));
+
+        const roundTripInput = ConnectionStringParser.serialize(ConnectionStringParser.parse(exported1));
+        const setResult = await runCommand(makeOptions("remote-set", [remoteId, roundTripInput]), {
+            ...context,
+            core,
+        });
+        expect(setResult).toBe(true);
+
+        const export2Out = captureStdout(core);
+        const export2Result = await runCommand(makeOptions("remote-export", [remoteId]), {
+            ...context,
+            core,
+        });
+        expect(export2Result).toBe(true);
+        const export2Lines = export2Out.lines();
+        const exported2 = export2Lines.length > 0 ? export2Lines[export2Lines.length - 1] : "";
+        expect(exported2).toBe(roundTripInput);
+    });
+
+    describe("runCommand with decoupled vault path", () => {
+        it("push resolves target path relative to vaultPath, not databasePath", async () => {
+            const core = createCoreMock();
+            const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "livesync-test-"));
+            const localVaultPath = path.join(tempDir, "vault");
+            const localDatabasePath = path.join(tempDir, "db");
+            await fs.mkdir(localVaultPath);
+            await fs.mkdir(localDatabasePath);
+
+            const fileInVault = path.join(localVaultPath, "existing.md");
+            await fs.writeFile(fileInVault, "hello", "utf-8");
+
+            const decoupledContext = {
+                databasePath: localDatabasePath,
+                vaultPath: localVaultPath,
+                settingsPath: path.join(localDatabasePath, ".tabularium/settings.json"),
+            } as any;
+
+            const options = {
+                command: "push" as const,
+                commandArgs: [fileInVault, fileInVault],
+                databasePath: localDatabasePath,
+                vaultPath: localVaultPath,
+            };
+
+            try {
+                const result = await runCommand(options, { ...decoupledContext, core });
+                expect(result).toBe(true);
+                expect(core.serviceModules.storageAccess.writeFileAuto).toHaveBeenCalledWith(
+                    "existing.md",
+                    expect.any(ArrayBuffer),
+                    expect.any(Object)
+                );
+            } finally {
+                await fs.rm(tempDir, { recursive: true, force: true });
+            }
+        });
+    });
+
+    describe("mark-resolved and unlock-remote commands", () => {
+        it("reports a connection failure without claiming that every central remote is CouchDB", async () => {
+            const core = createCoreMock();
+            core.services.replicator.runCentralRemoteAdministration.mockResolvedValueOnce({
+                status: CENTRAL_REMOTE_ADMINISTRATION_RESULT_STATUSES.VERIFICATION_FAILED,
+                reason: CENTRAL_REMOTE_ADMINISTRATION_FAILURE_REASONS.CONNECTION_FAILED,
+                detail: new Error("remote unavailable"),
+            });
+
+            const result = await runCommand(makeOptions("mark-resolved", []), {
+                ...context,
+                core,
+            });
+
+            expect(result).toBe(false);
+            const verificationOutput = core.services.context.standardIo.writeStderr.mock.calls
+                .map(([chunk]: [string | Uint8Array]) =>
+                    typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk)
+                )
+                .join("");
+            expect(verificationOutput).toContain(
+                "[Verification] Failed to connect to the configured remote: remote unavailable\n"
+            );
+            expect(verificationOutput).not.toContain("CouchDB");
+        });
+
+        it("reports when the active remote configuration changes before administration begins", async () => {
+            const core = createCoreMock();
+            core.services.replicator.runCentralRemoteAdministration.mockResolvedValueOnce({
+                status: CENTRAL_REMOTE_ADMINISTRATION_RESULT_STATUSES.VERIFICATION_FAILED,
+                reason: CENTRAL_REMOTE_ADMINISTRATION_FAILURE_REASONS.ACTIVE_CONFIGURATION_MISMATCH,
+            });
+
+            const result = await runCommand(makeOptions("mark-resolved", []), {
+                ...context,
+                core,
+            });
+
+            expect(result).toBe(false);
+            const verificationOutput = core.services.context.standardIo.writeStderr.mock.calls
+                .map(([chunk]: [string | Uint8Array]) =>
+                    typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk)
+                )
+                .join("");
+            expect(verificationOutput).toContain(
+                "[Verification] The active remote configuration changed before remote administration could begin.\n"
+            );
+        });
+
+        it("fails by default when remote administration cannot verify its postcondition", async () => {
+            const core = createCoreMock();
+            core.services.replicator.runCentralRemoteAdministration.mockResolvedValueOnce({
+                status: CENTRAL_REMOTE_ADMINISTRATION_RESULT_STATUSES.VERIFICATION_FAILED,
+                reason: CENTRAL_REMOTE_ADMINISTRATION_FAILURE_REASONS.NO_ACTIVE_REPLICATOR,
+            });
+
+            const result = await runCommand(makeOptions("mark-resolved", []), {
+                ...context,
+                core,
+            });
+
+            expect(result).toBe(false);
+        });
+
+        it("preserves the historical zero exit for returned verification failures only when requested", async () => {
+            const core = createCoreMock();
+            core.services.replicator.runCentralRemoteAdministration.mockResolvedValueOnce({
+                status: CENTRAL_REMOTE_ADMINISTRATION_RESULT_STATUSES.VERIFICATION_FAILED,
+                reason: CENTRAL_REMOTE_ADMINISTRATION_FAILURE_REASONS.NO_ACTIVE_REPLICATOR,
+            });
+
+            const result = await runCommand(
+                { ...makeOptions("mark-resolved", []), compatRemoteAdminExitZero: true },
+                {
+                    ...context,
+                    core,
+                }
+            );
+
+            expect(result).toBe(true);
+        });
+
+        it("does not hide a thrown remote mutation failure behind the compatibility option", async () => {
+            const core = createCoreMock();
+            const failure = new Error("mutation failed");
+            core.services.replicator.runCentralRemoteAdministration.mockRejectedValueOnce(failure);
+
+            await expect(
+                runCommand(
+                    { ...makeOptions("mark-resolved", []), compatRemoteAdminExitZero: true },
+                    {
+                        ...context,
+                        core,
+                    }
+                )
+            ).rejects.toBe(failure);
+        });
+
+        it("does not hide an unknown remote ID behind the compatibility option", async () => {
+            const core = createCoreMock();
+
+            const result = await runCommand(
+                { ...makeOptions("mark-resolved", ["missing-remote"]), compatRemoteAdminExitZero: true },
+                {
+                    ...context,
+                    core,
+                }
+            );
+
+            expect(result).toBe(false);
+            expect(core.services.replicator.runCentralRemoteAdministration).not.toHaveBeenCalled();
+        });
+
+        it("fails a lock command when the observed milestone remains unlocked", async () => {
+            const core = createCoreMock();
+            core.services.replicator.runCentralRemoteAdministration.mockResolvedValueOnce({
+                status: CENTRAL_REMOTE_ADMINISTRATION_RESULT_STATUSES.VERIFICATION_FAILED,
+                reason: CENTRAL_REMOTE_ADMINISTRATION_FAILURE_REASONS.POSTCONDITION_MISMATCH,
+                observation: {
+                    kind: CENTRAL_REMOTE_ADMINISTRATION_OBSERVATION_KINDS.MILESTONE,
+                    locked: false,
+                    accepted: true,
+                    nodeId: "test-node-id",
+                },
+            });
+
+            const result = await runCommand(makeOptions("lock-remote", []), {
+                ...context,
+                core,
+            });
+
+            expect(result).toBe(false);
+            const verificationOutput = core.services.context.standardIo.writeStderr.mock.calls
+                .map(([chunk]: [string | Uint8Array]) =>
+                    typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk)
+                )
+                .join("");
+            expect(verificationOutput).toContain("[Verification] Remote Database: UNLOCKED\n");
+            expect(verificationOutput).toContain("[Verification] Current Device Node ID (test-node-id): ACCEPTED\n");
+        });
+
+        it("mark-resolved without args runs on active database", async () => {
+            const core = createCoreMock();
+            const result = await runCommand(makeOptions("mark-resolved", []), {
+                ...context,
+                core,
+            });
+            expect(result).toBe(true);
+            expect(core.services.replicator.runCentralRemoteAdministration).toHaveBeenCalledWith({
+                action: CENTRAL_REMOTE_ADMINISTRATION_ACTIONS.MARK_RESOLVED,
+            });
+            expect(core.services.control.applySettings).not.toHaveBeenCalled();
+            expect(core.services.replication.markResolved).not.toHaveBeenCalled();
+        });
+
+        it("mark-resolved with remote-id temporarily activates it and runs markResolved", async () => {
+            const core = createCoreMock();
+            const settings = core.services.setting.currentSettings();
+            settings.remoteConfigurations.r1 = {
+                id: "r1",
+                name: "R1",
+                uri: "sls+https://example.com/db1",
+                isEncrypted: false,
+            };
+
+            const result = await runCommand(makeOptions("mark-resolved", ["r1"]), {
+                ...context,
+                core,
+            });
+            expect(result).toBe(true);
+            expect(core.services.replicator.runCentralRemoteAdministration).toHaveBeenCalledWith({
+                action: CENTRAL_REMOTE_ADMINISTRATION_ACTIONS.MARK_RESOLVED,
+            });
+            expect(core.services.control.applySettings).toHaveBeenCalledTimes(1);
+            expect(settings.activeConfigurationId).toBe("r1");
+            expect(core.services.setting.updateSettings).toHaveBeenCalledWith(expect.any(Function), false);
+        });
+
+        it("unlock-remote without args runs on active database", async () => {
+            const core = createCoreMock();
+            const result = await runCommand(makeOptions("unlock-remote", []), {
+                ...context,
+                core,
+            });
+            expect(result).toBe(true);
+            expect(core.services.replicator.runCentralRemoteAdministration).toHaveBeenCalledWith({
+                action: CENTRAL_REMOTE_ADMINISTRATION_ACTIONS.UNLOCK,
+            });
+            expect(core.services.control.applySettings).not.toHaveBeenCalled();
+        });
+
+        it("unlock-remote with remote-id temporarily activates it and runs markUnlocked", async () => {
+            const core = createCoreMock();
+            const settings = core.services.setting.currentSettings();
+            settings.remoteConfigurations.r1 = {
+                id: "r1",
+                name: "R1",
+                uri: "sls+https://example.com/db1",
+                isEncrypted: false,
+            };
+
+            const result = await runCommand(makeOptions("unlock-remote", ["r1"]), {
+                ...context,
+                core,
+            });
+            expect(result).toBe(true);
+            expect(core.services.replicator.runCentralRemoteAdministration).toHaveBeenCalledWith({
+                action: CENTRAL_REMOTE_ADMINISTRATION_ACTIONS.UNLOCK,
+            });
+            expect(core.services.control.applySettings).toHaveBeenCalledTimes(1);
+            expect(settings.activeConfigurationId).toBe("r1");
+            expect(core.services.setting.updateSettings).toHaveBeenCalledWith(expect.any(Function), false);
+        });
+
+        it("lock-remote without args runs on active database", async () => {
+            const core = createCoreMock();
+            const result = await runCommand(makeOptions("lock-remote", []), {
+                ...context,
+                core,
+            });
+            expect(result).toBe(true);
+            expect(core.services.replicator.runCentralRemoteAdministration).toHaveBeenCalledWith({
+                action: CENTRAL_REMOTE_ADMINISTRATION_ACTIONS.LOCK,
+            });
+            expect(core.services.control.applySettings).not.toHaveBeenCalled();
+        });
+
+        it("lock-remote with remote-id temporarily activates it and runs markLocked", async () => {
+            const core = createCoreMock();
+            const settings = core.services.setting.currentSettings();
+            settings.remoteConfigurations.r1 = {
+                id: "r1",
+                name: "R1",
+                uri: "sls+https://example.com/db1",
+                isEncrypted: false,
+            };
+
+            const result = await runCommand(makeOptions("lock-remote", ["r1"]), {
+                ...context,
+                core,
+            });
+            expect(result).toBe(true);
+            expect(core.services.replicator.runCentralRemoteAdministration).toHaveBeenCalledWith({
+                action: CENTRAL_REMOTE_ADMINISTRATION_ACTIONS.LOCK,
+            });
+            expect(core.services.control.applySettings).toHaveBeenCalledTimes(1);
+            expect(settings.activeConfigurationId).toBe("r1");
+            expect(core.services.setting.updateSettings).toHaveBeenCalledWith(expect.any(Function), false);
+        });
+
+        it("remote-status without args outputs status of active remote configuration", async () => {
+            const core = createCoreMock();
+            const getStatus = vi.fn(async () => ({
+                db_name: "test-db",
+                doc_count: 42,
+            }));
+            const dispose = vi.fn(async () => undefined);
+            const createRemoteResource = vi.fn(async () => ({
+                check: vi.fn(),
+                getStatus,
+                dispose,
+            }));
+            core.services.replicator.createRemoteResource = createRemoteResource;
+            const stdout = captureStdout(core);
+            const result = await runCommand(makeOptions("remote-status", []), {
+                ...context,
+                core,
+            });
+            expect(result).toBe(true);
+            const fullOutput = stdout.spy.mock.calls.map((call: [string | Uint8Array]) => call[0]).join("");
+            const parsedStatus = JSON.parse(fullOutput);
+            expect(parsedStatus.db_name).toBe("test-db");
+            expect(parsedStatus.doc_count).toBe(42);
+            expect(createRemoteResource).toHaveBeenCalledWith(
+                REMOTE_RESOURCE_KINDS.CONNECTION,
+                core.services.setting.currentSettings()
+            );
+            expect(getStatus).toHaveBeenCalledOnce();
+            expect(dispose).toHaveBeenCalledOnce();
+            expect(core.services.replicator.getActiveReplicator).not.toHaveBeenCalled();
+        });
+
+        it("remote-status with remote-id temporarily activates it and outputs status", async () => {
+            const core = createCoreMock();
+            const settings = core.services.setting.currentSettings();
+            settings.remoteConfigurations.r1 = {
+                id: "r1",
+                name: "R1",
+                uri: "sls+https://example.com/db1",
+                isEncrypted: false,
+            };
+            const stdout = captureStdout(core);
+            const result = await runCommand(makeOptions("remote-status", ["r1"]), {
+                ...context,
+                core,
+            });
+            expect(result).toBe(true);
+            const fullOutput = stdout.spy.mock.calls.map((call: [string | Uint8Array]) => call[0]).join("");
+            const parsedStatus = JSON.parse(fullOutput);
+            expect(parsedStatus.db_name).toBe("test-db");
+            expect(parsedStatus.doc_count).toBe(42);
+            expect(settings.activeConfigurationId).toBe("r1");
+            expect(core.services.setting.updateSettings).toHaveBeenCalledWith(expect.any(Function), false);
+        });
+    });
+});

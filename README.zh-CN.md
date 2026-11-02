@@ -29,11 +29,13 @@ src/smtp.ts          发送到 Kindle 的邮件
 src/tabularius/      AI 管理员：托管客户端、检索、提供商、提案、SSH、联网
 src/sandbox.ts       沙箱服务（同一镜像，单独的容器，挂载 Docker socket）
 ui/                  网页应用（TypeScript，由 build-ui.mjs 构建）
+clients/notes/       云笔记（Svelte，由 Vite 构建）
+clients/cli/         命令行客户端，Tabularius 的托管客户端
 test/                API 与浏览器测试
 Dockerfile
 ```
 
-镜像里还包含 `notes-dist/`（云笔记）和 `cli-dist/`（Tabularius 使用的命令行客户端）。两者都从插件仓库构建，由父仓库的 `npm run build:notes` 和 `npm run build:cli` 完成，所以服务器不能单独构建。
+镜像里还包含 `notes-dist/`（云笔记）和 `cli-dist/`（Tabularius 使用的命令行客户端），由父仓库的 `npm run build:notes` 和 `npm run build:cli` 从 `clients/` 构建。客户端使用插件的同步核心与依赖（`clients/node_modules` 链接到插件的），所以服务器不能单独构建。
 
 ## 开发
 

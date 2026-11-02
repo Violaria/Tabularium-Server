@@ -1,0 +1,126 @@
+import type { InjectableServiceHub } from "@tabularium/sync-core/compat/services/implements/injectable/InjectableServiceHub";
+import { ServiceRebuilder } from "@tabularium/sync-core/compat/serviceModules/Rebuilder";
+import { ServiceFileHandler } from "@/core/serviceModules/FileHandler";
+import { StorageAccessManager } from "@tabularium/sync-core/compat/managers/StorageProcessingManager";
+import type { SyncCore } from "@/core/createCore";
+import type { ServiceContext } from "@tabularium/sync-core/context";
+import { FileAccessCLI } from "./FileAccessCLI";
+import { ServiceFileAccessCLI } from "./ServiceFileAccessImpl";
+import { ServiceDatabaseFileAccessCLI } from "./DatabaseFileAccess";
+import { StorageEventManagerCLI } from "@clients/cli/managers/StorageEventManagerCLI";
+import type { ServiceModules } from "@tabularium/sync-core/compat/interfaces/ServiceModule";
+import type { IgnoreRules } from "./IgnoreRules";
+import { createFileReflectionProvenance } from "@/core/serviceModules/FileReflectionProvenance";
+
+/**
+ * Initialize service modules for CLI version
+ * This is the CLI equivalent of TabulariumPlugin.initialiseServiceModules
+ *
+ * @param basePath - The base path of the vault directory
+ * @param core - The SyncCore instance
+ * @param services - The service hub
+ * @returns ServiceModules containing all initialized service modules
+ */
+export function initialiseServiceModulesCLI(
+    basePath: string,
+    core: SyncCore<ServiceContext>,
+    services: InjectableServiceHub<ServiceContext>,
+    ignoreRules?: IgnoreRules,
+    watchEnabled: boolean = false
+): ServiceModules {
+    const storageAccessManager = new StorageAccessManager();
+
+    // CLI-specific file access using Node.js FileSystemAdapter
+    const vaultAccess = new FileAccessCLI(basePath, {
+        storageAccessManager: storageAccessManager,
+        vaultService: services.vault,
+        settingService: services.setting,
+        APIService: services.API,
+        pathService: services.path,
+    });
+
+    // CLI-specific storage event manager
+    const storageEventManager = new StorageEventManagerCLI(
+        basePath,
+        core,
+        {
+            fileProcessing: services.fileProcessing,
+            setting: services.setting,
+            vaultService: services.vault,
+            storageAccessManager: storageAccessManager,
+            APIService: services.API,
+        },
+        ignoreRules,
+        watchEnabled
+    );
+
+    // Close the file watcher during graceful shutdown so the process can exit cleanly.
+    services.appLifecycle.onUnload.addHandler(async () => {
+        await storageEventManager.close();
+        return true;
+    });
+
+    // Storage access using CLI file system adapter
+    const storageAccess = new ServiceFileAccessCLI({
+        API: services.API,
+        setting: services.setting,
+        fileProcessing: services.fileProcessing,
+        vault: services.vault,
+        appLifecycle: services.appLifecycle,
+        storageEventManager: storageEventManager,
+        storageAccessManager: storageAccessManager,
+        vaultAccess: vaultAccess,
+    });
+
+    // Database file access (platform-independent)
+    const databaseFileAccess = new ServiceDatabaseFileAccessCLI({
+        events: services.context.events,
+        API: services.API,
+        database: services.database,
+        path: services.path,
+        storageAccess: storageAccess,
+        vault: services.vault,
+    });
+
+    // File handler (platform-independent)
+    const fileHandler = new ServiceFileHandler({
+        events: services.context.events,
+        API: services.API,
+        databaseFileAccess: databaseFileAccess,
+        conflict: services.conflict,
+        setting: services.setting,
+        fileProcessing: services.fileProcessing,
+        vault: services.vault,
+        path: services.path,
+        replication: services.replication,
+        storageAccess: storageAccess,
+        fileReflectionProvenance: createFileReflectionProvenance(services.keyValueDB),
+    });
+
+    // Rebuilder (platform-independent)
+    const rebuilder = new ServiceRebuilder({
+        path: services.path,
+        events: services.context.events,
+        API: services.API,
+        database: services.database,
+        appLifecycle: services.appLifecycle,
+        setting: services.setting,
+        remote: services.remote,
+        databaseEvents: services.databaseEvents,
+        replication: services.replication,
+        replicator: services.replicator,
+        UI: services.UI,
+        vault: services.vault,
+        fileHandler: fileHandler,
+        fileProcessing: services.fileProcessing,
+        storageAccess: storageAccess,
+        control: services.control,
+    });
+
+    return {
+        rebuilder,
+        fileHandler,
+        databaseFileAccess,
+        storageAccess,
+    };
+}
