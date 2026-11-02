@@ -1,17 +1,22 @@
 // The model parameter form, built from the server's rule table (like Open WebUI's advanced parameters): one row per
-// parameter, "Default" until it is switched to a custom value, then a control for its type. vLLM also takes custom
-// parameters (a name and a JSON value). Only the parameters set to a custom value are saved.
+// parameter, "Default" until it is switched to a custom value, then a control for its type. vLLM and TensorRT-LLM also
+// take custom parameters (a name and a JSON value). Only the parameters set to a custom value are saved.
 import { catalogues, hasMessage, language, t } from './i18n.js';
-import { escape, tip } from './core.js';
+import { escape, message, tip } from './core.js';
 
 export type Rule =
   | { kind: 'number'; min: number; max: number; step: number; integer?: boolean; initial: number }
   | { kind: 'enum'; values: string[]; initial: string }
   | { kind: 'boolean'; initial: boolean }
-  | { kind: 'list'; initial: string[] }
+  | { kind: 'text'; max: number; initial: string }
+  | { kind: 'list'; max: number; initial: string[] }
+  | { kind: 'ints'; max: number; initial: number[] }
+  | { kind: 'set'; values: string[]; initial: string[] }
   | { kind: 'bias'; initial: Record<string, number> };
 export type Params = Record<string, unknown>;
-export type ProviderName = 'anthropic' | 'openai' | 'gemini' | 'deepseek' | 'vllm' | 'ollama';
+export type ProviderName = 'anthropic' | 'openai' | 'gemini' | 'deepseek' | 'vllm' | 'ollama' | 'tensorrt';
+/** Providers that take custom parameters. */
+const CUSTOM: ProviderName[] = ['vllm', 'tensorrt'];
 export class FormError extends Error {}
 
 const label = (name: string) => { const key = `param.${name}`; return hasMessage(key) ? t(key) : name; };
@@ -21,7 +26,7 @@ const englishName = (name: string) => {
   return language() === 'en' || !hasMessage(key) ? '' : catalogues.en[key];
 };
 /** Providers as their makers write them. */
-export const PROVIDER_NAMES: Record<ProviderName, string> = { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek', vllm: 'vLLM', ollama: 'Ollama' };
+export const PROVIDER_NAMES: Record<ProviderName, string> = { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek', vllm: 'vLLM', ollama: 'Ollama', tensorrt: 'TensorRT-LLM' };
 export interface ModelOption { id: string; provider: ProviderName; model: string; name: string }
 /** The models as select options, grouped under their provider's name; `empty` adds a first option with the value ''. */
 export function modelOptions(models: ModelOption[], selected: string, empty?: string) {
@@ -35,7 +40,8 @@ const hint = (name: string) => { const key = `param.${name}Hint`; return hasMess
 const valueLabel = (value: string) => { const key = `param.value.${value}`; return hasMessage(key) ? t(key) : value; };
 const shown = (rule: Rule, value: unknown) =>
   value === undefined ? '' : rule.kind === 'boolean' ? (value ? t('param.on') : t('param.off')) : rule.kind === 'enum' ? valueLabel(String(value))
-    : rule.kind === 'list' ? (value as string[]).join(', ') || '—' : rule.kind === 'bias' ? String(Object.keys(value as object).length) : String(value);
+    : rule.kind === 'list' || rule.kind === 'ints' ? (value as unknown[]).join(', ') || '—' : rule.kind === 'set' ? (value as string[]).map(valueLabel).join(', ') || '—'
+      : rule.kind === 'bias' ? String(Object.keys(value as object).length) : String(value);
 
 /**
  * Draws the form into `root`. `defaults` are what applies when a parameter is left at default (the next level up);
@@ -52,7 +58,7 @@ export function paramForm(root: HTMLElement, provider: ProviderName, rules: Reco
         + `<button type="button" class="param-toggle${set ? ' custom' : ''}" data-toggle aria-pressed="${set}">${set && rule.kind === 'boolean' ? shown(rule, values[name])
           : set ? t('param.custom') : `${t('param.default')}${defaults[name] !== undefined ? ` · ${escape(shown(rule, defaults[name]))}` : ''}`}</button></div>`
         + (set && rule.kind !== 'boolean' ? `<div class="param-control">${control(name, rule, values[name])}</div>` : '') + '</div>';
-    }).join('')}${provider === 'vllm' ? `<div class="custom-params"><h4>${t('param.customTitle')}${tip(t('param.customHint'))}</h4>${custom.map((item, index) =>
+    }).join('')}${CUSTOM.includes(provider) ? `<div class="custom-params"><h4>${t('param.customTitle')}${tip(t(provider === 'tensorrt' ? 'param.customHintTensorrt' : 'param.customHint'))}</h4>${custom.map((item, index) =>
       `<div class="custom-param" data-custom="${index}"><input aria-label="${t('param.customName')}" placeholder="${t('param.customName')}" value="${escape(item.name)}" data-field="name"><input aria-label="${t('param.customValue')}" placeholder='{"a": 1}' value="${escape(item.value)}" data-field="value"><button type="button" class="link" data-remove>${t('param.remove')}</button></div>`).join('')}<button type="button" data-add>${t('param.add')}</button></div>` : ''}</div>`;
     for (const row of root.querySelectorAll<HTMLElement>('[data-param]')) {
       const name = row.dataset.param!;
@@ -72,20 +78,23 @@ export function paramForm(root: HTMLElement, provider: ProviderName, rules: Reco
             const number = Number(input.value);
             values[name] = input.value === '' ? Number.NaN : number;
             for (const other of row.querySelectorAll<HTMLInputElement>('input')) if (other !== input) other.value = input.value;
-          } else if (rule.kind === 'enum') values[name] = input.value;
+          } else if (rule.kind === 'enum' || rule.kind === 'text') values[name] = input.value;
+          else if (rule.kind === 'set') values[name] = [...row.querySelectorAll<HTMLInputElement>('input:checked')].map(box => box.value);
         });
       }
-      if (rule.kind === 'list') {
+      if (rule.kind === 'list' || rule.kind === 'ints') {
         const add = (text: string) => {
-          const items = (values[name] as string[]) ?? [];
-          if (text && !items.includes(text)) values[name] = [...items, text];
+          const items = (values[name] as unknown[]) ?? [];
+          const item = rule.kind === 'ints' ? (/^-?\d{1,12}$/.test(text) ? Number(text) : undefined) : text;
+          if (item === undefined) { message(t('param.intInvalid', { name: label(name), value: text }), true); return; }
+          if (text && !items.includes(item)) values[name] = [...items, item];
           draw();
           root.querySelector<HTMLInputElement>(`[data-param="${CSS.escape(name)}"] input`)?.focus();
         };
         const input = row.querySelector<HTMLInputElement>('input');
         input?.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); add(input.value.trim()); } });
         for (const remove of row.querySelectorAll<HTMLButtonElement>('[data-tag]')) remove.addEventListener('click', () => {
-          values[name] = (values[name] as string[]).filter(item => item !== remove.dataset.tag);
+          values[name] = (values[name] as unknown[]).filter(item => String(item) !== remove.dataset.tag);
           draw();
         });
       }
@@ -106,6 +115,8 @@ export function paramForm(root: HTMLElement, provider: ProviderName, rules: Reco
       if (!rule) continue;
       if (rule.kind === 'number' && (typeof value !== 'number' || !Number.isFinite(value) || value < rule.min || value > rule.max || (rule.integer && !Number.isInteger(value))))
         throw new FormError(t('param.outOfRange', { name: label(name), min: rule.min, max: rule.max }));
+      if (rule.kind === 'text' && (typeof value !== 'string' || !value.trim() || value.length > rule.max)) throw new FormError(t('param.textInvalid', { name: label(name), max: rule.max }));
+      if ((rule.kind === 'list' || rule.kind === 'ints') && (value as unknown[]).length > rule.max) throw new FormError(t('param.tooMany', { name: label(name), max: rule.max }));
       result[name] = rule.kind === 'bias' && typeof value === 'string' ? readBias(name, value) : value;
     }
     for (const item of custom) {
@@ -126,8 +137,10 @@ function control(name: string, rule: Rule, value: unknown) {
     return `<textarea rows="3" spellcheck="false" aria-label="${escape(label(name))}" placeholder="${escape(t('param.biasHint'))}">${escape(text)}</textarea>`;
   }
   if (rule.kind === 'enum') return `<select aria-label="${escape(label(name))}">${rule.values.map(item => `<option value="${escape(item)}" ${item === value ? 'selected' : ''}>${escape(valueLabel(item))}</option>`).join('')}</select>`;
-  const items = (value as string[]) ?? [];
-  return `<div class="tags">${items.map(item => `<span class="tag">${escape(item)}<button type="button" class="link" data-tag="${escape(item)}" aria-label="${escape(t('param.remove'))}">×</button></span>`).join('')}<input aria-label="${escape(label(name))}" placeholder="${escape(t('param.tagHint'))}"></div>`;
+  if (rule.kind === 'text') return `<input class="param-text" aria-label="${escape(label(name))}" maxlength="${rule.max}" value="${escape(String(value ?? ''))}">`;
+  if (rule.kind === 'set') return `<div class="param-set">${rule.values.map(item => `<label class="check"><input type="checkbox" value="${escape(item)}" ${(value as string[]).includes(item) ? 'checked' : ''}><span>${escape(valueLabel(item))}</span></label>`).join('')}</div>`;
+  const items = (value as unknown[]) ?? [];
+  return `<div class="tags">${items.map(item => `<span class="tag">${escape(String(item))}<button type="button" class="link" data-tag="${escape(String(item))}" aria-label="${escape(t('param.remove'))}">×</button></span>`).join('')}<input aria-label="${escape(label(name))}" ${rule.kind === 'ints' ? 'inputmode="numeric"' : ''} placeholder="${escape(t(rule.kind === 'ints' ? 'param.intHint' : 'param.tagHint'))}"></div>`;
 }
 
 /** Lines of "token ID: bias" (-100 to 100) as an object. */

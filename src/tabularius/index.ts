@@ -545,7 +545,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       // The conversation's adjustments over the recipe's parameters, for the recipe's provider.
       const params = { ...recipe.params, ...paramsOf(conversation.params, name) };
       const system = conversation.system + RECIPE_PROMPT(recipe.prompt) + CONVERSATION_PROMPT(conversation.prompt)
-        + MODEL_PROMPT(settings.models().find(item => item.id === model)!.name, { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Google (Gemini API)', deepseek: 'DeepSeek', vllm: 'a local vLLM server', ollama: 'a local Ollama server' }[name]);
+        + MODEL_PROMPT(settings.models().find(item => item.id === model)!.name, { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Google (Gemini API)', deepseek: 'DeepSeek', vllm: 'a local vLLM server', ollama: 'a local Ollama server', tensorrt: 'a local TensorRT-LLM server' }[name]);
       for (let round = 0; ; round++) {
         // The last round answers without tools, so a model that keeps searching still gives an answer.
         const final = round >= MAX_TOOL_ROUNDS;

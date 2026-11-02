@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { open, seal } from './client.js';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
-import { anthropic, deepseek, gemini, ollama, openai, vllm, type Provider } from './providers.js';
+import { anthropic, deepseek, gemini, ollama, openai, tensorrt, vllm, type Provider } from './providers.js';
 import { checkParams, ParamsError, type Params, type ProviderName } from './params.js';
 import { FORMER_PROMPT_LINES, PROMPT_TEMPLATE } from './prompt.js';
 import { embedder as createEmbedder } from './providers.js';
@@ -15,14 +15,14 @@ import type { Embedder } from './search.js';
 import type { Mode } from './index.js';
 import { KNOWLEDGE_DEFAULTS, listDatasets, ragflow, type KnowledgeBase, type KnowledgeSettings } from './knowledge.js';
 
-export const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'gemini', 'deepseek', 'vllm', 'ollama'];
+export const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'gemini', 'deepseek', 'vllm', 'ollama', 'tensorrt'];
 /** Providers on this network, reached at an address with an optional key; the others need a key. */
-const LOCAL: ProviderName[] = ['vllm', 'ollama'];
-/** A model offered here: the provider's identifier, its name for people, and (vLLM) its context length. */
+const LOCAL: ProviderName[] = ['vllm', 'ollama', 'tensorrt'];
+/** A model offered here: the provider's identifier, its name for people, and (vLLM, TensorRT-LLM) its context length. */
 /** `vision`: whether the model reads images (the APIs do not say; the administrator marks it). */
 export interface ModelEntry { id: string; name: string; context?: number; vision?: boolean }
 /**
- * Anthropic, OpenAI and Gemini chat models read images; DeepSeek and vLLM models are marked by the administrator; Ollama
+ * Anthropic, OpenAI and Gemini chat models read images; DeepSeek, vLLM and TensorRT-LLM models are marked by the administrator; Ollama
  * reports it per model (the model list carries it).
  */
 const visionDefault = (name: ProviderName) => name === 'anthropic' || name === 'openai' || name === 'gemini';
@@ -232,6 +232,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
           : parsed.provider === 'gemini' ? gemini(parsed.model, key!, !web.allowed.length && !web.blocked.length)
           : parsed.provider === 'deepseek' ? deepseek(parsed.model, key!)
           : parsed.provider === 'ollama' ? ollama(parsed.model, item.url, key, Math.min(item.models.find(model => model.id === parsed.model)?.context ?? OLLAMA_CONTEXT, OLLAMA_CONTEXT))
+          : parsed.provider === 'tensorrt' ? tensorrt(parsed.model, item.url, key, context)
           : vllm(parsed.model, item.url, key, context);
         cache.set(id, provider);
       }

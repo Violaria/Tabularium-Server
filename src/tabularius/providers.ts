@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { randomUUID } from 'node:crypto';
 import type { Embedder } from './search.js';
-import { deepseekBody, geminiConfig, ollamaRequest, vllmBody, type Params, type ProviderName } from './params.js';
+import { anthropicEdits, geminiSafety, merge, place, type Params, type ProviderName } from './params.js';
 import type { WebOptions } from './web.js';
 
 // Conversations are stored in a small neutral form so they survive a change of provider. An assistant turn also keeps the
@@ -69,16 +69,21 @@ export function anthropic(model: string, apiKey?: string): Provider {
   return {
     name: 'anthropic', model, nativeWeb: true,
     async turn(system, tools, messages, onText, { web, params = {}, answerOnly = false } = {}) {
-      const fallback = FALLBACK_MODELS.has(model);
-      const stream = client.beta.messages.stream({
-        model, max_tokens: (params.max_tokens as number | undefined) ?? 64000,
-        thinking: { type: 'adaptive' }, output_config: { effort: (params.effort as 'medium' | undefined) ?? 'medium' },
-        ...((params.stop_sequences as string[] | undefined)?.length ? { stop_sequences: params.stop_sequences as string[] } : {}),
-        // Compaction summarises early context server-side near the window's limit; its block is replayed with the turn.
-        betas: ['compact-2026-01-12', ...(fallback ? ['server-side-fallback-2026-07-01'] : [])],
-        context_management: { edits: [{ type: 'compact_20260112' }] },
-        ...(fallback ? { fallbacks: 'default' as const } : {}),
+      // Refusal fallbacks are on for the models that take them unless the recipe turns them off (or on for another model).
+      const fallback = params.fallbacks === undefined ? FALLBACK_MODELS.has(model) : params.fallbacks === 'default';
+      const placed = place('anthropic', params);
+      const context = anthropicEdits(params);
+      // Adaptive thinking at medium effort, prompt caching and compaction unless the parameters say otherwise; compaction
+      // summarises early context server-side near the window's limit, and its block is replayed with the turn.
+      const request = merge({
+        model, max_tokens: 64000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
+        betas: [...new Set(['compact-2026-01-12', ...(fallback ? ['server-side-fallback-2026-07-01'] : []), ...placed.betas, ...context.betas])],
+        context_management: { edits: context.edits },
+        ...(fallback ? { fallbacks: 'default' } : {}),
         cache_control: { type: 'ephemeral' },
+      }, placed.fields) as unknown as Omit<Anthropic.Beta.Messages.MessageCreateParamsStreaming, 'system' | 'tools' | 'messages' | 'stream'>;
+      const stream = client.beta.messages.stream({
+        ...request,
         system,
         // A request without tools (a connection test) leaves the fields out: the APIs reject an empty list.
         ...(tools.length || web ? {
@@ -141,18 +146,16 @@ export function openai(model: string, apiKey?: string): Provider {
     async turn(system, tools, messages, onText, { web, params = {}, answerOnly = false } = {}) {
       let response: OpenAI.Responses.Response | undefined;
       try {
+        // Nothing stored at OpenAI and the encrypted reasoning returned, unless the parameters say otherwise; extra output
+        // (`include`) is added to it, with the token log probabilities when top_logprobs is set.
+        const include = [...new Set(['reasoning.encrypted_content', ...((params.include as string[] | undefined) ?? []),
+          ...(params.top_logprobs !== undefined ? ['message.output_text.logprobs'] : [])])];
+        const request = merge({
+          store: false, include, truncation: 'auto',
+          ...(params.compact_threshold !== undefined ? { context_management: [{ type: 'compaction', compact_threshold: params.compact_threshold }] } : {}),
+        }, place('openai', params).fields) as unknown as Omit<OpenAI.Responses.ResponseCreateParamsStreaming, 'model' | 'stream' | 'input'>;
         const stream = await client.responses.create({
-          model, stream: true, store: false, include: ['reasoning.encrypted_content'],
-          truncation: (params.truncation as 'auto' | 'disabled' | undefined) ?? 'auto',
-          ...(params.reasoning_effort || params.reasoning_summary ? { reasoning: {
-            ...(params.reasoning_effort ? { effort: params.reasoning_effort as OpenAI.ReasoningEffort } : {}),
-            ...(params.reasoning_summary ? { summary: params.reasoning_summary as 'auto' | 'concise' | 'detailed' } : {}),
-          } } : {}),
-          ...(params.service_tier ? { service_tier: params.service_tier as 'auto' | 'default' | 'flex' | 'priority' } : {}),
-          ...(params.verbosity ? { text: { verbosity: params.verbosity as 'low' | 'medium' | 'high' } } : {}),
-          ...(params.max_output_tokens ? { max_output_tokens: params.max_output_tokens as number } : {}),
-          ...(params.temperature !== undefined ? { temperature: params.temperature as number } : {}),
-          ...(params.top_p !== undefined ? { top_p: params.top_p as number } : {}),
+          ...request, model, stream: true,
           instructions: system, input: messages.flatMap(toItems),
           ...(tools.length || web ? {
             tools: [...tools.map(tool => ({ type: 'function' as const, name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })),
@@ -198,17 +201,29 @@ export function openai(model: string, apiKey?: string): Provider {
  * thinking during tool calls), so it is stored and replayed. Tool calls need the server's --enable-auto-tool-choice and a
  * --tool-call-parser for the model. Sampling defaults come from the model's generation_config on the server.
  */
-export function vllm(model: string, baseURL: string, apiKey?: string, contextTokens = 32_768): Provider {
+export const vllm = (model: string, baseURL: string, apiKey?: string, contextTokens = 32_768) =>
+  localChat('vllm', 'vLLM', 'reasoning', model, baseURL, apiKey, contextTokens);
+
+/**
+ * TensorRT-LLM's `trtllm-serve` Chat Completions, for local models. With the server's --reasoning_parser the thinking
+ * comes in `reasoning_content` and is replayed under that name; tool calls need its --tool_parser. It rejects fields it
+ * does not know, so only the parameters of its table (and custom ones the administrator adds) are sent.
+ */
+export const tensorrt = (model: string, baseURL: string, apiKey?: string, contextTokens = 32_768) =>
+  localChat('tensorrt', 'TensorRT-LLM', 'reasoning_content', model, baseURL, apiKey, contextTokens);
+
+/** A local Chat Completions server: the thinking field, replayed to the same model, differs between servers. */
+function localChat(name: 'vllm' | 'tensorrt', label: string, field: 'reasoning' | 'reasoning_content', model: string, baseURL: string, apiKey: string | undefined, contextTokens: number): Provider {
   const client = new OpenAI({ baseURL, apiKey: apiKey || 'none' });
-  type Assistant = OpenAI.Chat.ChatCompletionAssistantMessageParam & { reasoning?: string };
+  type Assistant = OpenAI.Chat.ChatCompletionAssistantMessageParam & { reasoning?: string; reasoning_content?: string };
   const toMessages = (message: Message): OpenAI.Chat.ChatCompletionMessageParam[] => {
     if (message.role === 'assistant') {
       const text = message.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
       const calls = message.parts.flatMap(part => part.type === 'tool_call'
         ? [{ id: part.id, type: 'function' as const, function: { name: part.name, arguments: JSON.stringify(part.input) } }] : []);
-      const reasoning = own(message, 'vllm', model) ? (message.native!.content as { reasoning?: string }).reasoning : undefined;
+      const reasoning = own(message, name, model) ? (message.native!.content as { reasoning?: string }).reasoning : undefined;
       if (!text && !calls.length) return [];
-      const assistant: Assistant = { role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}), ...(reasoning ? { reasoning } : {}) };
+      const assistant: Assistant = { role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}), ...(reasoning ? { [field]: reasoning } : {}) };
       return [assistant];
     }
     return message.parts.flatMap((part): OpenAI.Chat.ChatCompletionMessageParam[] => part.type === 'tool_result'
@@ -217,17 +232,17 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
         : part.type === 'image' ? [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:${part.mime};base64,${part.data}` } }] }] : []);
   };
   return {
-    name: 'vllm', model, nativeWeb: false,
+    name, model, nativeWeb: false,
     async turn(system, tools, messages, onText, { params = {}, answerOnly = false } = {}) {
       const calls: { id: string; name: string; arguments: string }[] = [];
       let text = ''; let reasoning = '';
       try {
-        // vLLM's own fields (top_k, min_p, repetition_penalty, chat_template_kwargs) go in the body next to the standard ones.
+        // The server's own fields (top_k, min_p, chat_template_kwargs, ...) go in the body next to the standard ones.
         const stream = await client.chat.completions.create({
-          ...vllmBody(params),
+          ...place(name, params).fields,
           model, stream: true,
           messages: [{ role: 'system', content: system }, ...fit(messages, contextTokens - estimate(system) - estimate(JSON.stringify(tools))).flatMap(toMessages),
-            // With tool_choice none alone Qwen often still tries a call, which vLLM drops, leaving an empty answer.
+            // With tool_choice none alone Qwen often still tries a call, which the server drops, leaving an empty answer.
             ...(answerOnly ? [{ role: 'user' as const, content: ANSWER_NOW }] : [])],
           ...(tools.length ? {
             tools: tools.map(tool => ({ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
@@ -235,8 +250,8 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
           } : {}),
         } as OpenAI.Chat.ChatCompletionCreateParamsStreaming);
         for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning?: string }) | undefined;
-          if (delta?.reasoning) reasoning += delta.reasoning;
+          const delta = chunk.choices[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning?: string; reasoning_content?: string }) | undefined;
+          if (delta?.[field]) reasoning += delta[field];
           if (delta?.content) { text += delta.content; onText(delta.content); }
           for (const call of delta?.tool_calls ?? []) {
             const entry = calls[call.index] ??= { id: '', name: '', arguments: '' };
@@ -246,16 +261,12 @@ export function vllm(model: string, baseURL: string, apiKey?: string, contextTok
           }
         }
       } catch (error) {
-        if (error instanceof OpenAI.APIError) throw new ProviderError(`vLLM ${error.status ?? ''} ${error.message}`.trim());
-        throw new ProviderError(`vLLM: ${(error as Error).message}`);
+        if (error instanceof OpenAI.APIError) throw new ProviderError(`${label} ${error.status ?? ''} ${error.message}`.trim());
+        throw new ProviderError(`${label}: ${(error as Error).message}`);
       }
       const parts: Part[] = text ? [{ type: 'text', text }] : [];
-      for (const call of calls) {
-        let input: Record<string, unknown>;
-        try { input = JSON.parse(call.arguments || '{}'); } catch { input = { invalid: call.arguments }; }
-        parts.push({ type: 'tool_call', id: call.id, name: call.name, input });
-      }
-      return { parts, native: { provider: 'vllm', model, content: { reasoning } } };
+      for (const call of calls) parts.push({ type: 'tool_call', id: call.id, name: call.name, input: argumentsOf(call.arguments) });
+      return { parts, native: { provider: name, model, content: { reasoning } } };
     },
   };
 }
@@ -318,7 +329,8 @@ export function gemini(model: string, apiKey: string, nativeSearch = true): Prov
             tools: [...(tools.length ? [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })) }] : []),
               ...(web ? [{ googleSearch: {} }] : [])],
             ...(tools.length && answerOnly ? { toolConfig: { functionCallingConfig: { mode: 'NONE' } } } : {}),
-            generationConfig: geminiConfig(params),
+            ...place('gemini', params).fields,
+            ...(geminiSafety(params).length ? { safetySettings: geminiSafety(params) } : {}),
           }),
         });
         if (!response.ok) {
@@ -409,7 +421,7 @@ export function deepseek(model: string, apiKey: string): Provider {
       let text = ''; let reasoning = '';
       try {
         const stream = await client.chat.completions.create({
-          ...deepseekBody(params),
+          ...place('deepseek', params).fields,
           model, stream: true,
           messages: [{ role: 'system', content: system }, ...messages.flatMap(toMessages)],
           ...(tools.length ? {
@@ -464,7 +476,8 @@ export function ollama(model: string, baseURL: string, apiKey?: string, contextT
   return {
     name: 'ollama', model, nativeWeb: false,
     async turn(system, tools, messages, onText, { params = {}, answerOnly = false } = {}) {
-      const { think, options } = ollamaRequest(params) as { think?: boolean | string; options: Record<string, unknown> };
+      // `think`, keep_alive and the like at the top, sampling and loading settings in `options`.
+      const { options = {}, ...top } = place('ollama', params).fields as { options?: Record<string, unknown> };
       const context = (options.num_ctx as number | undefined) ?? contextTokens;
       const kept = fit(messages, context - estimate(system) - estimate(JSON.stringify(tools)) - ((options.num_predict as number) > 0 ? options.num_predict as number : 0));
       const names = callNames(kept);
@@ -474,7 +487,7 @@ export function ollama(model: string, baseURL: string, apiKey?: string, contextT
         const response = await fetch(`${base}/api/chat`, {
           method: 'POST', headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
           body: JSON.stringify({
-            model, stream: true, ...(think === undefined ? {} : { think }), options: { ...options, num_ctx: context },
+            ...top, model, stream: true, options: { ...options, num_ctx: context },
             messages: [{ role: 'system', content: system }, ...kept.flatMap(message => toMessages(message, names)),
               // Ollama has no tool_choice: the last round goes without tools and with the instruction to answer.
               ...(answerOnly ? [{ role: 'user', content: ANSWER_NOW }] : [])],

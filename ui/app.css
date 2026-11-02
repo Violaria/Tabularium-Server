@@ -689,6 +689,8 @@ a.cite { overflow-wrap: anywhere; }
 .param-control input[type="range"] { flex: 1; padding: 0; accent-color: var(--accent); border: 0; background: none; }
 .param-control .param-number { width: 110px; flex: none; }
 .param-control select { max-width: 240px; }
+.param-control .param-text { flex: 1; }
+.param-set { display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 1; }
 .tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; background: var(--recess); font-family: var(--mono); font-size: 12px; }
 .tags input { flex: 1; min-width: 160px; }

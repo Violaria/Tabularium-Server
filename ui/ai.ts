@@ -17,10 +17,10 @@ interface SettingsView {
   limits: { modeLimit: 'read-only' | 'restricted' | 'full'; sshTimeout: number; sandboxImages: string[]; attachmentMegabytes: number };
 }
 interface Overview { rules: Record<ProviderName, Record<string, Rule>> }
-const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'gemini', 'deepseek', 'vllm', 'ollama'];
+const PROVIDERS: ProviderName[] = ['anthropic', 'openai', 'gemini', 'deepseek', 'vllm', 'ollama', 'tensorrt'];
 /** Local providers: reached at an address, with an optional key. */
-const LOCAL: ProviderName[] = ['vllm', 'ollama'];
-const ADDRESS: Partial<Record<ProviderName, string>> = { vllm: 'http://vllm:8000/v1', ollama: 'http://ollama:11434' };
+const LOCAL: ProviderName[] = ['vllm', 'ollama', 'tensorrt'];
+const ADDRESS: Partial<Record<ProviderName, string>> = { vllm: 'http://vllm:8000/v1', ollama: 'http://ollama:11434', tensorrt: 'http://tensorrt-llm:8000/v1' };
 /** Models of these providers read images unless marked otherwise; Ollama says per model; the rest are marked here. */
 const SEES: ProviderName[] = ['anthropic', 'openai', 'gemini'];
 /** Recipes and providers open in the page: a redraw after saving keeps them open. */

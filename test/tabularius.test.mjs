@@ -180,9 +180,7 @@ test('model parameters are checked per provider', async () => {
   assert.deepEqual(checkParams('vllm', { temperature: 0.6, top_k: 20, enable_thinking: false, stop: ['</done>'], ignore_eos: true }).top_k, 20, 'vLLM takes custom parameters');
   assert.throws(() => checkParams('vllm', { chat_template_kwargs: {} }), /cannot be set/, 'fields the server fills in are reserved');
   assert.throws(() => checkParams('vllm', { stop: ['', 'x'] }), /stop/);
-  assert.throws(() => checkParams('openai', { ignore_eos: true }), /not a parameter/, 'only vLLM takes custom parameters');
-  const { vllmBody } = await import('../dist/tabularius/params.js');
-  assert.deepEqual(vllmBody({ temperature: 0.6, enable_thinking: false }), { temperature: 0.6, chat_template_kwargs: { enable_thinking: false } });
+  assert.throws(() => checkParams('openai', { ignore_eos: true }), /not a parameter/, 'only vLLM and TensorRT-LLM take custom parameters');
   assert.throws(() => checkParams('vllm', '{"top_k":1.5}'), /top_k/);
   assert.throws(() => checkParams('vllm', '[1]'), /JSON object/);
 });
@@ -449,7 +447,7 @@ test('Gemini, DeepSeek and Ollama: requests in their own formats, and what each 
     const g = await loop(gemini('gemini-test', 'g-key'));
     assert.equal(requests.gemini[0].key, 'g-key');
     assert.deepEqual(requests.gemini[0].json.contents[0].parts[1], { inlineData: { mimeType: 'image/png', data: 'iVBORw0K' } });
-    assert.deepEqual(requests.gemini[0].json.generationConfig, { thinkingConfig: { thinkingLevel: 'low' } });
+    assert.deepEqual(requests.gemini[0].json.generationConfig, { thinkingConfig: { thinkingLevel: 'LOW' } });
     const replayed = requests.gemini[1].json.contents;
     assert.equal(replayed[1].role, 'model');
     assert.equal(replayed[1].parts[0].thoughtSignature, 'sig-A', 'the signature goes back as it came');
@@ -485,14 +483,53 @@ test('Gemini, DeepSeek and Ollama: requests in their own formats, and what each 
   }
 });
 
-test('parameters of the new providers are checked and become their request fields', async () => {
-  const { checkParams, deepseekBody, geminiConfig, ollamaRequest } = await import('../dist/tabularius/params.js');
-  assert.deepEqual(geminiConfig(checkParams('gemini', { temperature: 0.4, max_output_tokens: 2048, thinking_level: 'high' })), { temperature: 0.4, maxOutputTokens: 2048, thinkingConfig: { thinkingLevel: 'high' } });
+test('each provider\'s parameters go where its API takes them, with the beta headers they need', async () => {
+  const { checkParams, place, geminiSafety, anthropicEdits, PARAMS } = await import('../dist/tabularius/params.js');
+  const placed = (provider, params) => place(provider, checkParams(provider, params));
+  // Claude: nested in output_config and thinking; fixed fields first, so an explicit thinking type wins over the budget's.
+  assert.deepEqual(placed('anthropic', { effort: 'high', task_budget: 40_000, speed: 'fast', thinking_display: 'updates', inference_geo: 'us' }), {
+    fields: { output_config: { effort: 'high', task_budget: { type: 'tokens', total: 40_000 } }, speed: 'fast', thinking: { display: 'updates' }, inference_geo: 'us' },
+    betas: ['task-budgets-2026-03-13', 'fast-mode-2026-02-01', 'thinking-display-updates-2026-08-18'] });
+  assert.deepEqual(placed('anthropic', { thinking_budget: 8192 }).fields, { thinking: { type: 'enabled', budget_tokens: 8192 } });
+  assert.deepEqual(placed('anthropic', { thinking_budget: 8192, thinking: 'adaptive' }).fields.thinking.type, 'adaptive');
+  assert.deepEqual(placed('anthropic', { stop_sequences: [] }).fields, {}, 'an empty list is not sent');
+  assert.throws(() => checkParams('anthropic', { temperature: 0.7 }), /not a parameter/);
+  assert.deepEqual(anthropicEdits({}).edits, [{ type: 'compact_20260112' }]);
+  const edits = anthropicEdits(checkParams('anthropic', { clear_thinking_keep: 2, clear_tool_uses: true, clear_tool_uses_keep: 5, compaction_trigger: 90_000 }));
+  assert.deepEqual(edits.edits.map(edit => edit.type), ['clear_thinking_20251015', 'clear_tool_uses_20250919', 'compact_20260112']);
+  assert.deepEqual(edits.edits[1].keep, { type: 'tool_uses', value: 5 });
+  assert.deepEqual(edits.edits[2].trigger, { type: 'input_tokens', value: 90_000 });
+  assert.deepEqual(edits.betas, ['context-management-2025-06-27']);
+  // OpenAI: reasoning and text objects, moderation's nested policy.
+  assert.deepEqual(placed('openai', { reasoning_effort: 'max', reasoning_mode: 'pro', verbosity: 'low', service_tier: 'ultrafast', moderation_input: 'block' }).fields,
+    { reasoning: { effort: 'max', mode: 'pro' }, text: { verbosity: 'low' }, service_tier: 'ultrafast', moderation: { policy: { input: { mode: 'block' } } } });
+  assert.throws(() => checkParams('openai', { include: ['reasoning.encrypted_content'] }), /include/, 'the encrypted reasoning is the server\'s own');
+  // Gemini: generationConfig with the API's uppercase choices; safety settings as entries.
+  assert.deepEqual(placed('gemini', { temperature: 0.4, max_output_tokens: 2048, thinking_level: 'low', top_k: 20, media_resolution: 'high', service_tier: 'flex' }).fields, {
+    generationConfig: { temperature: 0.4, maxOutputTokens: 2048, thinkingConfig: { thinkingLevel: 'LOW' }, topK: 20, mediaResolution: 'MEDIA_RESOLUTION_HIGH' }, serviceTier: 'flex' });
+  assert.deepEqual(geminiSafety(checkParams('gemini', { safety_dangerous_content: 'only_high', safety_jailbreak: 'off' })),
+    [{ category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' }, { category: 'HARM_CATEGORY_JAILBREAK', threshold: 'OFF' }]);
   assert.throws(() => checkParams('gemini', { min_p: 0.1 }), /not a parameter of gemini/);
-  assert.deepEqual(deepseekBody(checkParams('deepseek', { thinking: false, max_tokens: 1024 })), { max_tokens: 1024, thinking: { type: 'disabled' } });
-  assert.throws(() => checkParams('deepseek', { reasoning_effort: 'medium' }), /low, high, max/);
-  assert.deepEqual(ollamaRequest(checkParams('ollama', { think: 'off', num_ctx: 16384, repeat_penalty: 1.2 })), { think: false, options: { num_ctx: 16384, repeat_penalty: 1.2 } });
-  assert.throws(() => checkParams('ollama', { num_ctx: 100 }), /2048/);
+  // DeepSeek: the thinking switch as an object; the full effort list.
+  assert.deepEqual(placed('deepseek', { thinking: false, max_tokens: 1024, reasoning_effort: 'none' }).fields, { thinking: { type: 'disabled' }, max_tokens: 1024, reasoning_effort: 'none' });
+  // vLLM: chat-template switch, repetition detection object, token ID lists; custom parameters at the top.
+  assert.deepEqual(placed('vllm', { enable_thinking: false, repetition_detection_max: 16, stop_token_ids: [151645, 151643], vllm_xargs: { a: 1 } }).fields,
+    { chat_template_kwargs: { enable_thinking: false }, repetition_detection: { max_pattern_size: 16 }, stop_token_ids: [151645, 151643], vllm_xargs: { a: 1 } });
+  assert.throws(() => checkParams('vllm', { stop_token_ids: ['abc'] }), /stop_token_ids/);
+  assert.throws(() => checkParams('vllm', { cache_salt: '' }), /cache_salt/);
+  // Ollama: think at the top as a switch or a level, the rest in options.
+  assert.deepEqual(placed('ollama', { think: 'off', num_ctx: 16384, repeat_penalty: 1.2, keep_alive: '10m' }).fields, { think: false, options: { num_ctx: 16384, repeat_penalty: 1.2 }, keep_alive: '10m' });
+  assert.deepEqual(placed('ollama', { think: 'high' }).fields, { think: 'high' });
+  // TensorRT-LLM: only its own fields; early_stopping as true, false or "never".
+  assert.deepEqual(placed('tensorrt', { top_k: 40 }).fields, { top_k: 40 });
+  assert.deepEqual(placed('tensorrt', { early_stopping: 'never', use_beam_search: true, best_of: 4 }).fields, { early_stopping: 'never', use_beam_search: true, best_of: 4 });
+  assert.deepEqual(placed('tensorrt', { early_stopping: 'false' }).fields, { early_stopping: false });
+  assert.deepEqual(checkParams('tensorrt', { my_field: 2 }), { my_field: 2 }, 'TensorRT-LLM takes custom parameters');
+  // Every rule's starting value is within its own range.
+  for (const [provider, rules] of Object.entries(PARAMS)) for (const [name, rule] of Object.entries(rules)) {
+    if (rule.kind === 'text') continue;
+    assert.doesNotThrow(() => checkParams(provider, { [name]: rule.initial }), `${provider}.${name}`);
+  }
 });
 
 test('the default prompt starts empty; stored prompts get the new sorting lines unless the administrator changed them', async () => {
