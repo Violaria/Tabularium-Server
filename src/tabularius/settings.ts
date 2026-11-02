@@ -9,7 +9,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { anthropic, deepseek, gemini, ollama, openai, vllm, type Provider } from './providers.js';
 import { checkParams, ParamsError, type Params, type ProviderName } from './params.js';
-import { DEFAULT_PROMPT } from './prompt.js';
+import { DEFAULT_PROMPT, FORMER_PROMPT_LINES } from './prompt.js';
 import { embedder as createEmbedder } from './providers.js';
 import type { Embedder } from './search.js';
 import type { Mode } from './index.js';
@@ -139,6 +139,11 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
     write('knowledge', initial.knowledge ? { ...KNOWLEDGE_DEFAULTS, ...initial.knowledge } : null);
     db.exec('COMMIT');
   }
+
+  // Lines of the default prompt that changed with a release, replaced where the stored prompt still has them as written.
+  const storedPrompt = read('prompt', DEFAULT_PROMPT);
+  const updatedPrompt = FORMER_PROMPT_LINES.reduce((prompt, [former, current]) => prompt.replace(former, current), storedPrompt);
+  if (updatedPrompt !== storedPrompt) write('prompt', updatedPrompt);
 
   let cache = new Map<string, Provider>();
   let knowledgeBase: KnowledgeBase | undefined;

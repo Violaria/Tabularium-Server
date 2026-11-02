@@ -494,3 +494,30 @@ test('parameters of the new providers are checked and become their request field
   assert.deepEqual(ollamaRequest(checkParams('ollama', { think: 'off', num_ctx: 16384, repeat_penalty: 1.2 })), { think: false, options: { num_ctx: 16384, repeat_penalty: 1.2 } });
   assert.throws(() => checkParams('ollama', { num_ctx: 100 }), /2048/);
 });
+
+test('a stored default prompt gets the new sortspec.md lines unless the administrator changed them', async () => {
+  const { createSettings } = await import('../dist/tabularius/settings.js');
+  const { DEFAULT_PROMPT, FORMER_PROMPT_LINES } = await import('../dist/tabularius/prompt.js');
+  const secret = randomBytes(32);
+  const former = FORMER_PROMPT_LINES.reduce((prompt, [old, current]) => prompt.replace(current, old), DEFAULT_PROMPT);
+  const dir = await mkdtemp(join(tmpdir(), 'tabularius-prompt-'));
+  let count = 0;
+  const fresh = () => {
+    const db = openStore(join(dir, `app-${count++}.sqlite`));
+    createSettings(db, secret);
+    return db;
+  };
+  const stored = (db) => JSON.parse(db.prepare("SELECT value FROM tabularius_settings WHERE key='prompt'").get().value);
+  const reopen = (db, prompt) => {
+    db.prepare("UPDATE tabularius_settings SET value=? WHERE key='prompt'").run(JSON.stringify(prompt));
+    createSettings(db, secret);
+    return stored(db);
+  };
+  assert.notEqual(former, DEFAULT_PROMPT);
+  assert.equal(reopen(fresh(), former), DEFAULT_PROMPT);
+  const edited = former.replace(FORMER_PROMPT_LINES[1][0], '- Sort order: my own rule.');
+  const kept = reopen(fresh(), edited);
+  assert(kept.includes('- Sort order: my own rule.'));
+  assert(kept.includes(FORMER_PROMPT_LINES[0][1]));
+  await rm(dir, { recursive: true, force: true });
+});
