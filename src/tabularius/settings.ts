@@ -141,9 +141,12 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
   }
 
   // Lines of the default prompt that changed with a release, replaced where the stored prompt still has them as written.
+  // The vault prompts too: the curation rules may have been moved there.
+  const updateLines = (prompt: string) => FORMER_PROMPT_LINES.reduce((text, [former, current]) => text.replace(former, current), prompt);
   const storedPrompt = read('prompt', DEFAULT_PROMPT);
-  const updatedPrompt = FORMER_PROMPT_LINES.reduce((prompt, [former, current]) => prompt.replace(former, current), storedPrompt);
-  if (updatedPrompt !== storedPrompt) write('prompt', updatedPrompt);
+  if (updateLines(storedPrompt) !== storedPrompt) write('prompt', updateLines(storedPrompt));
+  for (const { vault_id, prompt } of db.prepare('SELECT vault_id, prompt FROM tabularius_vaults').all() as { vault_id: string; prompt: string }[])
+    if (updateLines(prompt) !== prompt) db.prepare('UPDATE tabularius_vaults SET prompt=? WHERE vault_id=?').run(updateLines(prompt), vault_id);
 
   let cache = new Map<string, Provider>();
   let knowledgeBase: KnowledgeBase | undefined;

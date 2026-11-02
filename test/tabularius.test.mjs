@@ -495,7 +495,7 @@ test('parameters of the new providers are checked and become their request field
   assert.throws(() => checkParams('ollama', { num_ctx: 100 }), /2048/);
 });
 
-test('a stored default prompt gets the new sortspec.md lines unless the administrator changed them', async () => {
+test('stored default and vault prompts get the new sortspec.md lines unless the administrator changed them', async () => {
   const { createSettings } = await import('../dist/tabularius/settings.js');
   const { DEFAULT_PROMPT, FORMER_PROMPT_LINES } = await import('../dist/tabularius/prompt.js');
   const secret = randomBytes(32);
@@ -519,5 +519,12 @@ test('a stored default prompt gets the new sortspec.md lines unless the administ
   const kept = reopen(fresh(), edited);
   assert(kept.includes('- Sort order: my own rule.'));
   assert(kept.includes(FORMER_PROMPT_LINES[0][1]));
+  // A vault prompt that holds the rules gets the same replacement.
+  const db = fresh();
+  db.exec('PRAGMA foreign_keys=OFF');
+  db.prepare("INSERT INTO tabularius_vaults(vault_id, device_id, device_secret, passphrase, tweaks, enabled_at, prompt) VALUES('v','d',x'00',x'00','{}',0,?)")
+    .run(`本库的规则\n${FORMER_PROMPT_LINES[1][0]}\n其余`);
+  createSettings(db, secret);
+  assert.equal(db.prepare("SELECT prompt FROM tabularius_vaults WHERE vault_id='v'").get().prompt, `本库的规则\n${FORMER_PROMPT_LINES[1][1]}\n其余`);
   await rm(dir, { recursive: true, force: true });
 });

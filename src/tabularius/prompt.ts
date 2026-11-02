@@ -59,7 +59,8 @@ export const MEMORIES = (lines: string[]) => lines.length ? `\n\nWhat you rememb
 
 /**
  * Lines of the default prompt as earlier versions wrote them, with their replacements: sortspec.md moved its rules from
- * the front matter to a list in the body. A stored prompt that still holds such a line word for word gets the new one;
+ * the front matter to a list in the body. A stored prompt (the default prompt or a vault's) that still holds such a line
+ * word for word gets the new one;
  * a line the administrator changed is left alone.
  */
 export const FORMER_PROMPT_LINES: [string, string][] = [
