@@ -131,7 +131,7 @@ test('proposals are checked against the working copy and applied without turning
     await writeFile(join(root, 'a/附图.png'), Buffer.from([1, 2, 3]));
     await writeFile(join(root, 'b/索引.md'), '- [旧名](../a/旧名.md)\n');
     await writeFile(join(root, '私密.md'), '[x](a/旧名.md)\n');
-    await writeFile(join(root, '.livesync/x.md'), 'internal');
+    await writeFile(join(root, '.tabularium/x.md'), 'internal');
     const old = new Date('2020-01-01');
     await utimes(join(root, 'a/旧名.md'), old, old);
     const filter = createFilter('私密.md', '');
