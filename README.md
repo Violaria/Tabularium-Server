@@ -1,5 +1,7 @@
 # Tabularium Server
 
+English · [中文](README.zh-CN.md) · [Lingua Latīna](README.la.md)
+
 The server of [Tabularium](https://github.com/Violaria/Tabularium): a Node.js gateway in front of CouchDB, with an SQLite application database and a web app. It is a submodule of the parent repository, which also holds the Compose files, the backup tools and the tests; build and run it from there.
 
 ## What it does
