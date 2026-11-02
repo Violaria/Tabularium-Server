@@ -126,7 +126,7 @@ test('links follow moved notes', () => {
 test('proposals are checked against the working copy and applied without turning back modification times', async () => {
   const root = await mkdtemp(join(tmpdir(), 'tabularius-proposal-'));
   try {
-    await mkdir(join(root, 'a'), { recursive: true }); await mkdir(join(root, 'b')); await mkdir(join(root, '.livesync'));
+    await mkdir(join(root, 'a'), { recursive: true }); await mkdir(join(root, 'b')); await mkdir(join(root, '.tabularium'));
     await writeFile(join(root, 'a/旧名.md'), '# 旧名\n\npassword: hunter2\n');
     await writeFile(join(root, 'a/附图.png'), Buffer.from([1, 2, 3]));
     await writeFile(join(root, 'b/索引.md'), '- [旧名](../a/旧名.md)\n');
