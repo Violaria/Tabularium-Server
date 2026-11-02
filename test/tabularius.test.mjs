@@ -495,13 +495,10 @@ test('parameters of the new providers are checked and become their request field
   assert.throws(() => checkParams('ollama', { num_ctx: 100 }), /2048/);
 });
 
-test('stored default and vault prompts get the new sortspec.md lines unless the administrator changed them', async () => {
+test('the default prompt starts empty; stored prompts get the new sorting lines unless the administrator changed them', async () => {
   const { createSettings } = await import('../dist/tabularius/settings.js');
-  const { DEFAULT_PROMPT, FORMER_PROMPT_LINES } = await import('../dist/tabularius/prompt.js');
+  const { FORMER_PROMPT_LINES } = await import('../dist/tabularius/prompt.js');
   const secret = randomBytes(32);
-  // The prompt as the oldest release wrote it, and as 0.26.0 to 0.26.2 did.
-  const former = [...FORMER_PROMPT_LINES].reverse().reduce((prompt, [old, current]) => prompt.replace(current, old), DEFAULT_PROMPT);
-  const sortspecList = DEFAULT_PROMPT.replace(FORMER_PROMPT_LINES[2][1], FORMER_PROMPT_LINES[2][0]);
   const dir = await mkdtemp(join(tmpdir(), 'tabularius-prompt-'));
   let count = 0;
   const fresh = () => {
@@ -515,11 +512,14 @@ test('stored default and vault prompts get the new sortspec.md lines unless the 
     createSettings(db, secret);
     return stored(db);
   };
-  assert.notEqual(former, DEFAULT_PROMPT);
-  assert.equal(reopen(fresh(), former), DEFAULT_PROMPT);
-  assert.equal(reopen(fresh(), sortspecList), DEFAULT_PROMPT);
-  const edited = former.replace(FORMER_PROMPT_LINES[1][0], '- Sort order: my own rule.');
-  const kept = reopen(fresh(), edited);
+  assert.equal(stored(fresh()), '');
+  // A default prompt kept from the initial text of the oldest release, and of 0.26.0 to 0.26.2.
+  const latest = `前文\n${FORMER_PROMPT_LINES[0][1]}\n${FORMER_PROMPT_LINES[2][1]}\n后文`;
+  const oldest = `前文\n${FORMER_PROMPT_LINES[0][0]}\n${FORMER_PROMPT_LINES[1][0]}\n后文`;
+  const sortspecList = `前文\n${FORMER_PROMPT_LINES[0][1]}\n${FORMER_PROMPT_LINES[2][0]}\n后文`;
+  assert.equal(reopen(fresh(), oldest), latest);
+  assert.equal(reopen(fresh(), sortspecList), latest);
+  const kept = reopen(fresh(), oldest.replace(FORMER_PROMPT_LINES[1][0], '- Sort order: my own rule.'));
   assert(kept.includes('- Sort order: my own rule.'));
   assert(kept.includes(FORMER_PROMPT_LINES[0][1]));
   // A vault prompt that holds the rules gets the same replacement.

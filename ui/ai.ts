@@ -10,7 +10,7 @@ interface ProviderView { configured: boolean; keySet: boolean; keyHint: string; 
 interface Knowledge { url: string; datasets: string[]; limit: number; threshold: number; weight: number; keyword: boolean; topK: number; rerank: string }
 interface RecipeView { id?: string; name: string; model: string; params: Params; prompt: string }
 interface SettingsView {
-  prompt: string; defaultPrompt: string; recipes: RecipeView[]; defaultRecipe: string;
+  prompt: string; promptTemplate: string; recipes: RecipeView[]; defaultRecipe: string;
   providers: Record<ProviderName, ProviderView>; knowledge: Knowledge;
   embedding: { url: string; keySet: boolean; hint: string; model: string; batch: number };
   web: { enabled: boolean; searxng: string; allowed: string[]; blocked: string[]; maxUses: number; intranet: string[] };
@@ -100,7 +100,7 @@ export async function renderAiSettings(body: HTMLElement) {
     <section class="card"><div class="card-head"><h2>${t('ai.recipesTitle')}${tip(t('ai.recipesDesc'))}</h2>${models.length ? `<button type="button" id="add-recipe">${t('ai.recipeAdd')}</button>` : ''}</div>
       <div id="recipes" class="llm-recipes">${view.recipes.length ? view.recipes.map(recipeItem).join('') : `<p class="muted">${models.length ? t('ai.recipesNone') : t('ai.recipesNeedModels')}</p>`}</div></section>
     <section class="card"><h2>${t('ai.promptTitle')}${tip(t('ai.promptDesc'))}</h2><form id="server-prompt" class="stack"><textarea name="prompt" rows="16" spellcheck="false">${escape(view.prompt)}</textarea>
-      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="restore-prompt">${t('ai.restorePrompt')}</button></div></form></section>
+      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="prompt-template">${t('ai.promptTemplate')}</button></div></form></section>
     <section class="card"><h2>${t('ai.knowledgeTitle')}${tip(`${t('ai.knowledgeDesc')} ${t('ai.knowledgeHint')}`)}</h2><form id="knowledge" class="stack">
       <div class="inline-form"><label>${t('ai.mcpUrl')}<input name="url" value="${escape(k.url)}" placeholder="http://ragflow:9382/mcp"></label><button type="button" id="read-datasets">${t('ai.readDatasets')}</button></div>
       <fieldset class="datasets"><legend>${t('ai.datasets')}</legend><div id="datasets">${k.datasets.length ? k.datasets.map(id => `<label class="check dataset"><input type="checkbox" name="dataset" value="${escape(id)}" checked> <span class="mono">${escape(id)}</span></label>`).join('') : `<small>${t('ai.noDatasets')}</small>`}</div></fieldset>
@@ -296,7 +296,7 @@ export async function renderAiSettings(body: HTMLElement) {
   });
   const promptForm = document.getElementById('server-prompt') as HTMLFormElement;
   promptForm.addEventListener('submit', event => { event.preventDefault(); void run(() => save({ prompt: String(new FormData(promptForm).get('prompt')) })); });
-  document.getElementById('restore-prompt')!.addEventListener('click', () => { promptForm.querySelector('textarea')!.value = view.defaultPrompt; });
+  document.getElementById('prompt-template')!.addEventListener('click', () => { promptForm.querySelector('textarea')!.value = view.promptTemplate; });
   const knowledge = document.getElementById('knowledge') as HTMLFormElement;
   document.getElementById('read-datasets')!.addEventListener('click', () => void run(async () => {
     const url = String(new FormData(knowledge).get('url')).trim();

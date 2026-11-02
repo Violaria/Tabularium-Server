@@ -9,7 +9,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { anthropic, deepseek, gemini, ollama, openai, vllm, type Provider } from './providers.js';
 import { checkParams, ParamsError, type Params, type ProviderName } from './params.js';
-import { DEFAULT_PROMPT, FORMER_PROMPT_LINES } from './prompt.js';
+import { FORMER_PROMPT_LINES, PROMPT_TEMPLATE } from './prompt.js';
 import { embedder as createEmbedder } from './providers.js';
 import type { Embedder } from './search.js';
 import type { Mode } from './index.js';
@@ -133,7 +133,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
     })) as Stored;
     db.exec('BEGIN');
     write('providers', providers);
-    write('prompt', DEFAULT_PROMPT);
+    write('prompt', '');
     write('default_model', initial.defaultModel ?? '');
     write('params', initial.params ?? {});
     write('knowledge', initial.knowledge ? { ...KNOWLEDGE_DEFAULTS, ...initial.knowledge } : null);
@@ -143,7 +143,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
   // Lines of the default prompt that changed with a release, replaced where the stored prompt still has them as written.
   // The vault prompts too: the curation rules may have been moved there.
   const updateLines = (prompt: string) => FORMER_PROMPT_LINES.reduce((text, [former, current]) => text.replace(former, current), prompt);
-  const storedPrompt = read('prompt', DEFAULT_PROMPT);
+  const storedPrompt = read('prompt', '');
   if (updateLines(storedPrompt) !== storedPrompt) write('prompt', updateLines(storedPrompt));
   for (const { vault_id, prompt } of db.prepare('SELECT vault_id, prompt FROM tabularius_vaults').all() as { vault_id: string; prompt: string }[])
     if (updateLines(prompt) !== prompt) db.prepare('UPDATE tabularius_vaults SET prompt=? WHERE vault_id=?').run(updateLines(prompt), vault_id);
@@ -214,7 +214,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
       db.exec('COMMIT');
       return ids;
     },
-    prompt: () => read('prompt', DEFAULT_PROMPT),
+    prompt: () => read('prompt', ''),
     available: (id: string) => models().some(item => item.id === id),
     /** The provider for a model offered here; created on first use and again after the settings change. */
     provider(id: string): Provider {
@@ -308,7 +308,7 @@ export function createSettings(db: DatabaseSync, secret: Buffer, initial: Initia
     view() {
       const all = stored();
       return {
-        prompt: read('prompt', DEFAULT_PROMPT), defaultPrompt: DEFAULT_PROMPT, recipes: recipes(), defaultRecipe: read('default_recipe', ''),
+        prompt: read('prompt', ''), promptTemplate: PROMPT_TEMPLATE, recipes: recipes(), defaultRecipe: read('default_recipe', ''),
         providers: Object.fromEntries(PROVIDERS.map(name => [name, { configured: usable(name, all[name]), keySet: Boolean(all[name].key), keyHint: all[name].hint,
           models: all[name].models, url: all[name].url }])),
         knowledge: knowledgeSettings() ?? { url: '', datasets: [], ...KNOWLEDGE_DEFAULTS },
