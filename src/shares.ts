@@ -1,7 +1,8 @@
 // Shared notes and folders. The owner's clients build each share and upload its files; for an encrypted link the
 // files and the share's own record (`sealed`) are ciphertext, the key travelling only in the link's fragment. The
 // server keeps plain text only for public pages, which the owner chose explicitly. A share whose time ran out or that
-// was revoked keeps its row, so its link says it is no longer available, and loses its files.
+// was revoked loses its files and keeps its row, so its link says it is no longer available, until its owner or an
+// administrator clears it.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -98,6 +99,12 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
       user = session(req).user;
       if (user.must_change_password) fail(403, 'Change initial password first');
     }
+    if (route.length === 1 && method === 'DELETE') {
+      if (device) fail(403, 'Session required');
+      clean(user.id); audit(user.id, 'share.clean', user.id);
+      json(res, 200, { ok: true });
+      return;
+    }
     if (route.length === 1 && method === 'GET') {
       const vault = device?.vault_id ?? new URL(req.url!, 'http://local').searchParams.get('vault');
       const rows = vault
@@ -175,6 +182,15 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
       json(res, 200, { ok: true }); return;
     }
     fail(404, 'Route not found');
+  }
+  /** Removes shares that were withdrawn or ran out, of one owner or of everyone: their addresses then answer "not found". */
+  function clean(ownerId?: string) {
+    const where = `(revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at<=?))${ownerId ? ' AND owner_id=?' : ''}`;
+    const values = ownerId ? [Date.now(), ownerId] : [Date.now()];
+    db.exec('BEGIN');
+    db.prepare(`DELETE FROM share_files WHERE share_id IN (SELECT id FROM shares WHERE ${where})`).run(...values);
+    db.prepare(`DELETE FROM shares WHERE ${where}`).run(...values);
+    db.exec('COMMIT');
   }
   function revoke(id: string) {
     db.exec('BEGIN');
@@ -284,6 +300,11 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
           const { sealed: _sealed, ...rest } = view(row);
           return { ...rest, owner: row.owner, vault: row.vault };
         }));
+        return;
+      }
+      if (route.length === 2 && method === 'DELETE') {
+        clean(); audit(user.id, 'share.clean', user.id);
+        json(res, 200, { ok: true });
         return;
       }
       if (route.length === 3 && method === 'DELETE') {

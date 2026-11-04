@@ -69,7 +69,8 @@ async function vaultPage(content: HTMLElement, id: string) {
   const base = `/admin/vaults/${id}`;
   const devices = await api<Device[]>(`${base}/devices`);
   const own = vault.ownerId === state.session!.user.id;
-  body.innerHTML = `<section class="card"><dl class="details"><dt>${t('vaults.owner')}</dt><dd>${escape(vault.owner ?? '')}</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl><br><div class="actions"><button id="usage">${t('vault.usage')}</button>${own ? `<a class="button" href="/account/vaults/${id}" data-route>${t('admin.manageOwn')}</a>` : ''}</div><div id="usage-result"></div></section><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${deviceTable(devices, true)}</section>`;
+  body.innerHTML = `<section class="card"><dl class="details"><dt>${t('vaults.owner')}</dt><dd>${escape(vault.owner ?? '')}</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl><br><div class="actions"><button id="usage">${t('vault.usage')}</button> <button id="compact">${t('vault.compactAction')}</button>${tip(t('vault.compactHint'))}${own ? `<a class="button" href="/account/vaults/${id}" data-route>${t('admin.manageOwn')}</a>` : ''}</div><div id="usage-result"></div></section><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${deviceTable(devices, true)}</section>`;
+  button('compact', async () => { await api(`${base}/compact`, 'POST', {}); message(t('vault.compactStarted')); });
   button('usage', async () => {
     const usage = await api<Usage>(`${base}/usage`);
     document.getElementById('usage-result')!.innerHTML = `<br><dl class="details"><dt>${t('vault.diskUsage')}</dt><dd>${bytes(usage.diskBytes)}</dd><dt>${t('vault.activeData')}</dt><dd>${bytes(usage.activeBytes)}</dd><dt>${t('vault.documents')}</dt><dd>${usage.documents}</dd></dl><br>${tip(t('vault.usageHint'))}`;
@@ -89,5 +90,9 @@ async function sharesPage(content: HTMLElement) {
 async function auditPage(content: HTMLElement) {
   const body = frame(content);
   const events = await api<Audit[]>('/admin/audit');
-  body.innerHTML = `<section class="card table-wrap"><table><thead><tr><th>${t('common.time')}</th><th>${t('audit.actor')}</th><th>${t('audit.action')}</th><th>${t('audit.target')}</th></tr></thead><tbody>${events.map(event => `<tr><td>${date(event.occurredAt)}</td><td>${escape(event.actor)}</td><td>${escape(actionName(event.action))}</td><td class="mono">${escape(event.targetId)}</td></tr>`).join('')}</tbody></table></section>`;
+  body.innerHTML = `<section class="card table-wrap">${events.length ? `<div class="card-head"><span></span><button type="button" id="audit-clean">${t('common.clear')}</button></div>` : ''}<table><thead><tr><th>${t('common.time')}</th><th>${t('audit.actor')}</th><th>${t('audit.action')}</th><th>${t('audit.target')}</th></tr></thead><tbody>${events.map(event => `<tr><td>${date(event.occurredAt)}</td><td>${escape(event.actor)}</td><td>${escape(actionName(event.action))}</td><td class="mono">${escape(event.targetId)}</td></tr>`).join('')}</tbody></table></section>`;
+  if (events.length) button('audit-clean', async () => {
+    if (!await confirmAction({ title: t('audit.clean'), body: t('audit.cleanBody'), action: t('common.clear'), danger: true })) return;
+    await api('/admin/audit', 'DELETE'); await auditPage(content);
+  });
 }

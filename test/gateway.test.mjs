@@ -339,6 +339,11 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       // A client whose only credential was revoked leaves the list too.
       await api(`/vaults/${second.id}/devices/${moved.id}`, 'DELETE', undefined, alice);
       assert(!(await clients()).some(c => c.id === moved.machineId));
+      const store0 = new DatabaseSync(config.database, { readOnly: true });
+      assert.equal(store0.prepare('SELECT count(*) AS n FROM devices WHERE revoked=1').get().n, 0, 'revoked credentials leave the database');
+      assert.equal(store0.prepare('SELECT count(*) AS n FROM devices WHERE id=?').get(desktop.id).n, 0, 'replaced credentials leave the database');
+      assert.equal(store0.prepare('SELECT count(*) AS n FROM machines WHERE id NOT IN (SELECT machine_id FROM devices WHERE machine_id IS NOT NULL)').get().n, 0, 'clients without credentials leave the database');
+      store0.close();
 
       // A credential can revoke itself.
       assert.equal((await current('DELETE', old)).status, 200);
@@ -356,6 +361,17 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert.equal(await status(second, hosted), 200);
       store.prepare('DELETE FROM tabularius_vaults WHERE vault_id=?').run(second.id);
       store.close();
+
+      // Compacting is open to the owner and to administrators, and to nobody else.
+      await api(`/vaults/${first.id}/compact`, 'POST', {}, alice);
+      await api(`/admin/vaults/${first.id}/compact`, 'POST', {}, admin);
+      await api(`/vaults/${first.id}/compact`, 'POST', {}, bob, 404);
+
+      // Clearing the activity log leaves it empty, without a record of its own.
+      await api('/admin/audit', 'DELETE', undefined, alice, 403);
+      assert((await api('/admin/audit', 'GET', undefined, admin)).length > 0);
+      await api('/admin/audit', 'DELETE', undefined, admin);
+      assert.deepEqual(await api('/admin/audit', 'GET', undefined, admin), []);
     });
     await t.test('persistent sessions and devices after restart; initial password not reset', async () => {
       await gateway.close(); gateway = await createGateway(config); url = await gateway.listen();

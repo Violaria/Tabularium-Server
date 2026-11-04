@@ -1,6 +1,6 @@
 // Tabularius: enable the AI curator for a vault, set what it may send, and talk to it about the notes.
 import { formatDate, hasMessage, serverError, t } from './i18n.js';
-import { api, ApiError, askText, bytes, confirmAction, escape, icon, iconButton, markShapes, message, notesStyles, popMenu, run, state, tip, type MenuItem } from './core.js';
+import { api, ApiError, askText, bytes, confirmAction, escape, icon, iconButton, markShapes, message, notesStyles, popMenu, run, showDialog, state, tip, type MenuItem } from './core.js';
 import { FormError, paramForm, paramLabel, PROVIDER_NAMES, type Params, type ProviderName, type Rule } from './params.js';
 interface VaultStatus {
   id: string; name: string; enabled: boolean; enabledAt?: number; excluded?: string; masks?: string; running?: boolean; replicated?: boolean;
@@ -482,10 +482,9 @@ function drawSettings(current: VaultStatus) {
         <label>${t('tabularius.hostPort')}<input name="port" type="number" value="22" min="1" max="65535"></label><label>${t('tabularius.hostUser')}<input name="username" required></label></div>
         ${policyField('allowed')}<label><span>${t('tabularius.hostCommands')}${tip(t('tabularius.hostCommandsHint'))}</span><textarea name="commands" rows="3" spellcheck="false"></textarea></label>
         <button class="primary" type="submit">${t('tabularius.addHost')}</button></form>
-      ${commandLog.length ? `<details><summary>${t('tabularius.commandLog')}</summary><table><tbody>${commandLog.slice(0, 30).map(c => `<tr><td>${formatDate(c.createdAt)}</td><td>${escape(c.host ?? '')}</td><td><code>${escape(c.command)}</code></td><td>${escape(c.status)}${c.exitCode !== null ? ` (${c.exitCode})` : ''}${c.reason ? ` · ${escape(c.reason)}` : ''}</td></tr>`).join('')}</tbody></table></details>` : ''}</div>` : ''}
+      ${commandLog.length ? `<div class="actions"><button type="button" id="command-log">${t('tabularius.commandLog')}</button></div>` : ''}</div>` : ''}
     <div class="card"><h2>${t('tabularius.promptTitle')}${tip(t('tabularius.promptDesc'))}</h2><form id="vault-prompt" class="stack"><textarea name="prompt" rows="8" spellcheck="false">${escape(current.prompt ?? '')}</textarea>
-      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="import-prompt">${t('tabularius.importPrompt')}</button></div></form>
-      <details id="preview"><summary>${t('tabularius.preview')}${tip(t('tabularius.previewHint'))}</summary><div class="preview-body"></div></details></div>
+      <div class="actions"><button class="primary" type="submit">${t('common.save')}</button><button type="button" id="import-prompt">${t('tabularius.importPrompt')}</button><button type="button" id="preview">${t('tabularius.preview')}</button>${tip(t('tabularius.previewHint'))}</div></form></div>
     <div class="card"><div class="card-head"><h2>${t('tabularius.recipeTitle')}${tip(t('tabularius.recipeDesc'))}</h2>${overview!.admin ? `<a class="button" href="/admin/ai" data-route>${t('tabularius.manageRecipes')}</a>` : ''}</div>
       <label>${t('tabularius.vaultRecipe')}<select id="vault-recipe">${recipeOptions(recipeOf(current.recipe)?.id ?? '', t('tabularius.followServer'))}</select></label></div>
     ${overview!.knowledge ? `<div class="card"><div class="card-head"><h2>${t('tabularius.knowledge')}${tip(t('tabularius.knowledgeDesc'))}</h2><a class="button" href="/admin/ai" data-route>${t('tabularius.knowledgeSettings')}</a></div>
@@ -493,7 +492,7 @@ function drawSettings(current: VaultStatus) {
     <div class="card"><h2>${t('tabularius.about')}</h2><dl class="details"><dt>${t('tabularius.recipe')}</dt><dd>${escape(((recipe) => recipe ? `${recipe.name} · ${PROVIDER_NAMES[recipe.provider]} ${recipe.modelName}` : t('tabularius.noModel'))(recipeOf(current.recipe) ?? recipeOf(overview!.defaultRecipe)))}</dd>
       <dt>${t('tabularius.embeddings')}</dt><dd>${overview!.embeddings ? t('tabularius.embeddingsOn') : t('tabularius.embeddingsOff')}</dd>
       <dt>${t('tabularius.enabledAt')}</dt><dd>${formatDate(current.enabledAt!)}</dd></dl>
-      ${current.log?.length ? `<details><summary>${t('tabularius.log')}</summary><pre class="mono">${escape(current.log.join('\n'))}</pre></details>` : ''}</div>
+      ${current.log?.length ? `<div class="actions"><button type="button" id="client-log">${t('tabularius.log')}</button></div>` : ''}</div>
     <div class="card"><h2>${t('tabularius.disable')}${tip(t('tabularius.disableDesc'))}</h2><button id="disable" class="danger">${t('tabularius.disable')}</button></div>`);
   document.getElementById('reload')!.addEventListener('click', () => void run(refresh));
   document.getElementById('mode')!.addEventListener('change', event => void run(async () => {
@@ -532,11 +531,20 @@ function drawSettings(current: VaultStatus) {
     document.querySelector<HTMLTextAreaElement>('#vault-prompt textarea')!.value = prompt;
     message(t('tabularius.imported'));
   }));
-  document.getElementById('preview')!.addEventListener('toggle', event => void run(async () => {
-    if (!(event.target as HTMLDetailsElement).open) return;
+  document.getElementById('client-log')?.addEventListener('click', () => showDialog({ title: t('tabularius.log'), html: `<pre class="mono">${escape(current.log!.join('\n'))}</pre>` }));
+  document.getElementById('command-log')?.addEventListener('click', () => showDialog({
+    title: t('tabularius.commandLog'),
+    html: `<table><tbody>${commandLog.map(c => `<tr><td>${formatDate(c.createdAt)}</td><td>${escape(c.host ?? '')}</td><td><code>${escape(c.command)}</code></td><td>${escape(c.status)}${c.exitCode !== null ? ` (${c.exitCode})` : ''}${c.reason ? ` · ${escape(c.reason)}` : ''}</td></tr>`).join('')}</tbody></table>`,
+    actions: [{ label: t('common.clear'), danger: true, run: async close => {
+      if (!await confirmAction({ title: t('tabularius.commandLogClear'), body: t('common.clearBody'), action: t('common.clear'), danger: true })) return;
+      await api('/tabularius/commands', 'DELETE'); close(); await refresh();
+    } }],
+  }));
+  document.getElementById('preview')!.addEventListener('click', () => void run(async () => {
     const preview = await api<{ fixed: string; server: string; vault: string; recipe: string }>(`/tabularius/vaults/${encodeURIComponent(vaultId)}/prompt`);
-    document.querySelector('#preview .preview-body')!.innerHTML = [[t('tabularius.previewServer'), preview.server], [t('tabularius.previewFixed'), preview.fixed], [t('tabularius.previewVault'), preview.vault], [t('tabularius.previewRecipe'), preview.recipe]]
+    const html = [[t('tabularius.previewServer'), preview.server], [t('tabularius.previewFixed'), preview.fixed], [t('tabularius.previewVault'), preview.vault], [t('tabularius.previewRecipe'), preview.recipe]]
       .map(([title, text]) => `<h4>${escape(title)}</h4><pre class="prompt-text">${escape(text || '—')}</pre>`).join('');
+    showDialog({ title: t('tabularius.preview'), html });
   }));
   document.getElementById('vault-recipe')!.addEventListener('change', event => void run(async () => {
     const value = (event.target as HTMLSelectElement).value;

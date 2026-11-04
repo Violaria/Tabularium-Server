@@ -186,6 +186,19 @@ export function confirmAction(options: { title: string; body: string; action: st
   });
 }
 
+/** Shows content in a dialog that closes with its button or Escape; `actions` adds buttons next to it. */
+export function showDialog(options: { title: string; html: string; actions?: { label: string; danger?: boolean; run: (close: () => void) => Promise<void> }[] }) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'dialog view-dialog';
+  dialog.innerHTML = `<h2>${escape(options.title)}</h2><div class="view-body">${options.html}</div><div class="buttons">${(options.actions ?? []).map((action, index) => `<button type="button" data-action="${index}" class="${action.danger ? 'danger' : ''}">${escape(action.label)}</button>`).join('')}<button type="button" data-close>${escape(t('dialog.close'))}</button></div>`;
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.addEventListener('cancel', close);
+  dialog.querySelector('[data-close]')!.addEventListener('click', close);
+  (options.actions ?? []).forEach((action, index) => dialog.querySelector(`[data-action="${index}"]`)!.addEventListener('click', () => void run(() => action.run(close))));
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
 /** A dialog with several actions; resolves to the chosen value, or null when it is cancelled. */
 export function chooseAction(options: { title: string; body: string; choices: { value: string; label: string; danger?: boolean }[] }): Promise<string | null> {
   return new Promise(resolve => {

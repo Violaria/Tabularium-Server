@@ -98,6 +98,10 @@ export async function createGateway(config: Config) {
     db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
     db.prepare('DELETE FROM audit_events WHERE occurred_at <= ?').run(Date.now() - settings.auditDays() * 86_400_000);
     db.prepare('DELETE FROM kindle_deliveries WHERE occurred_at <= ?').run(Date.now() - settings.auditDays() * 86_400_000);
+    // An expired credential can only be replaced by signing in again; the hosted ones renew themselves.
+    db.prepare(`DELETE FROM devices WHERE expires_at <= ? AND id NOT IN (SELECT device_id FROM tabularius_vaults)
+      AND id NOT IN (SELECT rebuild_device FROM vaults WHERE rebuild_device IS NOT NULL)`).run(Date.now());
+    db.prepare('DELETE FROM machines WHERE id NOT IN (SELECT machine_id FROM devices WHERE machine_id IS NOT NULL)').run();
   };
   prune();
   const tabularius = config.tabularius
@@ -135,12 +139,25 @@ export async function createGateway(config: Config) {
   /** A vault's devices that were not revoked; the hosted one is only removed by turning Tabularius off. */
   const deviceList = (vaultId: string) => (db.prepare(`SELECT d.id, COALESCE(m.name, d.name) AS name, d.expires_at AS expiresAt, d.last_seen_at AS lastSeenAt, d.machine_id AS machineId,
     EXISTS(SELECT 1 FROM tabularius_vaults t WHERE t.device_id=d.id) AS hosted
-    FROM devices d LEFT JOIN machines m ON m.id=d.machine_id WHERE d.vault_id=? AND d.revoked=0`).all(vaultId) as { hosted: number }[])
+    FROM devices d LEFT JOIN machines m ON m.id=d.machine_id WHERE d.vault_id=? AND d.revoked=0`).all(vaultId) as { hosted: number; expiresAt: number }[])
+    .filter(device => device.hosted || device.expiresAt > Date.now())
     .map(device => ({ ...device, hosted: Boolean(device.hosted) }));
+  /** Gives back the space of old revisions and of what was cleared: CouchDB compacts in the background. */
+  async function compact(vault: Vault, actorId: string) {
+    if (vault.state !== 'ready') fail(409, 'Vault is not ready');
+    const response = await couch.admin(`/${vault.database_name}/_compact`, 'POST', {});
+    await response.arrayBuffer();
+    if (!response.ok) fail(502, 'Compaction could not start');
+    db.exec('VACUUM');
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    audit(actorId, 'vault.compact', vault.id);
+  }
   function revokeDevice(vaultId: string, deviceId: string, actorId: string) {
     if (db.prepare('SELECT 1 FROM tabularius_vaults WHERE device_id=? AND vault_id=?').get(deviceId, vaultId)) fail(409, 'The hosted device stops with Tabularius');
-    const result = db.prepare('UPDATE devices SET revoked=1 WHERE id=? AND vault_id=?').run(deviceId, vaultId);
+    db.prepare('UPDATE vaults SET rebuild_device=NULL, rebuild_until=NULL, rebuild_started=NULL WHERE rebuild_device=? AND id=?').run(deviceId, vaultId);
+    const result = db.prepare('DELETE FROM devices WHERE id=? AND vault_id=?').run(deviceId, vaultId);
     if (!result.changes) fail(404, 'Device not found');
+    machines.dropEmpty();
     cancel(v => v.device === deviceId);
     audit(actorId, 'device.revoke', deviceId);
   }
@@ -643,7 +660,15 @@ export async function createGateway(config: Config) {
         json(res, 200, { ok: true }); return;
       }
       if (route.length === 3 && route[2] === 'deliveries' && method === 'GET') {
-        json(res, 200, db.prepare('SELECT occurred_at AS occurredAt, file_name AS fileName, size, status, error FROM kindle_deliveries WHERE user_id=? ORDER BY id DESC LIMIT 50').all(user.id));
+        json(res, 200, db.prepare("SELECT occurred_at AS occurredAt, file_name AS fileName, size, status, error FROM kindle_deliveries WHERE user_id=? AND file_name<>'' ORDER BY id DESC LIMIT 50").all(user.id));
+        return;
+      }
+      if (route.length === 3 && route[2] === 'deliveries' && method === 'DELETE') {
+        // What was sent in the last day still counts towards the daily limit, as a row without any details.
+        const since = Date.now() - 86_400_000;
+        db.prepare("DELETE FROM kindle_deliveries WHERE user_id=? AND NOT (status='sent' AND occurred_at>?)").run(user.id, since);
+        db.prepare("UPDATE kindle_deliveries SET file_name='', size=0, error=NULL WHERE user_id=?").run(user.id);
+        json(res, 200, { ok: true });
         return;
       }
     }
@@ -749,6 +774,7 @@ export async function createGateway(config: Config) {
       if (route[1] === 'hosts' || route[1] === 'commands') {
         if (user.role !== 'admin') fail(403, 'Administrator required');
         if (route[1] === 'commands' && route.length === 2 && method === 'GET') { json(res, 200, t.commands()); return; }
+        if (route[1] === 'commands' && route.length === 2 && method === 'DELETE') { t.clearCommands(); audit(user.id, 'tabularius.commands-clear', user.id); json(res, 200, { ok: true }); return; }
         if (route.length === 2 && method === 'GET') { json(res, 200, t.hosts()); return; }
         if (route.length === 2 && method === 'POST') {
           const data = await body(req);
@@ -835,6 +861,10 @@ export async function createGateway(config: Config) {
           json(res, 200, { ok: true }); return;
         }
       }
+      if (path === '/api/v1/admin/audit' && method === 'DELETE') {
+        db.prepare('DELETE FROM audit_events').run();
+        json(res, 200, { ok: true }); return;
+      }
       if (path === '/api/v1/admin/audit' && method === 'GET') {
         json(res, 200, db.prepare(`SELECT a.id,a.occurred_at AS occurredAt,a.actor_id AS actorId,
           u.username AS actor,a.action,a.target_id AS targetId FROM audit_events a
@@ -881,6 +911,7 @@ export async function createGateway(config: Config) {
         if (route.length === 4 && route[3] === 'provision' && method === 'POST') {
           json(res, 200, await provision(vault!, user.id)); return;
         }
+        if (route.length === 4 && route[3] === 'compact' && method === 'POST') { await compact(vault!, user.id); json(res, 200, { ok: true }); return; }
         if (route.length === 4 && route[3] === 'usage' && method === 'GET') {
           let response;
           try { response = await couch.admin(`/${vault!.database_name}`); } catch { fail(502, 'CouchDB unavailable'); }
@@ -946,6 +977,7 @@ export async function createGateway(config: Config) {
       const vault = ownedVault(route[1], user);
       if (route.length === 2 && method === 'GET') { json(res, 200, publicVault(vault)); return; }
       if (route.length === 3 && route[2] === 'provision' && method === 'POST') { json(res, 200, await provision(vault, user.id)); return; }
+      if (route.length === 3 && route[2] === 'compact' && method === 'POST') { await compact(vault, user.id); json(res, 200, { ok: true }); return; }
       if (route[2] === 'rebuild') { json(res, 200, await rebuild(req, vault, user, route.slice(3), method!)); return; }
       if (route[2] === 'databases') { json(res, 200, await retired(vault, user, route.slice(3), method!)); return; }
       if (route[2] === 'devices') {

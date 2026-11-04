@@ -234,13 +234,14 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     if (!current) fail(404, 'Tabularius is not enabled for this vault');
     await clients.stop(vaultId);
     db.exec('BEGIN');
-    db.prepare('UPDATE devices SET revoked=1 WHERE id=?').run(current!.device_id);
     db.prepare('DELETE FROM tabularius_attachments WHERE vault_id=?').run(vaultId);
+    db.prepare('DELETE FROM tabularius_commands WHERE conversation_id IN (SELECT id FROM tabularius_conversations WHERE vault_id=?)').run(vaultId);
     db.prepare('DELETE FROM tabularius_messages WHERE conversation_id IN (SELECT id FROM tabularius_conversations WHERE vault_id=?)').run(vaultId);
     db.prepare('DELETE FROM tabularius_conversations WHERE vault_id=?').run(vaultId);
     projects.forgetVault(vaultId);
     forget(db, vaultId);
     db.prepare('DELETE FROM tabularius_vaults WHERE vault_id=?').run(vaultId);
+    db.prepare('DELETE FROM devices WHERE id=?').run(current!.device_id);
     db.exec('COMMIT');
     cancel(current!.device_id);
     await indexing.get(vaultId);
@@ -760,6 +761,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       return db.prepare(`SELECT c.id, c.command, c.mode, c.status, c.exit_code AS exitCode, c.reason, c.created_at AS createdAt, h.name AS host, u.username AS user
         FROM tabularius_commands c LEFT JOIN tabularius_hosts h ON h.id=c.host_id LEFT JOIN users u ON u.id=c.user_id ORDER BY c.created_at DESC LIMIT 200`).all();
     },
+    clearCommands() { db.prepare("DELETE FROM tabularius_commands WHERE status<>'pending'").run(); },
     /** Approves or denies a waiting command; only the user of that conversation may decide. */
     decide(id: string, user: User, approved: boolean) {
       const command = db.prepare("SELECT user_id FROM tabularius_commands WHERE id=? AND status='pending'").get(id) as { user_id: string } | undefined;
@@ -932,6 +934,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     },
     remove_conversation(id: string, user: User) {
       conversationFor(id, user);
+      db.prepare("DELETE FROM tabularius_commands WHERE conversation_id=? AND status<>'pending'").run(id);
       db.prepare('DELETE FROM tabularius_conversations WHERE id=?').run(id);
     },
   };

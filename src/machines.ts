@@ -31,6 +31,9 @@ export function createMachines({ db, audit, disconnect }: Deps) {
     return { id, name };
   }
 
+  /** A client without credentials is not listed anywhere, so nobody could remove it. */
+  const dropEmpty = () => db.prepare('DELETE FROM machines WHERE id NOT IN (SELECT machine_id FROM devices WHERE machine_id IS NOT NULL)').run();
+
   /** Puts a credential under its client; other credentials of the same installation are replaced by it. */
   function attach(device: { id: string; user_id: string; vault_id: string }, report: ClientReport) {
     db.exec('BEGIN IMMEDIATE');
@@ -38,10 +41,12 @@ export function createMachines({ db, audit, disconnect }: Deps) {
     const replaced = (db.prepare('SELECT id FROM devices WHERE machine_id=? AND installation=? AND revoked=0 AND id<>?').all(machine.id, report.installation, device.id) as { id: string }[]).map(row => row.id);
     db.prepare('UPDATE devices SET machine_id=?, installation=? WHERE id=?').run(machine.id, report.installation, device.id);
     for (const id of replaced) {
-      db.prepare('UPDATE devices SET revoked=1 WHERE id=?').run(id);
       db.prepare('UPDATE vaults SET rebuild_device=? WHERE rebuild_device=? AND id=?').run(device.id, id, device.vault_id);
+      db.prepare('UPDATE vaults SET rebuild_device=NULL, rebuild_until=NULL, rebuild_started=NULL WHERE rebuild_device=?').run(id);
+      db.prepare('DELETE FROM devices WHERE id=?').run(id);
       audit(device.user_id, 'device.replace', id);
     }
+    dropEmpty();
     db.exec('COMMIT');
     for (const id of replaced) disconnect(id);
     return machine;
@@ -75,13 +80,14 @@ export function createMachines({ db, audit, disconnect }: Deps) {
   /** Revokes every credential of a client and forgets it; signing in from it again makes a new one. */
   function remove(id: string, userId: string) {
     owned(id, userId);
-    const devices = (db.prepare('SELECT id FROM devices WHERE machine_id=? AND revoked=0').all(id) as { id: string }[]).map(row => row.id);
+    const devices = (db.prepare('SELECT id FROM devices WHERE machine_id=?').all(id) as { id: string }[]).map(row => row.id);
     db.exec('BEGIN IMMEDIATE');
-    db.prepare('UPDATE devices SET revoked=1, machine_id=NULL WHERE machine_id=?').run(id);
+    db.prepare('UPDATE vaults SET rebuild_device=NULL, rebuild_until=NULL, rebuild_started=NULL WHERE rebuild_device IN (SELECT id FROM devices WHERE machine_id=?)').run(id);
+    db.prepare('DELETE FROM devices WHERE machine_id=?').run(id);
     db.prepare('DELETE FROM machines WHERE id=?').run(id);
     audit(userId, 'machine.revoke', id);
     db.exec('COMMIT');
     for (const device of devices) disconnect(device);
   }
-  return { attach, list, rename, remove };
+  return { attach, list, rename, remove, dropEmpty };
 }

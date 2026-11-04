@@ -59,21 +59,17 @@ async function devicesPage(content: HTMLElement) {
 }
 
 export const usableDevice = (d: Device) => !d.hosted && d.expiresAt > Date.now();
-/** A vault's devices by kind: clients, credentials issued by hand or not yet under a client, and the hosted one. Expired ones are folded away. */
+/** A vault's devices by kind: clients, credentials issued by hand or not yet under a client, and the hosted one. */
 export function deviceTable(devices: Device[], revocable: boolean) {
   const seen = (d: Device) => d.lastSeenAt ? escape(when(d.lastSeenAt)) : `<span class="muted">${t('home.neverSynced')}</span>`;
   const table = (rows: Device[], actions: boolean) => `<table><thead><tr><th>${t('vault.device')}</th><th>${t('account.lastSync')}</th><th>${t('vault.expires')}</th>${actions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(d => `<tr><td>${escape(d.name)}</td><td>${seen(d)}</td><td>${date(d.expiresAt)}</td>${actions ? `<td class="right"><button class="danger" id="revoke-${d.id}">${t('vault.revoke')}</button></td>` : ''}</tr>`).join('')}</tbody></table>`;
   const usable = devices.filter(usableDevice);
   const clients = usable.filter(d => d.machineId), others = usable.filter(d => !d.machineId);
   const hosted = devices.filter(d => d.hosted);
-  const expired = devices.filter(d => !d.hosted && d.expiresAt <= Date.now());
   const main = clients.length ? table(clients, revocable) : others.length ? '' : `<div class="empty">${t('vault.noDevices')}</div>`;
   const other = others.length ? `<h3 class="spaced">${t('vault.otherDevices')}${tip(t('vault.otherHint'))}</h3>${table(others, revocable)}` : '';
   const clerk = hosted.length ? `<h3 class="spaced">${t('nav.tabularius')}${tip(t('vault.hostedHint'))}</h3>${table(hosted, false)}` : '';
-  const folded = expired.length
-    ? `<details class="inactive"><summary>${t('vault.inactiveDevices', { count: String(expired.length) })}</summary><table><thead><tr><th>${t('vault.device')}</th><th>${t('vault.expires')}</th></tr></thead><tbody>${expired.map(d => `<tr><td>${escape(d.name)}</td><td>${date(d.expiresAt)}</td></tr>`).join('')}</tbody></table></details>`
-    : '';
-  return main + other + clerk + folded;
+  return main + other + clerk;
 }
 
 async function vaultPage(content: HTMLElement, id: string) {
@@ -81,9 +77,10 @@ async function vaultPage(content: HTMLElement, id: string) {
   const body = page(content, { title: vault.name, subtitle: t('vault.desc'), tabs: tabs(), back: { href: '/account/', label: t('vault.back') } });
   const devices = await api<Device[]>(`/vaults/${id}/devices`);
   const rebuildCard = vault.state === 'ready' ? await rebuildSection(vault, devices) : '';
-  body.innerHTML = `<section class="card"><h2>${t('vault.connection')}</h2><dl class="details"><dt>${t('vault.syncAddress')}</dt><dd>${escape(location.origin)}/sync</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl>${vault.state !== 'ready' ? `<br><button id="retry">${t('vault.retry')}</button>` : ''}</section><div id="new-secret"></div><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${deviceTable(devices, true)}</section>${vault.state === 'ready' ? `<section class="card"><h2>${t('vault.addDevice')}${tip(t('vault.clientHint'))}</h2><form id="issue-device" class="inline-form">${input(t('vault.deviceName'), 'name', 'text', `placeholder="${escape(t('vault.devicePlaceholder'))}" maxlength="128"`)}<button class="primary" type="submit">${t('vault.issue')}</button></form></section>` : ''}${rebuildCard}`;
+  body.innerHTML = `<section class="card"><h2>${t('vault.connection')}</h2><dl class="details"><dt>${t('vault.syncAddress')}</dt><dd>${escape(location.origin)}/sync</dd><dt>${t('vault.id')}</dt><dd class="mono">${vault.id}</dd><dt>${t('common.status')}</dt><dd>${badge(vault.state)}</dd></dl>${vault.state !== 'ready' ? `<br><button id="retry">${t('vault.retry')}</button>` : ''}</section><div id="new-secret"></div><section class="card table-wrap"><h2>${t('vault.deviceList')}</h2>${deviceTable(devices, true)}</section>${vault.state === 'ready' ? `<section class="card"><div class="card-head"><h2>${t('vault.compact')}${tip(t('vault.compactHint'))}</h2><button type="button" id="compact">${t('vault.compactAction')}</button></div></section>` : ''}${vault.state === 'ready' ? `<section class="card"><h2>${t('vault.addDevice')}${tip(t('vault.clientHint'))}</h2><form id="issue-device" class="inline-form">${input(t('vault.deviceName'), 'name', 'text', `placeholder="${escape(t('vault.devicePlaceholder'))}" maxlength="128"`)}<button class="primary" type="submit">${t('vault.issue')}</button></form></section>` : ''}${rebuildCard}`;
   const reload = () => vaultPage(content, id);
   if (vault.state !== 'ready') button('retry', async () => { await api(`/vaults/${id}/provision`, 'POST', {}); await reload(); });
+  if (vault.state === 'ready') button('compact', async () => { await api(`/vaults/${id}/compact`, 'POST', {}); message(t('vault.compactStarted')); });
   if (vault.state === 'ready') form('issue-device', async data => {
     const credential = await api<{ username: string; password: string; expiresAt: number }>(`/vaults/${id}/devices`, 'POST', Object.fromEntries(data));
     await reload();
@@ -150,7 +147,11 @@ async function kindlePage(content: HTMLElement) {
   const setup = settings.configured
     ? `<p>${escape(t('kindle.setup', { from: '\u0000' })).replace('\u0000', `<strong class="mono">${escape(settings.from!)}</strong>`)}</p>`
     : `<div class="notice error">${t('kindle.notConfigured')}</div>`;
-  body.innerHTML = `<section class="card"><h2>${t('kindle.addressTitle')}</h2>${setup}<form id="kindle-address" class="inline-form">${input(t('kindle.address'), 'address', 'email', `placeholder="name@kindle.com" value="${escape(settings.address ?? '')}"`).replace(' required', '')}<button class="primary" type="submit">${t('common.save')}</button>${settings.address && settings.configured ? `<button type="button" id="kindle-test">${t('kindle.test')}</button>` : ''}</form><small>${escape(t('kindle.usage', { domains: settings.domains.join(', '), sent: settings.sentToday, limit: settings.dailyLimit }))}</small></section><section class="card table-wrap"><h2>${t('kindle.history')}</h2>${deliveries.length ? `<table><thead><tr><th>${t('common.time')}</th><th>${t('kindle.file')}</th><th>${t('kindle.size')}</th><th>${t('kindle.result')}</th></tr></thead><tbody>${deliveries.map(d => `<tr><td>${date(d.occurredAt)}</td><td>${escape(d.fileName)}</td><td>${bytes(d.size)}</td><td>${d.status === 'sent' ? `<span class="badge">${t('kindle.sent')}</span>` : `<span class="badge warn">${t('kindle.failed')}</span> <small>${escape(d.error ?? '')}</small>`}</td></tr>`).join('')}</tbody></table>` : `<div class="empty">${t('kindle.none')}</div>`}</section>`;
+  body.innerHTML = `<section class="card"><h2>${t('kindle.addressTitle')}</h2>${setup}<form id="kindle-address" class="inline-form">${input(t('kindle.address'), 'address', 'email', `placeholder="name@kindle.com" value="${escape(settings.address ?? '')}"`).replace(' required', '')}<button class="primary" type="submit">${t('common.save')}</button>${settings.address && settings.configured ? `<button type="button" id="kindle-test">${t('kindle.test')}</button>` : ''}</form><small>${escape(t('kindle.usage', { domains: settings.domains.join(', '), sent: settings.sentToday, limit: settings.dailyLimit }))}</small></section><section class="card table-wrap"><div class="card-head"><h2>${t('kindle.history')}</h2>${deliveries.length ? `<button type="button" id="kindle-clean">${t('common.clear')}</button>` : ''}</div>${deliveries.length ? `<table><thead><tr><th>${t('common.time')}</th><th>${t('kindle.file')}</th><th>${t('kindle.size')}</th><th>${t('kindle.result')}</th></tr></thead><tbody>${deliveries.map(d => `<tr><td>${date(d.occurredAt)}</td><td>${escape(d.fileName)}</td><td>${bytes(d.size)}</td><td>${d.status === 'sent' ? `<span class="badge">${t('kindle.sent')}</span>` : `<span class="badge warn">${t('kindle.failed')}</span> <small>${escape(d.error ?? '')}</small>`}</td></tr>`).join('')}</tbody></table>` : `<div class="empty">${t('kindle.none')}</div>`}</section>`;
+  if (deliveries.length) button('kindle-clean', async () => {
+    if (!await confirmAction({ title: t('kindle.clean'), body: t('common.clearBody'), action: t('common.clear'), danger: true })) return;
+    await api('/me/kindle/deliveries', 'DELETE'); await kindlePage(content);
+  });
   form('kindle-address', async data => { await api('/me/kindle', 'PUT', Object.fromEntries(data)); await kindlePage(content); message(t('kindle.saved')); });
   if (settings.address && settings.configured) button('kindle-test', async () => { await api('/me/kindle/test', 'POST', {}); await kindlePage(content); message(t('kindle.testSent')); });
 }

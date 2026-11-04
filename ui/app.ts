@@ -58,6 +58,8 @@ function signIn() {
   app.innerHTML = `<div class="gate"><div class="gate-box">${brand()}<div class="card"><h1>${t('console.signInTitle')}${tip(t('console.accountsHint'))}</h1><form id="login" class="stack">${input(t('common.username'), 'username', 'text', 'autocomplete="username"')}${input(t('common.password'), 'password', 'password', 'autocomplete="current-password"')}<button class="primary" type="submit">${t('common.signIn')}</button></form></div></div></div>`;
   form('login', async data => {
     state.session = await api<Session>('/web-session', 'POST', Object.fromEntries(data));
+    // A sign-in starts at the home page, wherever the address was left; a link to a vault or note (with a query) is followed.
+    if (!location.search) history.replaceState(null, '', '/');
     draw();
   });
 }

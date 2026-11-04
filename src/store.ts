@@ -371,6 +371,16 @@ export function openStore(path: string) {
       COMMIT;`);
     version = 20;
   }
-  if (version !== 20) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 20) {
+    // Revoked credentials are removed, not kept: nothing reads them and nobody could clear them.
+    db.exec(`BEGIN;
+      UPDATE vaults SET rebuild_device=NULL, rebuild_until=NULL, rebuild_started=NULL WHERE rebuild_device IN (SELECT id FROM devices WHERE revoked=1);
+      DELETE FROM devices WHERE revoked=1 AND id NOT IN (SELECT device_id FROM tabularius_vaults);
+      DELETE FROM tabularius_commands WHERE status<>'pending' AND conversation_id NOT IN (SELECT id FROM tabularius_conversations);
+      PRAGMA user_version=21;
+      COMMIT;`);
+    version = 21;
+  }
+  if (version !== 21) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

@@ -71,6 +71,10 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await login(page, 'admin', password, '/admin/');
     await expect(page.getByRole('heading', { name: '修改初始密码' })).toBeVisible();
     await changePassword(page, password, 'admin-browser-password');
+    // A sign-in starts at the home page, wherever the address was left.
+    await expect(page.locator('.home-vault, .page').first()).toBeVisible();
+    assert.equal(new URL(page.url()).pathname, '/');
+    await page.goto(url + '/admin/');
     // Administration opens on its overview; the tabs head the page, without a title that repeats the sidebar.
     const overviewTab = page.getByRole('link', { name: '运行概览', exact: true });
     await expect(overviewTab).toHaveAttribute('aria-current', 'page');
@@ -281,6 +285,11 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await expect(page.getByRole('cell', { name: '授权重建', exact: true })).toBeVisible();
     await expect(page.getByRole('cell', { name: '结束重建', exact: true })).toBeVisible();
     assert.equal((await page.locator('body').innerText()).includes(secret), false);
+    // The activity log can be cleared; afterwards there is nothing to clear.
+    await page.getByRole('button', { name: '清理', exact: true }).click();
+    await confirmDialog(page, '清理');
+    await expect(page.getByRole('cell', { name: '撤销设备', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '清理', exact: true })).toHaveCount(0);
     report.scenarios.push('admin-revocation-and-audit');
 
     await page.getByRole('link', { name: '账户', exact: true }).click();
