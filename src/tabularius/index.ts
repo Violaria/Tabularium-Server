@@ -287,6 +287,8 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
     send: (event: string, data: unknown) => void): Promise<string> {
     const vaultId = conversation.vault_id;
     const root = clients.working(vaultId);
+    // A note that is not there yet is not a note that does not exist.
+    const syncing = () => clients.state(vaultId)?.replicated ? '' : 'The first synchronisation of this vault is still running, so notes may be missing from this result.\n\n';
     const web = webConfig();
     if ((call.name === 'web_search' || call.name === 'fetch_url') && web?.searxng && !provider.nativeWeb && webOn(conversation, provider)) {
       audit(conversation.user_id, 'tabularius.web', conversation.id);
@@ -438,14 +440,14 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
       if (typeof call.input.query !== 'string' || !call.input.query.trim()) return 'Error: query must be a non-empty string.';
       await reindex(vaultId);
       const hits = (await search(db, vaultId, call.input.query, settings.embedder())).filter(hit => !filter.excluded(hit.path));
-      if (!hits.length) return 'No matching notes.';
-      return filter.mask(hits.map(hit => `[[${hit.path}]]${hit.heading ? ` > ${hit.heading}` : ''}\n${hit.snippet}`).join('\n\n---\n\n'));
+      if (!hits.length) return `${syncing()}No matching notes.`;
+      return syncing() + filter.mask(hits.map(hit => `[[${hit.path}]]${hit.heading ? ` > ${hit.heading}` : ''}\n${hit.snippet}`).join('\n\n---\n\n'));
     }
     if (call.name === 'read_note') {
       const path = notePath(filter, call.input.path);
       if (!path) return 'Error: no such note.';
       let text;
-      try { text = await readFile(join(root, path), 'utf8'); } catch { return 'Error: no such note.'; }
+      try { text = await readFile(join(root, path), 'utf8'); } catch { return `${syncing()}Error: no such note.`; }
       answer.read.add(path);
       return filter.mask(text.length > READ_LIMIT ? `${text.slice(0, READ_LIMIT)}\n\n[Truncated: the note has ${text.length} characters.]` : text);
     }
@@ -458,7 +460,7 @@ export function createTabularius(db: DatabaseSync, couch: Couch, config: Tabular
         const rest = path.slice(prefix.length);
         entries.add(rest.includes('/') ? `${rest.split('/')[0]}/` : rest);
       }
-      return entries.size ? [...entries].sort().join('\n') : 'Empty or no such folder.';
+      return syncing() + (entries.size ? [...entries].sort().join('\n') : 'Empty or no such folder.');
     }
     return `Error: unknown tool ${call.name}.`;
   }

@@ -31,7 +31,7 @@ export interface Share {
   expires_at: number | null; password: number; password_hash: string | null; indexable: number; views: number; size: number;
   created_at: number; updated_at: number | null; revoked_at: number | null;
 }
-export interface Device { id: string; user_id: string; vault_id: string; secret_hash: string; name: string; revoked: number; expires_at: number; last_seen_at: number | null }
+export interface Device { id: string; user_id: string; vault_id: string; secret_hash: string; name: string; revoked: number; expires_at: number; last_seen_at: number | null; machine_id: string | null; installation: string | null }
 
 export function openStore(path: string) {
   const db = new DatabaseSync(path);
@@ -356,6 +356,21 @@ export function openStore(path: string) {
     db.exec('PRAGMA user_version=19; COMMIT');
     version = 19;
   }
-  if (version !== 19) throw new Error(`Unsupported database schema: ${version}`);
+  if (version === 19) {
+    // A client (one Obsidian or browser profile) groups its per-vault credentials. Existing devices stay outside any client
+    // until the client reports itself.
+    db.exec(`BEGIN;
+      CREATE TABLE machines (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), client_id TEXT NOT NULL,
+        name TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(user_id, client_id)
+      ) STRICT;
+      ALTER TABLE devices ADD COLUMN machine_id TEXT REFERENCES machines(id);
+      ALTER TABLE devices ADD COLUMN installation TEXT;
+      CREATE INDEX devices_machine ON devices(machine_id);
+      PRAGMA user_version=20;
+      COMMIT;`);
+    version = 20;
+  }
+  if (version !== 20) throw new Error(`Unsupported database schema: ${version}`);
   return db;
 }

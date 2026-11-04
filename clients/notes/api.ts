@@ -64,7 +64,9 @@ export async function logout() {
     csrf = "";
 }
 export const listVaults = () => api<Vault[]>("/vaults");
-export const issueDevice = (vaultId: string, name: string) => api<IssuedDevice>(`/vaults/${vaultId}/devices`, "POST", { name });
+/** The client is reported as this browser profile; each vault is one installation, so a browser keeps one credential per vault. */
+export const issueDevice = (vaultId: string, name: string, clientId: string) =>
+    api<IssuedDevice>(`/vaults/${vaultId}/devices`, "POST", { name, machine: { id: clientId }, installation: vaultId });
 /** Basic authorization with a device's sync credentials, for the gateway's device routes. */
 export const basicAuth = (username: string, password: string) => `Basic ${btoa(String.fromCharCode(...new TextEncoder().encode(`${username}:${password}`)))}`;
 /** Restarts the device's expiry; the secret stays the same. */
@@ -73,5 +75,15 @@ export async function renewDevice(authorization: string) {
     const data = (await response.json().catch(() => ({}))) as { expiresAt?: number; error?: string };
     if (!response.ok) throw new ApiError(response.status, data.error ?? `HTTP ${response.status}`);
     return data.expiresAt;
+}
+/** Puts a credential issued before clients existed under this browser's client. */
+export async function joinClient(authorization: string, vaultId: string, name: string, clientId: string) {
+    const response = await window.fetch("/api/v1/devices/current/machine", {
+        method: "POST",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({ name, machine: { id: clientId }, installation: vaultId }),
+    });
+    await response.arrayBuffer();
+    return response.ok;
 }
 export const revokeDevice = (vaultId: string, deviceId: string) => api(`/vaults/${vaultId}/devices/${deviceId}`, "DELETE");

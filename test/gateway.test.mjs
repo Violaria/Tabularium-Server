@@ -260,6 +260,103 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert.equal((await renew(short)).status, 401);
       assert((await api('/admin/audit', 'GET', undefined, admin)).some(e => e.action === 'device.renew' && e.targetId === short.id));
     });
+    await t.test('clients: registration, replacement, joining, list and protection', async () => {
+      const first = await api('/vaults', 'POST', { name: 'clients one' }, alice, 201);
+      const second = await api('/vaults', 'POST', { name: 'clients two' }, alice, 201);
+      const issue = (v, machine, installation, name = 'Obsidian · Windows', session = alice) =>
+        api(`/vaults/${v.id}/devices`, 'POST', { name, machine: { id: machine }, installation }, session, 201);
+      const status = async (v, credentials) => (await fetch(url + `/sync/${v.id}`, { headers: { authorization: basic(credentials) } })).status;
+      const clients = () => api('/machines', 'GET', undefined, alice);
+      const current = (method, credentials, data) => fetch(url + `/api/v1/devices/current${data ? '/machine' : ''}`, { method, headers: { authorization: basic(credentials), 'content-type': 'application/json' }, body: data && JSON.stringify(data) });
+
+      // Registration: one client per reported ID, with a number when the name is taken.
+      const desktop = await issue(first, 'pc-1', 'app-a');
+      assert.equal(desktop.machineName, 'Obsidian · Windows');
+      const laptop = await issue(first, 'pc-2', 'app-c');
+      assert.equal(laptop.machineName, 'Obsidian · Windows 2');
+      const elsewhere = await issue(second, 'pc-1', 'app-b');
+      assert.equal(elsewhere.machineId, desktop.machineId);
+      assert.deepEqual((await clients()).find(c => c.id === desktop.machineId).devices.map(d => d.vaultName), ['clients one', 'clients two']);
+      // Another account with the same ID gets its own client.
+      const bobs = await api('/vaults', 'POST', { name: 'clients bob' }, bob, 201);
+      const bobDevice = await issue(bobs, 'pc-1', 'app-a', 'Obsidian · Windows', bob);
+      assert.notEqual(bobDevice.machineId, desktop.machineId);
+      assert(!(await clients()).some(c => c.id === bobDevice.machineId));
+      assert.equal(bobDevice.machineName, 'Obsidian · Windows');
+      // Without a client the credential stands alone and shows under its own name.
+      const manual = await api(`/vaults/${first.id}/devices`, 'POST', { name: 'server-mirror' }, alice, 201);
+      assert.equal(manual.machineId, undefined);
+      assert.equal((await api(`/vaults/${first.id}/devices`, 'GET', undefined, alice)).find(d => d.id === manual.id).machineId, null);
+
+      // Signing in again replaces the credential of that installation only.
+      const again = await issue(first, 'pc-1', 'app-a');
+      assert.equal(again.machineId, desktop.machineId);
+      assert.equal(await status(first, desktop), 401);
+      assert.equal(await status(first, again), 200);
+      assert.equal(await status(second, elsewhere), 200, 'another installation of the client keeps its credential');
+      assert(!(await api(`/vaults/${first.id}/devices`, 'GET', undefined, alice)).some(d => d.id === desktop.id), 'replaced credentials leave the list');
+      assert((await api('/admin/audit', 'GET', undefined, admin)).some(e => e.action === 'device.replace' && e.targetId === desktop.id));
+      // An installation that moves to another vault gives up the first one.
+      const moved = await issue(second, 'pc-2', 'app-c');
+      assert.equal(await status(first, laptop), 401);
+      assert.equal(await status(second, moved), 200);
+      // The same client with two installations in one vault keeps both.
+      const twin = await issue(first, 'pc-1', 'app-b2');
+      assert.equal(await status(first, twin), 200);
+      assert.equal(await status(first, again), 200);
+      // A rebuild window follows the credential that replaces the one it was opened for.
+      await api(`/vaults/${first.id}/rebuild`, 'POST', { deviceId: again.id, confirm: first.name }, alice);
+      const relogged = await issue(first, 'pc-1', 'app-a');
+      assert.equal((await api(`/vaults/${first.id}`, 'GET', undefined, alice)).rebuild.deviceId, relogged.id);
+      await api(`/vaults/${first.id}/rebuild`, 'DELETE', undefined, alice);
+
+      // A credential issued before clients existed joins with what it has: same secret, same expiry.
+      const old = await api(`/vaults/${second.id}/devices`, 'POST', { name: 'Obsidian Phone' }, alice, 201);
+      const joined = await current('POST', old, { name: 'Obsidian · iPhone', machine: { id: 'phone-1' }, installation: 'app-p' });
+      assert.equal(joined.status, 200);
+      const { machineId: phone, name: phoneName } = await joined.json();
+      assert.equal(phoneName, 'Obsidian · iPhone');
+      assert.equal(await status(second, old), 200);
+      const listed = (await api(`/vaults/${second.id}/devices`, 'GET', undefined, alice)).find(d => d.id === old.id);
+      assert.deepEqual([listed.machineId, listed.name, listed.expiresAt], [phone, 'Obsidian · iPhone', old.expiresAt]);
+      await api(`/vaults/${first.id}/devices/${manual.id}`, 'DELETE', undefined, alice);
+      assert.equal((await current('POST', manual, { name: 'x', machine: { id: 'pc-9' }, installation: 'y' })).status, 401);
+      assert(!(await clients()).some(c => c.name === 'x'));
+
+      // Renaming survives signing in again; another account cannot touch the client.
+      await api(`/machines/${desktop.machineId}`, 'PATCH', { name: ' 书房台式机 ' }, alice);
+      await issue(first, 'pc-1', 'app-a');
+      assert.equal((await clients()).find(c => c.id === desktop.machineId).name, '书房台式机');
+      await api(`/machines/${desktop.machineId}`, 'PATCH', { name: 'taken over' }, bob, 404);
+      await api(`/machines/${desktop.machineId}`, 'DELETE', undefined, bob, 404);
+      await api(`/machines/${desktop.machineId}`, 'PATCH', { name: '   ' }, alice, 400);
+
+      // Revoking a client ends all its credentials and removes it from the list.
+      await api(`/machines/${desktop.machineId}`, 'DELETE', undefined, alice);
+      assert.equal(await status(second, elsewhere), 401);
+      assert.equal(await status(first, twin), 401);
+      assert(!(await clients()).some(c => c.id === desktop.machineId));
+      // A client whose only credential was revoked leaves the list too.
+      await api(`/vaults/${second.id}/devices/${moved.id}`, 'DELETE', undefined, alice);
+      assert(!(await clients()).some(c => c.id === moved.machineId));
+
+      // A credential can revoke itself.
+      assert.equal((await current('DELETE', old)).status, 200);
+      assert.equal(await status(second, old), 401);
+      assert.equal((await current('DELETE', old)).status, 401);
+      assert((await api('/admin/audit', 'GET', undefined, admin)).some(e => e.action === 'device.revoke' && e.targetId === old.id));
+
+      // The hosted device: labelled, and revoking it is refused for the owner and the administrator.
+      const hosted = await api(`/vaults/${second.id}/devices`, 'POST', { name: 'Tabularius' }, alice, 201);
+      const store = new DatabaseSync(config.database);
+      store.prepare('INSERT INTO tabularius_vaults(vault_id,device_id,device_secret,passphrase,tweaks,enabled_at) VALUES(?,?,?,?,?,?)').run(second.id, hosted.id, new Uint8Array(1), new Uint8Array(1), '{}', Date.now());
+      assert.equal((await api(`/vaults/${second.id}/devices`, 'GET', undefined, alice)).find(d => d.id === hosted.id).hosted, true);
+      await api(`/vaults/${second.id}/devices/${hosted.id}`, 'DELETE', undefined, alice, 409);
+      await api(`/admin/vaults/${second.id}/devices/${hosted.id}`, 'DELETE', undefined, admin, 409);
+      assert.equal(await status(second, hosted), 200);
+      store.prepare('DELETE FROM tabularius_vaults WHERE vault_id=?').run(second.id);
+      store.close();
+    });
     await t.test('persistent sessions and devices after restart; initial password not reset', async () => {
       await gateway.close(); gateway = await createGateway(config); url = await gateway.listen();
       await api('/me', 'GET', undefined, alice); await sync('');

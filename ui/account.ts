@@ -6,7 +6,8 @@ import { ago, api, applyTheme, button, bytes, confirmAction, DEFAULT_THEME, esca
 interface Rebuild { deviceId: string; until: number; started: number | null }
 export interface Vault { id: string; name: string; state: string; ownerId?: string; owner?: string; rebuild: Rebuild | null }
 interface Retired { name: string; retiredAt: number; partial: boolean; diskBytes: number }
-export interface Device { id: string; name: string; revoked: number; expiresAt: number; lastSeenAt: number | null }
+export interface Device { id: string; name: string; expiresAt: number; lastSeenAt: number | null; machineId: string | null; hosted: boolean }
+interface Machine { id: string; name: string; lastSeenAt: number | null; devices: { id: string; vaultId: string; vaultName: string }[] }
 interface KindleSettings { address: string | null; configured: boolean; from: string | null; domains: string[]; dailyLimit: number; sentToday: number }
 interface Delivery { occurredAt: number; fileName: string; size: number; status: 'sent' | 'failed'; error: string | null }
 
@@ -16,12 +17,13 @@ export const when = (value: number) => ago(value, formatDate, {
 });
 export const badge = (value: string) =>
   `<span class="badge ${value === 'ready' ? '' : 'warn'}">${(['ready', 'failed', 'provisioning'].includes(value) ? t(`state.${value}` as 'state.ready') : escape(value))}</span>`;
-const tabs = (): [string, string][] => [['/account/', t('account.vaults')], ['/account/interface', t('account.interface')], ['/account/shares', t('shares.mine')], ['/account/kindle', t('nav.kindle')], ['/account/password', t('nav.password')]];
+const tabs = (): [string, string][] => [['/account/', t('account.vaults')], ['/account/devices', t('account.devices')], ['/account/interface', t('account.interface')], ['/account/shares', t('shares.mine')], ['/account/kindle', t('nav.kindle')], ['/account/password', t('nav.password')]];
 const frame = (content: HTMLElement) => page(content, { title: t('account.title'), subtitle: t('account.desc'), tabs: tabs() });
 
 export async function renderAccount(content: HTMLElement, path: string) {
   const vault = path.match(/^\/account\/vaults\/([^/]+)/)?.[1];
   if (vault) await vaultPage(content, vault);
+  else if (path.startsWith('/account/devices')) await devicesPage(content);
   else if (path.startsWith('/account/kindle')) await kindlePage(content);
   else if (path.startsWith('/account/shares')) await sharesPage(content);
   else if (path.startsWith('/account/password')) passwordPage(content);
@@ -36,18 +38,42 @@ async function vaultsPage(content: HTMLElement) {
   form('create-vault', async data => { await api('/vaults', 'POST', Object.fromEntries(data)); await vaultsPage(content); message(t('vaults.created')); });
 }
 
-/** Devices that can still synchronise, with when they last did; revoked and expired ones are folded away below. */
+/** The account's clients: one row for each Obsidian or browser, whatever number of vaults it is connected to. */
+async function devicesPage(content: HTMLElement) {
+  const body = frame(content);
+  const machines = await api<Machine[]>('/machines');
+  const seen = (m: Machine) => m.lastSeenAt ? escape(when(m.lastSeenAt)) : `<span class="muted">${t('home.neverSynced')}</span>`;
+  body.innerHTML = `<section class="card table-wrap"><h2>${t('account.devices')}${tip(t('devices.desc'))}</h2>${machines.length
+    ? `<table><thead><tr><th>${t('vault.device')}</th><th>${t('account.vaults')}</th><th>${t('account.lastSync')}</th><th></th></tr></thead><tbody>${machines.map(m => `<tr><td id="name-${m.id}">${escape(m.name)}</td><td>${m.devices.map(d => `<a href="/account/vaults/${d.vaultId}" data-route>${escape(d.vaultName)}</a>`).join(', ')}</td><td>${seen(m)}</td><td class="right"><button id="rename-${m.id}">${t('devices.rename')}</button> <button class="danger" id="revoke-${m.id}">${t('vault.revoke')}</button></td></tr>`).join('')}</tbody></table>`
+    : `<div class="empty">${t('vault.noDevices')}</div>`}</section>`;
+  for (const machine of machines) {
+    button(`rename-${machine.id}`, async () => {
+      document.getElementById(`name-${machine.id}`)!.innerHTML = `<form id="rename-form-${machine.id}" class="inline-form">${input(t('devices.name'), 'name', 'text', `value="${escape(machine.name)}" maxlength="128"`)}<button class="primary" type="submit">${t('common.save')}</button></form>`;
+      form(`rename-form-${machine.id}`, async data => { await api(`/machines/${machine.id}`, 'PATCH', Object.fromEntries(data)); await devicesPage(content); });
+    });
+    button(`revoke-${machine.id}`, async () => {
+      if (!await confirmAction({ title: t('vault.revokeTitle', { name: machine.name }), body: t('devices.revokeBody'), action: t('vault.revoke'), danger: true })) return;
+      await api(`/machines/${machine.id}`, 'DELETE'); await devicesPage(content);
+    });
+  }
+}
+
+export const usableDevice = (d: Device) => !d.hosted && d.expiresAt > Date.now();
+/** A vault's devices by kind: clients, credentials issued by hand or not yet under a client, and the hosted one. Expired ones are folded away. */
 export function deviceTable(devices: Device[], revocable: boolean) {
-  const usable = (d: Device) => !d.revoked && d.expiresAt > Date.now();
-  const active = devices.filter(usable), inactive = devices.filter(d => !usable(d));
   const seen = (d: Device) => d.lastSeenAt ? escape(when(d.lastSeenAt)) : `<span class="muted">${t('home.neverSynced')}</span>`;
-  const table = active.length
-    ? `<table><thead><tr><th>${t('vault.device')}</th><th>${t('account.lastSync')}</th><th>${t('vault.expires')}</th>${revocable ? '<th></th>' : ''}</tr></thead><tbody>${active.map(d => `<tr><td>${escape(d.name)}</td><td>${seen(d)}</td><td>${date(d.expiresAt)}</td>${revocable ? `<td class="right"><button class="danger" id="revoke-${d.id}">${t('vault.revoke')}</button></td>` : ''}</tr>`).join('')}</tbody></table>`
-    : `<div class="empty">${t('vault.noDevices')}</div>`;
-  const folded = inactive.length
-    ? `<details class="inactive"><summary>${t('vault.inactiveDevices', { count: String(inactive.length) })}</summary><table><thead><tr><th>${t('vault.device')}</th><th>${t('common.status')}</th><th>${t('vault.expires')}</th></tr></thead><tbody>${inactive.map(d => `<tr><td>${escape(d.name)}</td><td><span class="badge off">${d.revoked ? t('vault.revoked') : t('vault.expired')}</span></td><td>${date(d.expiresAt)}</td></tr>`).join('')}</tbody></table></details>`
+  const table = (rows: Device[], actions: boolean) => `<table><thead><tr><th>${t('vault.device')}</th><th>${t('account.lastSync')}</th><th>${t('vault.expires')}</th>${actions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(d => `<tr><td>${escape(d.name)}</td><td>${seen(d)}</td><td>${date(d.expiresAt)}</td>${actions ? `<td class="right"><button class="danger" id="revoke-${d.id}">${t('vault.revoke')}</button></td>` : ''}</tr>`).join('')}</tbody></table>`;
+  const usable = devices.filter(usableDevice);
+  const clients = usable.filter(d => d.machineId), others = usable.filter(d => !d.machineId);
+  const hosted = devices.filter(d => d.hosted);
+  const expired = devices.filter(d => !d.hosted && d.expiresAt <= Date.now());
+  const main = clients.length ? table(clients, revocable) : others.length ? '' : `<div class="empty">${t('vault.noDevices')}</div>`;
+  const other = others.length ? `<h3 class="spaced">${t('vault.otherDevices')}${tip(t('vault.otherHint'))}</h3>${table(others, revocable)}` : '';
+  const clerk = hosted.length ? `<h3 class="spaced">${t('nav.tabularius')}${tip(t('vault.hostedHint'))}</h3>${table(hosted, false)}` : '';
+  const folded = expired.length
+    ? `<details class="inactive"><summary>${t('vault.inactiveDevices', { count: String(expired.length) })}</summary><table><thead><tr><th>${t('vault.device')}</th><th>${t('vault.expires')}</th></tr></thead><tbody>${expired.map(d => `<tr><td>${escape(d.name)}</td><td>${date(d.expiresAt)}</td></tr>`).join('')}</tbody></table></details>`
     : '';
-  return table + folded;
+  return main + other + clerk + folded;
 }
 
 async function vaultPage(content: HTMLElement, id: string) {
@@ -67,7 +93,7 @@ async function vaultPage(content: HTMLElement, id: string) {
     document.querySelector<HTMLInputElement>('#credential-password')!.value = credential.password;
     button('close-secret', async () => { target.replaceChildren(); });
   });
-  for (const device of devices.filter(d => !d.revoked && d.expiresAt > Date.now())) button(`revoke-${device.id}`, async () => {
+  for (const device of devices.filter(usableDevice)) button(`revoke-${device.id}`, async () => {
     if (!await confirmAction({ title: t('vault.revokeTitle', { name: device.name }), body: t('vault.revokeBody'), action: t('vault.revoke'), danger: true })) return;
     await api(`/vaults/${id}/devices/${device.id}`, 'DELETE'); await reload();
   });
@@ -80,7 +106,7 @@ async function rebuildSection(vault: Vault, devices: Device[]) {
   retired = await api<Retired[]>(`/vaults/${vault.id}/databases`);
   locked = (await api<{ locked: boolean }>(`/vaults/${vault.id}/rebuild/lock`)).locked;
   const rebuild = vault.rebuild;
-  const active = devices.filter(d => !d.revoked && d.expiresAt > Date.now());
+  const active = devices.filter(usableDevice);
   const deviceName = (id: string) => escape(devices.find(d => d.id === id)?.name ?? id);
   const status = rebuild
     ? `<dl class="details"><dt>${t('rebuild.device')}</dt><dd>${deviceName(rebuild.deviceId)}</dd><dt>${t('rebuild.until')}</dt><dd>${date(rebuild.until)}</dd><dt>${t('common.status')}</dt><dd>${rebuild.started ? t('rebuild.running') : t('rebuild.waiting')}</dd></dl><br><button id="rebuild-end">${t('rebuild.end')}</button>`
@@ -102,7 +128,7 @@ function bindRebuild(vault: Vault, devices: Device[], reload: () => Promise<void
     if (rebuild.started && !await confirmAction({ title: t('rebuild.end'), body: t('rebuild.confirmEnd'), action: t('rebuild.end'), danger: true })) return;
     await api(`/vaults/${vault.id}/rebuild`, 'DELETE'); await reload(); message(t('rebuild.ended'));
   });
-  else if (devices.some(d => !d.revoked && d.expiresAt > Date.now())) form('rebuild-arm', async data => {
+  else if (devices.some(usableDevice)) form('rebuild-arm', async data => {
     const device = devices.find(d => d.id === data.get('deviceId'));
     if (!await confirmAction({ title: t('rebuild.armTitle'), body: t('rebuild.armBody', { device: device?.name ?? '' }), action: t('rebuild.arm'), danger: true, confirmName: vault.name })) return;
     await api(`/vaults/${vault.id}/rebuild`, 'POST', { deviceId: data.get('deviceId'), confirm: vault.name }); await reload(); message(t('rebuild.armed'));

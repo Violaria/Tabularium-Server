@@ -8,6 +8,7 @@ import { rejection } from './policy.js';
 import { sendMail, type SmtpConfig } from './smtp.js';
 import { Couch, basic, type CouchConfig } from './couch.js';
 import { createTabularius, MODES, type TabulariusConfig } from './tabularius/index.js';
+import { clientReport, createMachines } from './machines.js';
 import { HttpError, body, fail, field, json, payload, raw } from './http.js';
 import { createShares, type SharesConfig } from './shares.js';
 import { createServerSettings, ServerSettingsError } from './server-settings.js';
@@ -129,6 +130,19 @@ export async function createGateway(config: Config) {
   function audit(actorId: string, action: string, targetId: string) {
     db.prepare('INSERT INTO audit_events(occurred_at,actor_id,action,target_id) VALUES(?,?,?,?)')
       .run(Date.now(), actorId, action, targetId);
+  }
+  const machines = createMachines({ db, audit, disconnect: device => cancel(v => v.device === device) });
+  /** A vault's devices that were not revoked; the hosted one is only removed by turning Tabularius off. */
+  const deviceList = (vaultId: string) => (db.prepare(`SELECT d.id, COALESCE(m.name, d.name) AS name, d.expires_at AS expiresAt, d.last_seen_at AS lastSeenAt, d.machine_id AS machineId,
+    EXISTS(SELECT 1 FROM tabularius_vaults t WHERE t.device_id=d.id) AS hosted
+    FROM devices d LEFT JOIN machines m ON m.id=d.machine_id WHERE d.vault_id=? AND d.revoked=0`).all(vaultId) as { hosted: number }[])
+    .map(device => ({ ...device, hosted: Boolean(device.hosted) }));
+  function revokeDevice(vaultId: string, deviceId: string, actorId: string) {
+    if (db.prepare('SELECT 1 FROM tabularius_vaults WHERE device_id=? AND vault_id=?').get(deviceId, vaultId)) fail(409, 'The hosted device stops with Tabularius');
+    const result = db.prepare('UPDATE devices SET revoked=1 WHERE id=? AND vault_id=?').run(deviceId, vaultId);
+    if (!result.changes) fail(404, 'Device not found');
+    cancel(v => v.device === deviceId);
+    audit(actorId, 'device.revoke', deviceId);
   }
   // TABULARIUM_PUBLIC_URL may list several entrances (LAN and public); without it the console is served over plain HTTP.
   const publicUrls = () => (config.publicUrl ?? '').split(',').map(value => value.trim()).filter(Boolean).map(value => new URL(value));
@@ -315,7 +329,8 @@ export async function createGateway(config: Config) {
         notes = await countNotes(vault.database_name, String(info.update_seq));
         locked = Boolean((await milestone(vault.database_name))?.locked);
       }
-      const devices = db.prepare('SELECT name, last_seen_at AS lastSeenAt FROM devices WHERE vault_id=? AND revoked=0 AND expires_at>? ORDER BY last_seen_at DESC').all(vault.id, Date.now());
+      const devices = db.prepare(`SELECT COALESCE(m.name, d.name) AS name, d.last_seen_at AS lastSeenAt FROM devices d LEFT JOIN machines m ON m.id=d.machine_id
+        WHERE d.vault_id=? AND d.revoked=0 AND d.expires_at>? AND d.id NOT IN (SELECT device_id FROM tabularius_vaults) ORDER BY d.last_seen_at DESC`).all(vault.id, Date.now());
       const assistant = tabularius?.status(vault);
       // Note names only where the server already holds the plaintext (Tabularius enabled).
       const recent = assistant?.enabled
@@ -509,6 +524,23 @@ export async function createGateway(config: Config) {
       db.prepare('UPDATE devices SET expires_at=? WHERE id=?').run(expiresAt, device.id);
       audit(device.user_id, 'device.renew', device.id);
       json(res, 200, { expiresAt });
+      return;
+    }
+    // A client that was connected before it could report itself joins its client with the credentials it has.
+    if (path === '/api/v1/devices/current/machine' && method === 'POST') {
+      const device = deviceAuth(req);
+      limit(`machine:${device.id}`, 10, res);
+      const data = await body(req);
+      const report = clientReport(data, field(data, 'name'));
+      if (!report) fail(400, 'Invalid machine');
+      const machine = machines.attach(device, report!);
+      json(res, 200, { machineId: machine.id, name: machine.name });
+      return;
+    }
+    if (path === '/api/v1/devices/current' && method === 'DELETE') {
+      const device = deviceAuth(req);
+      revokeDevice(device.vault_id, device.id, device.user_id);
+      json(res, 200, { ok: true });
       return;
     }
     // Kindle delivery from the plug-in authenticates with the device's sync credentials.
@@ -857,12 +889,10 @@ export async function createGateway(config: Config) {
           json(res, 200, { diskBytes: info.sizes.file, activeBytes: info.sizes.active, documentBytes: info.sizes.external, documents: info.doc_count, deletedDocuments: info.doc_del_count }); return;
         }
         if (route.length === 4 && route[3] === 'devices' && method === 'GET') {
-          json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt,last_seen_at AS lastSeenAt FROM devices WHERE vault_id=?').all(vault!.id)); return;
+          json(res, 200, deviceList(vault!.id)); return;
         }
         if (route.length === 5 && route[3] === 'devices' && method === 'DELETE') {
-          const result = db.prepare('UPDATE devices SET revoked=1 WHERE id=? AND vault_id=?').run(route[4], vault!.id);
-          if (!result.changes) fail(404, 'Device not found');
-          cancel(v => v.device === route[4]); audit(user.id, 'device.revoke', route[4]);
+          revokeDevice(vault!.id, route[4], user.id);
           json(res, 200, { ok: true }); return;
         }
       }
@@ -896,6 +926,11 @@ export async function createGateway(config: Config) {
         json(res, 200, { ok: true }); return;
       }
     }
+    if (route[0] === 'machines') {
+      if (route.length === 1 && method === 'GET') { json(res, 200, machines.list(user.id)); return; }
+      if (route.length === 2 && method === 'PATCH') { machines.rename(route[1], user.id, field(await body(req), 'name')); json(res, 200, { ok: true }); return; }
+      if (route.length === 2 && method === 'DELETE') { machines.remove(route[1], user.id); json(res, 200, { ok: true }); return; }
+    }
     if (route[0] === 'vaults') {
       if (route.length === 1 && method === 'GET') {
         json(res, 200, (db.prepare('SELECT * FROM vaults WHERE owner_id=?').all(user.id) as unknown as Vault[]).map(publicVault)); return;
@@ -915,21 +950,21 @@ export async function createGateway(config: Config) {
       if (route[2] === 'databases') { json(res, 200, await retired(vault, user, route.slice(3), method!)); return; }
       if (route[2] === 'devices') {
         if (route.length === 3 && method === 'GET') {
-          json(res, 200, db.prepare('SELECT id,name,revoked,expires_at AS expiresAt,last_seen_at AS lastSeenAt FROM devices WHERE vault_id=?').all(vault.id)); return;
+          json(res, 200, deviceList(vault.id)); return;
         }
         if (route.length === 3 && method === 'POST') {
           if (vault.state !== 'ready') fail(409, 'Vault is not ready');
-          const name = field(await body(req), 'name'); const id = randomUUID(); const secret = token();
+          const data = await body(req);
+          const name = field(data, 'name'); const report = clientReport(data, name); const id = randomUUID(); const secret = token();
           const expiresAt = Date.now() + settings.deviceMs();
           db.prepare('INSERT INTO devices(id,user_id,vault_id,name,secret_hash,expires_at) VALUES(?,?,?,?,?,?)')
             .run(id, user.id, vault.id, name, digest(secret), expiresAt);
           audit(user.id, 'device.issue', id);
-          json(res, 201, { id, username: id, password: secret, expiresAt, syncPath: `/sync/${vault.id}` }); return;
+          const machine = report && machines.attach({ id, user_id: user.id, vault_id: vault.id }, report);
+          json(res, 201, { id, username: id, password: secret, expiresAt, syncPath: `/sync/${vault.id}`, ...(machine ? { machineId: machine.id, machineName: machine.name } : {}) }); return;
         }
         if (route.length === 4 && method === 'DELETE') {
-          const result = db.prepare('UPDATE devices SET revoked=1 WHERE id=? AND vault_id=?').run(route[3], vault.id);
-          if (!result.changes) fail(404, 'Device not found');
-          cancel(v => v.device === route[3]); audit(user.id, 'device.revoke', route[3]); json(res, 200, { ok: true }); return;
+          revokeDevice(vault.id, route[3], user.id); json(res, 200, { ok: true }); return;
         }
       }
     }

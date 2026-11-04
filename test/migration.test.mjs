@@ -37,11 +37,12 @@ for (const version of [1, 2]) {
     legacy.close();
     try {
       const upgraded = openStore(path);
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 19);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 20);
       assert.equal(upgraded.prepare('SELECT kindle_address FROM users').get().kindle_address, null);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM kindle_deliveries').get().n, 0);
-      // Existing records are unchanged; devices gain an empty last synchronisation time (schema 11).
-      assert.deepEqual(read(upgraded), { ...before, devices: before.devices.map(d => Object.assign(Object.create(null), d, { last_seen_at: null })) });
+      // Existing records are unchanged; devices gain an empty last synchronisation time (schema 11) and stay outside any client (schema 20).
+      assert.deepEqual(read(upgraded), { ...before, devices: before.devices.map(d => Object.assign(Object.create(null), d, { last_seen_at: null, machine_id: null, installation: null })) });
+      assert.equal(upgraded.prepare('SELECT count(*) AS n FROM machines').get().n, 0);
       assert.deepEqual(upgraded.prepare('SELECT * FROM audit_events').all(), audit);
       assert.deepEqual({ ...upgraded.prepare('SELECT rebuild_device,rebuild_until,rebuild_started FROM vaults').get() },
         { rebuild_device: null, rebuild_until: null, rebuild_started: null });

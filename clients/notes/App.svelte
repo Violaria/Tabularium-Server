@@ -1,6 +1,6 @@
 <script lang="ts">
     import { mount, onDestroy, tick, unmount } from "svelte";
-    import { basicAuth, issueDevice, listVaults, renewDevice, restoreSession, revokeDevice, ApiError, type User, type Vault } from "./api";
+    import { basicAuth, issueDevice, joinClient, listVaults, renewDevice, restoreSession, revokeDevice, ApiError, type User, type Vault } from "./api";
     import { deleteRecord, readRecord, recordKey, recordsOf, writeRecord, type VaultRecord } from "./store";
     import { CredentialsRejectedError, NetworkError, NotesRuntime, WrongPassphraseError, clearLocalVault, type NotesFile } from "./runtime";
     import { renderPreview } from "./preview";
@@ -130,6 +130,7 @@
     const SAVE_DELAY_MS = 2000;
     const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
     const LAST_USER = "tabularium-notes:last-user";
+    const CLIENT_ID = "tabularium-notes:client-id";
     const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", svg: "image/svg+xml", webp: "image/webp", bmp: "image/bmp", avif: "image/avif" };
     const IMAGE = /\.(png|jpe?g|gif|svg|webp|bmp|avif)$/i;
     const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -138,7 +139,16 @@
     function browserName() {
         const ua = navigator.userAgent;
         const name = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : t("notes.browser");
-        return t("notes.deviceName", { browser: name, date: new Date().toISOString().slice(0, 10) });
+        const system = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Mac OS X/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "";
+        return t("notes.deviceName", { browser: name, system }).replace(/ · $/, "");
+    }
+    /** This browser profile's ID on the server: it groups the profile's credentials. */
+    function clientId() {
+        const stored = window.localStorage.getItem(CLIENT_ID);
+        if (stored) return stored;
+        const id = crypto.randomUUID();
+        window.localStorage.setItem(CLIENT_ID, id);
+        return id;
     }
 
     function rememberUser(signedIn: User) {
@@ -274,8 +284,12 @@
         const key = recordKey(owner.id, target.id);
         record = await readRecord(key);
         if (!record) {
-            const device = await issueDevice(target.id, browserName());
-            record = { key, deviceId: device.id, username: device.username, password: device.password, expiresAt: device.expiresAt, fetched: false, vaultName: target.name };
+            const device = await issueDevice(target.id, browserName(), clientId());
+            record = { key, deviceId: device.id, username: device.username, password: device.password, expiresAt: device.expiresAt, joined: true, fetched: false, vaultName: target.name };
+            await writeRecord(record);
+        }
+        if (!record.joined && navigator.onLine) {
+            record.joined = await joinClient(basicAuth(record.username, record.password), target.id, browserName(), clientId()).catch(() => false);
             await writeRecord(record);
         }
         runtime = new NotesRuntime(

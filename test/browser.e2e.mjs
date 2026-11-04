@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { DatabaseSync } from 'node:sqlite';
 import { createGateway } from '../dist/server.js';
 const exec = promisify(execFile);
 
@@ -23,7 +24,8 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
   try {
     await compose('up', '-d', '--wait');
     const port = (await compose('port', 'couchdb', '5984')).stdout.trim();
-    gateway = await createGateway({ database: join(temp, 'app.sqlite'), bootstrapUser: 'admin', bootstrapPassword: password, origins: [],
+    const database = join(temp, 'app.sqlite');
+    gateway = await createGateway({ database, bootstrapUser: 'admin', bootstrapPassword: password, origins: [],
       couch: { url: `http://${port}`, adminUser: 'baseline', adminPassword: password, syncUser: 'tabularium', syncPassword: randomBytes(24).toString('hex') },
       backupDir: join(temp, 'backups') });
     const url = await gateway.listen();
@@ -208,15 +210,54 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     assert.equal(await alice.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     report.scenarios.push('owner-sets-kindle-address');
 
+    // A client shows as one row with its vaults; it can be renamed and revoked as a whole.
+    const issueAs = (body) => alice.evaluate(async ({ id, body }) => {
+      const { csrf } = await (await fetch('/api/v1/web-session')).json();
+      return (await fetch(`/api/v1/vaults/${id}/devices`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf }, body: JSON.stringify(body) })).json();
+    }, { id: vaultId, body });
+    const client = await issueAs({ name: 'Obsidian · Windows', machine: { id: 'pc-browser' }, installation: 'app-a' });
+    await alice.goto(url + '/account/devices');
+    await expect(alice.getByRole('cell', { name: 'Obsidian · Windows', exact: true })).toBeVisible();
+    await expect(alice.getByRole('link', { name: '团队笔记', exact: true })).toBeVisible();
+    await alice.getByRole('button', { name: '改名', exact: true }).click();
+    await alice.getByLabel('名称', { exact: true }).fill('书房台式机');
+    await alice.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(alice.getByRole('cell', { name: '书房台式机', exact: true })).toBeVisible();
+    await alice.reload();
+    await expect(alice.getByRole('cell', { name: '书房台式机', exact: true })).toBeVisible();
+    assert.equal(await alice.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await alice.screenshot({ path: join(results, 'mobile-clients.png'), fullPage: true });
+    // In the vault's list the client, the credential issued by hand and the hosted device are apart.
+    const hostedDevice = await issueAs({ name: 'Tabularius' });
+    const hostedStore = new DatabaseSync(database);
+    hostedStore.prepare('INSERT INTO tabularius_vaults(vault_id,device_id,device_secret,passphrase,tweaks,enabled_at) VALUES(?,?,?,?,?,?)').run(vaultId, hostedDevice.id, new Uint8Array(1), new Uint8Array(1), '{}', Date.now());
+    await alice.goto(url + `/account/vaults/${vaultId}`);
+    await expect(alice.getByRole('heading', { name: '其他凭据' })).toBeVisible();
+    await expect(alice.getByRole('heading', { name: '书记员' })).toBeVisible();
+    await expect(alice.getByRole('row', { name: /^Tabularius/ }).getByRole('button')).toHaveCount(0);
+    await expect(alice.getByLabel('设备', { exact: true }).locator('option', { hasText: 'Tabularius' })).toHaveCount(0);
+    hostedStore.prepare('DELETE FROM tabularius_vaults WHERE vault_id=?').run(vaultId);
+    hostedStore.close();
+    await alice.evaluate(async ({ id, device }) => {
+      const { csrf } = await (await fetch('/api/v1/web-session')).json();
+      await fetch(`/api/v1/vaults/${id}/devices/${device}`, { method: 'DELETE', headers: { 'x-csrf-token': csrf } });
+    }, { id: vaultId, device: hostedDevice.id });
+    await alice.goto(url + '/account/devices');
+    await alice.getByRole('button', { name: '撤销', exact: true }).click();
+    await confirmDialog(alice, '撤销');
+    await expect(alice.getByRole('cell', { name: '书房台式机', exact: true })).toHaveCount(0);
+    const revokedClient = await fetch(`${url}/sync/${vaultId}`, { headers: { authorization: `Basic ${Buffer.from(`${client.username}:${client.password}`).toString('base64')}` } });
+    assert.equal(revokedClient.status, 401); await revokedClient.arrayBuffer();
+    report.scenarios.push('owner-manages-clients-and-sees-hosted-device-apart');
+
     await page.goto(url + '/admin/vaults');
     await page.getByRole('link', { name: '团队笔记', exact: true }).click();
     await expect(page.getByRole('cell', { name: 'Alice 的电脑', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '撤销', exact: true }).click();
     await confirmDialog(page, '撤销');
-    // Revoked devices leave the list and are folded away below it.
+    // Revoked devices leave the list.
     await expect(page.getByRole('button', { name: '撤销', exact: true })).toHaveCount(0);
-    await page.getByText('已撤销或已过期的设备（1）', { exact: true }).click();
-    await expect(page.getByText('已撤销', { exact: true })).toBeVisible();
+    await expect(page.getByRole('cell', { name: 'Alice 的电脑', exact: true })).toHaveCount(0);
     const revoked = await fetch(`${url}/sync/${vaultId}`, { headers: { authorization: auth } });
     assert.equal(revoked.status, 401); await revoked.arrayBuffer();
     // Scheduled backups: the schedule is saved and shown with the next time; "back up now" writes a point.
@@ -236,7 +277,7 @@ test('server console in real Chromium', { timeout: 180_000 }, async t => {
     await expect.poll(async () => { await page.reload(); return page.locator('tbody tr', { hasText: '完成' }).count(); }, { timeout: 60_000 }).toBeGreaterThan(0);
     await page.screenshot({ path: join(results, 'backups.png'), fullPage: true });
     await page.getByRole('link', { name: '操作记录', exact: true }).click();
-    await expect(page.getByRole('cell', { name: '撤销设备', exact: true })).toBeVisible();
+    await expect(page.getByRole('cell', { name: '撤销设备', exact: true }).first()).toBeVisible();
     await expect(page.getByRole('cell', { name: '授权重建', exact: true })).toBeVisible();
     await expect(page.getByRole('cell', { name: '结束重建', exact: true })).toBeVisible();
     assert.equal((await page.locator('body').innerText()).includes(secret), false);

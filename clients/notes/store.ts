@@ -13,6 +13,8 @@ export interface VaultRecord {
     vaultName: string;
     /** Encrypted sample for checking the passphrase offline; contains no secret. */
     verifier?: Verifier;
+    /** The credential is known to be under this browser's client on the server. */
+    joined?: boolean;
     /** The server's chunk parameters, used when opening offline. */
     tweaks?: Record<string, unknown>;
 }

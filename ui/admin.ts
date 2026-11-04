@@ -6,7 +6,7 @@ import { renderServerSettings } from './server-settings.js';
 import { renderBackups } from './backups.js';
 import { formatDate, hasMessage, t } from './i18n.js';
 import { api, button, bytes, confirmAction, escape, form, input, message, page, state, tip, type User } from './core.js';
-import { badge, deviceTable, type Device, type Vault } from './account.js';
+import { badge, deviceTable, usableDevice, type Device, type Vault } from './account.js';
 
 interface Overview { users: number; activeUsers: number; vaults: number; devices: number; requests: number; proxyRequests: number; activeProxyConnections: number; uptimeSeconds: number; backupFailure: { at: number; error: string } | null }
 interface Usage { diskBytes: number; activeBytes: number; documents: number; deletedDocuments: number }
@@ -74,7 +74,7 @@ async function vaultPage(content: HTMLElement, id: string) {
     const usage = await api<Usage>(`${base}/usage`);
     document.getElementById('usage-result')!.innerHTML = `<br><dl class="details"><dt>${t('vault.diskUsage')}</dt><dd>${bytes(usage.diskBytes)}</dd><dt>${t('vault.activeData')}</dt><dd>${bytes(usage.activeBytes)}</dd><dt>${t('vault.documents')}</dt><dd>${usage.documents}</dd></dl><br>${tip(t('vault.usageHint'))}`;
   });
-  for (const device of devices.filter(d => !d.revoked && d.expiresAt > Date.now())) button(`revoke-${device.id}`, async () => {
+  for (const device of devices.filter(usableDevice)) button(`revoke-${device.id}`, async () => {
     if (!await confirmAction({ title: t('vault.revokeTitle', { name: device.name }), body: t('vault.revokeBody'), action: t('vault.revoke'), danger: true })) return;
     await api(`${base}/devices/${device.id}`, 'DELETE'); await vaultPage(content, id);
   });
