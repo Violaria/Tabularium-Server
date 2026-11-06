@@ -736,8 +736,7 @@
 .notes .cm-editor .tabularium-sensitive-rendered {
     background: color-mix(in oklab, var(--accent) 18%, transparent);
     border-radius: 2px;
-    text-decoration: underline dotted color-mix(in oklab, var(--accent) 80%, transparent);
-    text-underline-offset: 3px;
+    border-bottom: 1px dotted color-mix(in oklab, var(--accent) 80%, transparent);
 }
 .notes .tabularium-sensitive-eye,
 .notes .cm-editor .tabularium-sensitive-rendered::after {
