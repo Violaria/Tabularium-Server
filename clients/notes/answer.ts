@@ -35,7 +35,7 @@ export function renderAnswer(text: string, cite: (path: string) => string, copy:
         return EXTERNAL.test(src) ? `<a href="${escapeXml(src)}" target="_blank" rel="noopener noreferrer">${label}</a>` : label;
     };
     const linked = outsideCode(text, (part) =>
-        part.replace(/\[\[([^\]|\n]+)(?:\|([^\]\n]*))?\]\]/g, (_, path: string, alias?: string) =>
+        part.replace(/\[\[([^\]|\n]+?)\\?(?:\|([^\]\n]*))?\]\]/g, (_, path: string, alias?: string) =>
             `[${(alias ?? path).replace(/[[\]]/g, "")}](cite:${encodeURIComponent(path.trim())})`)
     );
     return md.render(linked);

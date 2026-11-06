@@ -652,6 +652,17 @@ test('gateway with real CouchDB', { timeout: 180_000 }, async t => {
       assert.equal((await fetch(`${url}/s/${encodeURIComponent('公开页')}`)).headers.get('x-robots-tag'), null);
       const database = new DatabaseSync(config.database);
       assert.notEqual(database.prepare('SELECT password_hash FROM shares WHERE id=?').get(page.id).password_hash, 'open sesame');
+      // A page open to search engines says what it is in the page itself; one behind a password or protected does not.
+      const pageTitle = async slug => /<title>(.*?)<\/title>/.exec(await (await fetch(`${url}/s/${slug}`)).text())[1];
+      const published = await api('/shares', 'POST', { vaultId: vault.id, slug: 'listed', mode: 'public', sealed: 'x', indexable: true }, alice, 201);
+      const manifest = JSON.stringify({ title: 'Folder <&>', start: 'nA', notes: { nA: { title: 'First' }, nB: { title: 'Second' } }, files: {} });
+      assert.equal((await put(published, { manifest, nA: '# First\n\nThe text of "the" note.', nB: 'Other.' })).status, 200);
+      assert.equal(await pageTitle('listed'), 'First · Folder &#60;&#38;&#62;');
+      assert.equal(await pageTitle('listed?note=nB'), 'Second · Folder &#60;&#38;&#62;');
+      assert.match(await (await fetch(`${url}/s/listed`)).text(), /<meta name="description" content="First The text of &#34;the&#34; note\.">/);
+      assert.equal(await pageTitle(encodeURIComponent('公开页')), 'Tabularium');
+      assert.equal((await put(published, { manifest: 'ciphertext', key: 'raw', nA: 'ciphertext' })).status, 200);
+      assert.equal(await pageTitle('listed'), 'Tabularium');
       // Expiry: the link answers 410 and the files are gone.
       await api('/shares', 'POST', { vaultId: vault.id, mode: 'encrypted', sealed: 'x', expiresAt: Date.now() - 1 }, alice, 400);
       const brief = await api('/shares', 'POST', { vaultId: vault.id, slug: 'brief', mode: 'encrypted', sealed: 'x', expiresAt: Date.now() + 1500 }, alice, 201);

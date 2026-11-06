@@ -4,6 +4,7 @@
 import MarkdownIt from "markdown-it";
 import { escapeXml } from "@/features/tabularium/epub";
 import { outsideCode, stripFrontMatter } from "@/features/tabularium/render";
+import { stripMarks } from "@/features/tabularium/sensitive";
 import { t } from "../../ui/i18n";
 import { enhance } from "./markdown";
 import { tip } from "../../ui/core";
@@ -17,12 +18,12 @@ const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const name = (path: string) => path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, "");
 
 function rewriteObsidian(markdown: string) {
-    return outsideCode(markdown, (part) =>
+    return outsideCode(stripMarks(markdown), (part) =>
         part
             .replace(/%%[\s\S]*?%%/g, "")
-            .replace(/!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g, (_, target: string, alias: string = "") =>
+            .replace(/!\[\[([^\]|]+?)\\?(?:\|([^\]]*))?\]\]/g, (_, target: string, alias: string = "") =>
                 `![${alias.replace(/^\d+(x\d+)?$/, "")}](embed:${encodeURIComponent(target.trim())})`)
-            .replace(/\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g, (_, target: string, alias?: string) =>
+            .replace(/\[\[([^\]|]+?)\\?(?:\|([^\]]*))?\]\]/g, (_, target: string, alias?: string) =>
                 `[${(alias ?? target).replace(/[[\]]/g, "")}](note:${encodeURIComponent(target.trim())})`)
     );
 }

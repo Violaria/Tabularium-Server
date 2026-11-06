@@ -11,15 +11,25 @@ function mermaid() {
     return loading;
 }
 
-/** Draws the diagrams and formulas under `root` that are not drawn yet. */
-export async function renderDiagrams(root: ParentNode) {
+/**
+ * Draws the diagrams and formulas under `root` that are not drawn yet. `plainLabels` names a font and keeps labels as SVG
+ * text in it, for a diagram that goes on to be a picture, where HTML labels and inherited fonts do not hold.
+ */
+export async function renderDiagrams(root: ParentNode, options: { plainLabels?: string } = {}) {
     await renderMath(root);
     const blocks = [...root.querySelectorAll<HTMLElement>(".mermaid-diagram:not([data-drawn])")];
     if (!blocks.length) return;
     const library = await mermaid();
     const dark = matchMedia("(prefers-color-scheme: dark)").matches && document.documentElement.dataset.side !== "light";
     // Errors show under the source, not as Mermaid's own error graphic at the end of the page.
-    library.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default", fontFamily: "inherit", suppressErrorRendering: true });
+    library.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: dark ? "dark" : "default",
+        fontFamily: options.plainLabels ?? "inherit",
+        suppressErrorRendering: true,
+        ...(options.plainLabels ? { htmlLabels: false, flowchart: { htmlLabels: false } } : {}),
+    });
     for (const block of blocks) {
         block.dataset.drawn = "";
         try {

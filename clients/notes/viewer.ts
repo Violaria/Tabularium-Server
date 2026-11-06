@@ -10,6 +10,7 @@ import { copyCode, enhance } from "./markdown";
 import { renderDiagrams } from "./diagrams";
 import { paintIcon } from "../../ui/mark";
 import { element } from "./dom";
+import { blockInteraction, drawImage, rasterize } from "./rasterize";
 
 // The page comes in its owner's colour theme; a custom theme's colours are set here, as the page allows no inline styles.
 {
@@ -92,10 +93,13 @@ interface Meta {
     mode: "encrypted" | "public";
     password: boolean;
     access?: string;
+    files: string[];
 }
 async function open(meta: Meta) {
     if (meta.mode === "public") {
         access = meta.access;
+        // A protected public page is encrypted in transit, with its key beside the content.
+        if (meta.files.includes("key")) key = await contentKey(await bytes("key"));
         manifest = JSON.parse(decoder.decode(await bytes("manifest"))) as Manifest;
         return;
     }
@@ -140,7 +144,17 @@ async function openPublicWithPassword() {
 const placeholder = (kind: string) =>
     `<span class="no-access" title="${escapeXml(t("viewer.noAccessTitle"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.7 5.1A10 10 0 0 1 12 5c4.6 0 8.4 3.2 9.6 7a10.6 10.6 0 0 1-2.4 3.8M6.6 6.6A10.7 10.7 0 0 0 2.4 12c1.2 3.8 5 7 9.6 7a9.8 9.8 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/></svg>${escapeXml(t("viewer.noAccess"))}<span class="sr-only"> (${escapeXml(kind)})</span></span>`;
 
-function render(markdown: string) {
+/** The address of a note in this share, keeping the link's key, so it also opens in a new tab. */
+const noteAddress = (id: string) => `?note=${encodeURIComponent(id)}${location.hash}`;
+const headingOf = (address: string) => {
+    try {
+        return decodeURIComponent(address.slice(1));
+    } catch {
+        return address.slice(1);
+    }
+};
+
+function render(markdown: string, current: string) {
     const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
     enhance(md, { copy: t("notes.copyCode") });
     const opened = new WeakMap<object, "denied" | "plain" | "link">();
@@ -149,10 +163,13 @@ function render(markdown: string) {
         const alt = tokens[index].content;
         if (src.startsWith("share:denied:")) return placeholder(src.slice(13));
         if (src.startsWith("share:")) {
-            const id = src.slice(6);
+            const id = src.slice(6).replace(/#.*$/, "");
+            // An embedded note reads as a link to it, as in web notes.
+            if (manifest.notes[id]) return `<a href="${escapeXml(noteAddress(id))}" class="internal" data-note="${escapeXml(id)}">${escapeXml(alt || manifest.notes[id].title)}</a>`;
             const file = manifest.files[id];
             if (!file) return placeholder("file");
             if (file.type.startsWith("image/")) return `<img data-file="${escapeXml(id)}" alt="${escapeXml(alt || file.name)}">`;
+            if (manifest.protect) return `<span class="share-file">${escapeXml(file.name)}</span>`;
             return `<a href="#" class="share-file" data-file="${escapeXml(id)}">${escapeXml(t("viewer.download", { name: file.name }))}</a>`;
         }
         if (EXTERNAL.test(src)) return `<a class="remote-image" href="${escapeXml(src)}" target="_blank" rel="noopener noreferrer">${escapeXml(t("notes.remoteImage", { name: alt || src }))}</a>`;
@@ -171,18 +188,23 @@ function render(markdown: string) {
             opened.set(token, "denied");
             return placeholder(href.slice(13));
         }
-        const id = href.startsWith("share:") ? href.slice(6) : undefined;
+        const [id, section] = href.startsWith("share:") ? [href.slice(6).replace(/#.*$/, ""), /#.*$/.exec(href)?.[0]] : [undefined, undefined];
         if (id && manifest.notes[id]) {
             opened.set(token, "link");
-            return `<a href="?note=${escapeXml(id)}" class="internal" data-note="${escapeXml(id)}">`;
+            return `<a href="${escapeXml(noteAddress(id))}" class="internal" data-note="${escapeXml(id)}"${section ? ` data-heading="${escapeXml(headingOf(section))}"` : ""}>`;
+        }
+        if (id && manifest.files[id] && manifest.protect) {
+            opened.set(token, "plain");
+            return `<span class="share-file">`;
         }
         if (id && manifest.files[id]) {
             opened.set(token, "link");
             return `<a href="#" class="share-file" data-file="${escapeXml(id)}">`;
         }
+        // A heading of this note: scrolled to by the page, so the address keeps the key that follows its `#`.
         if (href.startsWith("#")) {
             opened.set(token, "link");
-            return self.renderToken(tokens, index, options);
+            return `<a href="${escapeXml(noteAddress(current))}" class="internal" data-note="${escapeXml(current)}" data-heading="${escapeXml(headingOf(href))}">`;
         }
         opened.set(token, "plain");
         return `<span class="unresolved">`;
@@ -205,22 +227,54 @@ async function blobUrl(id: string) {
     return url;
 }
 
-async function show(id: string, push: boolean) {
+/** The headings of the note on show by their text; kept here, as a protected page has no text to search. */
+let headings = new Map<string, HTMLElement>();
+/** Which heading each link names, on a protected page, whose elements hold no text. */
+let headingLinks = new WeakMap<HTMLElement, string>();
+const toHeading = (name: string) => headings.get(name.trim().toLowerCase())?.scrollIntoView();
+
+/** The note an address asks for; an address that no longer names one opens the share's first note. */
+function wanted() {
+    const id = new URLSearchParams(location.search).get("note");
+    return id && manifest.notes[id] ? id : manifest.start;
+}
+
+let shown: string | undefined;
+async function show(id: string, push: boolean, keepScroll = false) {
     const note = manifest.notes[id];
     if (!note) return;
+    shown = id;
+    const scroller = root.querySelector<HTMLElement>(".main");
+    const position = { main: scroller?.scrollTop ?? 0, page: window.scrollY };
     if (push) history.pushState(null, "", `?note=${encodeURIComponent(id)}${location.hash}`);
     const main = root.querySelector<HTMLElement>(".main");
     setMarkup(main, `<div class="note-head"><h1 class="title">${escapeXml(note.title)}</h1></div><article class="md-body"></article><footer class="share-foot">${escapeXml(t("viewer.generated", { time: formatDate(manifest.generatedAt) }))}</footer>`);
     const article = main.querySelector("article");
-    setMarkup(article, render(decoder.decode(await bytes(id))));
+    setMarkup(article, render(decoder.decode(await bytes(id)), id));
     // A note that starts with its own title as a heading does not show the title twice.
     const first = article.firstElementChild;
     if (first?.tagName === "H1" && first.textContent?.trim() === note.title) main.querySelector(".note-head")?.remove();
-    for (const image of article.querySelectorAll<HTMLImageElement>("img[data-file]")) void blobUrl(image.dataset.file).then((url) => (image.src = url));
-    // Diagrams are drawn as in web notes, by the same code.
-    void renderDiagrams(article);
-    main.scrollTop = 0;
-    window.scrollTo(0, 0);
+    headings = new Map([...article.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")].map((heading) => [heading.textContent?.trim().toLowerCase() ?? "", heading]));
+    if (manifest.protect) {
+        main.classList.add("drawing");
+        headingLinks = new WeakMap();
+        for (const link of article.querySelectorAll<HTMLElement>("[data-heading]")) {
+            headingLinks.set(link, link.dataset.heading);
+            delete link.dataset.heading;
+        }
+        await Promise.all([...article.querySelectorAll<HTMLImageElement>("img[data-file]")].map(async (image) => drawImage(image, await bytes(image.dataset.file), manifest.files[image.dataset.file].type)));
+        await renderDiagrams(article, { plainLabels: getComputedStyle(article).fontFamily });
+        // Another note was opened meanwhile.
+        if (shown !== id) return;
+        await rasterize(main);
+        main.classList.remove("drawing");
+    } else {
+        for (const image of article.querySelectorAll<HTMLImageElement>("img[data-file]")) void blobUrl(image.dataset.file).then((url) => (image.src = url));
+        // Diagrams are drawn as in web notes, by the same code.
+        void renderDiagrams(article);
+    }
+    main.scrollTop = keepScroll ? position.main : 0;
+    window.scrollTo(0, keepScroll ? position.page : 0);
     document.title = `${note.title} · ${manifest.title}`;
     for (const row of root.querySelectorAll<HTMLElement>(".row")) row.classList.toggle("current", row.dataset.note === id);
     expandTo(id);
@@ -266,8 +320,13 @@ function layout() {
             const children = target.closest("li").querySelector<HTMLElement>(":scope > .children");
             children.hidden = !children.hidden;
             target.setAttribute("aria-expanded", String(!children.hidden));
-        } else if (target.dataset.note) void show(target.dataset.note, true).catch(failed);
-        else if (target.dataset.file) {
+        } else if (target.dataset.note) {
+            const { note } = target.dataset;
+            const heading = headingLinks.get(target) ?? target.dataset.heading;
+            const opening = note === shown && heading !== undefined ? Promise.resolve() : show(note, true);
+            void opening.then(() => heading !== undefined && toHeading(heading)).catch(failed);
+        }
+        else if (target.dataset.file && !manifest.protect) {
             const id = target.dataset.file;
             void blobUrl(id).then((url) => {
                 const link = element("a");
@@ -277,9 +336,27 @@ function layout() {
             }, failed);
         }
     });
-    window.addEventListener("popstate", () => void show(new URLSearchParams(location.search).get("note") ?? manifest.start ?? "", false).catch(failed));
-    const start = new URLSearchParams(location.search).get("note") ?? manifest.start;
-    if (start && manifest.notes[start]) return show(start, false);
+    window.addEventListener("popstate", () => void show(wanted() ?? "", false).catch(failed));
+    if (manifest.protect) {
+        blockInteraction();
+        // Lines and colours are fixed in the drawings: a new width or colour scheme draws the note again.
+        let width = window.innerWidth;
+        let timer: number | undefined;
+        const again = () => {
+            window.clearTimeout(timer);
+            timer = window.setTimeout(() => {
+                if (shown) void show(shown, false, true).catch(failed);
+            }, 200);
+        };
+        window.addEventListener("resize", () => {
+            if (window.innerWidth === width) return;
+            width = window.innerWidth;
+            again();
+        });
+        matchMedia("(prefers-color-scheme: dark)").addEventListener("change", again);
+    }
+    const start = wanted();
+    if (start) return show(start, false);
     setMarkup(root.querySelector(".main"), `<p class="hint share-empty">${escapeXml(t("viewer.empty"))}</p>`);
 }
 

@@ -12,6 +12,7 @@
     import { tags } from "@lezer/highlight";
     import { format, insertTemplate, type Format, type Template, type TextEdit } from "@/features/tabularium/formatting";
     import { FORMAT_ACTIONS, HEADINGS, LINE_ACTIONS } from "@/features/tabularium/editorActions";
+    import { sensitiveMarks } from "@/features/tabularium/sensitiveEditor";
     import { livePreview, type LiveOptions } from "./livePreview";
     import { t } from "../../ui/i18n";
     import { popMenu } from "../../ui/core";
@@ -96,6 +97,7 @@
                     markdown({ base: markdownLanguage }),
                     syntaxHighlighting(style),
                     presentation.of(mode === "live" ? livePreview(live) : []),
+                    sensitiveMarks,
                     EditorState.readOnly.of(readonly),
                     EditorView.editable.of(!readonly),
                     keymap.of([

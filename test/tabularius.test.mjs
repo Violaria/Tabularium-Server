@@ -12,6 +12,16 @@ import { apply, build, ProposalError } from '../dist/tabularius/proposals.js';
 import { readFile, stat, utimes } from 'node:fs/promises';
 import { open, seal } from '../dist/tabularius/client.js';
 
+test('sensitive marks: masked for the model, written back with an edit, and the same marks as the clients write', async () => {
+  const source = await readFile(new URL('../../obsidian/src/features/tabularium/sensitive.ts', import.meta.url), 'utf8');
+  const mark = name => JSON.parse(new RegExp(`${name} = ("[^"]+")`).exec(source)[1]);
+  const open = mark('MARK_OPEN'), close = mark('MARK_CLOSE');
+  const filter = createFilter('', '');
+  const note = `The word ${open}hunter2${close} here.\nNext ${open}open to the end\nLast`;
+  assert.equal(filter.mask(note), `The word ${REDACTED} here.\nNext ${REDACTED}\nLast`);
+  assert.equal(applyMaskedEdit(filter, note, `The word ${REDACTED} here.`, `A word ${REDACTED} there.`), `A word ${open}hunter2${close} there.\nNext ${open}open to the end\nLast`);
+});
+
 test('chunks follow headings, skip front matter and keep fenced headings as text', () => {
   const chunks = chunk('---\ntitle: x\n---\n# 标题\n\n导语\n\n## 安装\n\n```bash\n# 注释不是标题\napt install x\n```\n\n### 验证\n\n运行 x --version\n');
   assert.deepEqual(chunks.map(c => c.heading), ['标题', '标题 > 安装', '标题 > 安装 > 验证']);

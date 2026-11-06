@@ -264,6 +264,27 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
     return page.toString('utf8').replace('<html lang="en" data-theme="sakura">', `<html lang="en"${attributes}>`);
   }
 
+  /**
+   * The title and description of a page open to search engines, which read them from the page itself. Pages that are
+   * protected by a password stay as they are.
+   */
+  function described(page: string, share: Share | undefined, address: string) {
+    if (!share?.indexable || share.password || state(share) !== 'active') return page;
+    const read = (name: string) => (db.prepare('SELECT data FROM share_files WHERE share_id=? AND name=?').get(share.id, name) as { data: Uint8Array } | undefined)?.data;
+    const stored = read('manifest');
+    // A protected page's manifest is encrypted.
+    if (!stored || read('key')) return page;
+    const manifest = JSON.parse(Buffer.from(stored).toString('utf8')) as { title: string; start?: string; notes: Record<string, { title: string }> };
+    const asked = new URL(address, 'http://local').searchParams.get('note');
+    const id = asked && manifest.notes[asked] ? asked : manifest.start;
+    const note = id ? manifest.notes[id] : undefined;
+    const title = note && note.title !== manifest.title ? `${note.title} · ${manifest.title}` : manifest.title;
+    const text = id ? Buffer.from(read(id) ?? []).toString('utf8') : '';
+    const summary = text.replace(/```[\s\S]*?```/g, ' ').replace(/share:\S+/g, ' ').replace(/[#>*_`~|!()[\]-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    const clean = (value: string) => value.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
+    return page.replace('<title>Tabularium</title>', `<title>${clean(title)}</title>${summary ? `<meta name="description" content="${clean(summary)}">` : ''}`);
+  }
+
   return {
     /** Handles a share route; returns false when the path is not one. */
     async handle(req: IncomingMessage, res: ServerResponse, path: string, route: string[], method: string) {
@@ -280,7 +301,7 @@ export function createShares({ db, settings, session, deviceAuth, audit, limit, 
           ...(share?.indexable && state(share) === 'active' ? {} : { 'x-robots-tag': 'noindex, nofollow' }),
           'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
         });
-        res.end(method === 'HEAD' ? undefined : themed(viewer, share?.theme ?? null, share?.theme_recipe ?? null));
+        res.end(method === 'HEAD' ? undefined : described(themed(viewer, share?.theme ?? null, share?.theme_recipe ?? null), share, req.url!));
         return true;
       }
       if (route[0] === 'shares' || (route[0] === 'public' && route[1] === 'shares')) {

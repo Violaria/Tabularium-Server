@@ -19,7 +19,7 @@
     import { askText, confirmAction, icon, markShapes, popMenu, message as toast } from "../../ui/core";
     import { INSERT_ACTIONS } from "@/features/tabularium/editorActions";
     import ShareDialog from "@/features/tabularium/share/ShareDialog.svelte";
-    import { Sharing } from "@/features/tabularium/share/sharing";
+    import { ShareError, Sharing } from "@/features/tabularium/share/sharing";
     import type { ShareSource, ShareTreeNode } from "@/features/tabularium/share/package";
     import { sessionShareApi } from "./share";
     import { forgetUnlocked, keepUnlocked, unlockedVault } from "./unlocked";
@@ -112,9 +112,14 @@
     // Shares of the open vault; changes saved here update the shares they belong to after a quiet period.
     let sharing: Sharing | undefined;
     const SHARE_DELAY_MS = 10_000;
+    const CATCH_UP_DELAY_MS = 15_000;
+    let catchUpTimer: number | undefined;
+    let catchUpPending = false;
     let shareTimer: number | undefined;
     const shareChanges = new Set<string>();
     const shareRenames: (readonly [string, string])[] = [];
+    /** Revisions the shares last saw, to find the changes other devices made; undefined until the vault has opened. */
+    let shareRevisions: Map<string, string> | undefined;
     let objectUrls: string[] = [];
     let refreshTimer: number | undefined;
     let saveTimer: number | undefined;
@@ -323,6 +328,9 @@
         status = offline ? t("notes.offlineStatus") : t("notes.synced");
         stateTimer = window.setInterval(() => void watchState(), 1000);
         phase = "open";
+        shareRevisions = new Map(files.map((f) => [f.path, f.rev]));
+        catchUpPending = true;
+        armCatchUp();
         if (pending?.vault === target.id) await showLinked();
     }
 
@@ -341,6 +349,8 @@
     }
     function online() {
         if (runtime) void runtime.reconnect();
+        if (shareChanges.size) touched([]);
+        armCatchUp();
     }
     window.addEventListener("online", online);
 
@@ -351,6 +361,7 @@
     async function refresh() {
         if (!runtime) return;
         files = await runtime.files();
+        noticeChanges(files);
         if (!offline) status = t("notes.syncedAt", { time: formatDate(Date.now()) });
         const file = current ? files.find((f) => f.path === current) : undefined;
         if (!current || !file) return;
@@ -691,8 +702,11 @@
 
     async function lock(reason = "") {
         await flush().catch(() => undefined);
+        window.clearTimeout(catchUpTimer);
+        catchUpPending = false;
         await updateShares().catch(() => undefined);
         sharing = undefined;
+        shareRevisions = undefined;
         const active = runtime;
         runtime = undefined;
         window.clearTimeout(refreshTimer);
@@ -777,12 +791,41 @@
         const ordered = sortedTree(all, vault?.name ?? "", sortRules);
         const find = (node: ShareTreeNode, path: string): ShareTreeNode | undefined =>
             node.path === path ? node : node.children.map((child) => find(child, path)).find(Boolean);
+        const revisions = new Map(all.map((f) => [f.path, f.rev]));
         return {
             files: all.map((f) => f.path),
+            revision: (path) => revisions.get(path) ?? "",
             read: (path) => active.read(path),
             readBinary: (path) => active.readBinary(path),
             tree: (folder) => find(ordered, folder) ?? { name: folder, path: folder, folder: true, children: [] },
         };
+    }
+    /** Hands the changes that reached this replica, from any device, to the shares. */
+    function noticeChanges(list: NotesFile[]) {
+        if (!shareRevisions) return;
+        const changed = list.filter((f) => shareRevisions!.get(f.path) !== f.rev).map((f) => f.path);
+        const present = new Set(list.map((f) => f.path));
+        changed.push(...[...shareRevisions.keys()].filter((path) => !present.has(path)));
+        shareRevisions = new Map(list.map((f) => [f.path, f.rev]));
+        if (changed.length) {
+            touched(changed);
+            armCatchUp();
+        }
+    }
+    /** Changes made while this page was closed are still arriving when it opens: the shares catch up once they have settled. */
+    function armCatchUp() {
+        if (!catchUpPending || offline) return;
+        window.clearTimeout(catchUpTimer);
+        catchUpTimer = window.setTimeout(() => void catchUpShares(), CATCH_UP_DELAY_MS);
+    }
+    function reportShares({ withdrawn, failed }: Awaited<ReturnType<Sharing["refresh"]>>) {
+        for (const share of withdrawn) toast(t("share.withdrawnDeleted", { address: share.view.slug }));
+        for (const { share, error: reason } of failed) toast(t("share.updateFailedOne", { address: share.view.slug, error: reason instanceof ShareError ? t("share.tooLarge", { size: `${Math.ceil(reason.size / 1048576)} MB` }) : serverError(message(reason)) }));
+    }
+    async function catchUpShares() {
+        if (!sharing || offline) return;
+        catchUpPending = false;
+        await sharing.catchUp().then(reportShares, (e) => (error = t("share.updateFailed", { error: serverError(message(e)) })));
     }
     function touched(paths: string[], renames: (readonly [string, string])[] = []) {
         for (const path of paths) shareChanges.add(path);
@@ -796,8 +839,19 @@
         const paths = [...shareChanges];
         const renames = shareRenames.splice(0);
         shareChanges.clear();
-        const { withdrawn } = await sharing.refresh({ paths, renames });
-        for (const share of withdrawn) toast(t("share.withdrawnDeleted", { address: share.view.slug }));
+        // Changes that could not reach the server stay, for the next change or when the network returns.
+        const retry = () => {
+            for (const path of paths) shareChanges.add(path);
+            shareRenames.push(...renames);
+        };
+        try {
+            const result = await sharing.refresh({ paths, renames });
+            reportShares(result);
+            if (result.failed.some(({ error: reason }) => !(reason instanceof ShareError))) retry();
+        } catch (e) {
+            retry();
+            throw e;
+        }
     }
     async function share(item: KindleItem) {
         if (!sharing || !runtime) return;
@@ -830,6 +884,7 @@
                     name: item.folder ? nameOf(item.path) : nameOf(item.path).replace(/\.md$/i, ""),
                     base,
                     existing,
+                    unreadable: shares.filter((s) => !s.record).length,
                     t: (key: string, params?: Record<string, string | number>) => t(key as Parameters<typeof t>[0], params),
                     serverError,
                     formatDate,

@@ -732,6 +732,28 @@
 }
 
 /* The share viewer (/s/…): the same reading layout without the shell. */
+.notes .tabularium-sensitive {
+    text-decoration: underline dotted color-mix(in oklab, currentColor 45%, transparent);
+    text-underline-offset: 3px;
+}
+html.share-protected,
+html.share-protected * {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+.share-viewer .main.drawing > * {
+    visibility: hidden;
+}
+.share-viewer .share-image {
+    max-width: 100%;
+    height: auto;
+}
+@media print {
+    html.share-protected body {
+        display: none;
+    }
+}
 .share-viewer {
     min-height: 100vh;
     background: var(--bg);

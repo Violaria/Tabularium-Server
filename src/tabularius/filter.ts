@@ -8,6 +8,9 @@ const BUILT_IN = [
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\bAIza[0-9A-Za-z_-]{35}\b/g,
 ];
+// Text the owner marked as sensitive in the editor, with its marks, so an edit writes both back. Without a closing mark it
+// runs to the end of the line. The clients define the same marks in features/tabularium/sensitive.ts.
+export const SENSITIVE = /\u2061\u2062\u2063.*?(?:\u2063\u2062\u2061|$)/gm;
 // Only the value (group 1) is masked.
 const ASSIGNMENT = /(?<![A-Za-z0-9_])(?:password|passwd|passphrase|pwd|token|secret|api[_-]?key|access[_-]?key|密码|口令|令牌|密钥)\s*[:=：]\s*(\S+)/dgi;
 export const REDACTED = '[REDACTED]';
@@ -28,7 +31,7 @@ export function createFilter(excluded: string, masks: string): Filter {
   // All matches are found on the original text and merged, so a masked text maps back to the original exactly.
   function redact(text: string): Redaction {
     const ranges: [number, number][] = [];
-    for (const pattern of BUILT_IN)
+    for (const pattern of [...BUILT_IN, SENSITIVE])
       for (const match of text.matchAll(pattern)) if (match[0]) ranges.push([match.index, match.index + match[0].length]);
     for (const pattern of extra) {
       const matcher = pattern.matcher(text);

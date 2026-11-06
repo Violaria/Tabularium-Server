@@ -22,7 +22,7 @@ function relativePath(from: string, to: string) {
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const MARKDOWN = /(\]\()(<[^>\n]*>|[^()\s]+)(\))/g;
-const WIKI = /\[\[([^\]|#\n]+)(#[^\]|\n]*)?(\|[^\]\n]*)?\]\]/g;
+const WIKI = /\[\[([^\]|#\n]+?)(#[^\]|\n]*?)?(\\?\|[^\]\n]*)?\]\]/g;
 
 // The vault's link style: spaces, parentheses, `#` and `%` percent-encoded, everything else as is.
 const encode = (path: string) => path.replace(/[%() #]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);

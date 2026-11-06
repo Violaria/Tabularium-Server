@@ -343,7 +343,7 @@ function inline(view: EditorView, options: LiveOptions): DecorationSet {
                 add(current.from, current.from, title);
                 if (hidden) add(current.from + callout[1].length, current.from + callout[0].length, hide);
             }
-            for (const match of text.matchAll(/(!?)\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g)) {
+            for (const match of text.matchAll(/(!?)\[\[([^\]|]+?)\\?(?:\|([^\]]*))?\]\]/g)) {
                 const start = current.from + match.index;
                 const end = start + match[0].length;
                 if (inCode(start)) continue;
