@@ -9,6 +9,7 @@ import { inlineMathEnd } from "./math";
 import { renderDiagrams } from "./diagrams";
 import { renderMath } from "./math";
 import { element } from "./dom";
+import { showMarked } from "@/features/tabularium/sensitiveEditor";
 
 export interface LiveOptions {
     /** An object URL for an embedded vault file that is an image, or undefined. */
@@ -166,6 +167,7 @@ class Block extends WidgetType {
         } else {
             // The table's HTML comes from the reading view's renderer (raw HTML disabled there).
             box.replaceChildren(...new DOMParser().parseFromString(`<body>${view.state.facet(liveOptions).render(this.source)}</body>`, "text/html").body.childNodes);
+            showMarked(box);
         }
         box.addEventListener("mousedown", (event) => {
             event.preventDefault();

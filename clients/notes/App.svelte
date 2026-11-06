@@ -437,7 +437,7 @@
             const path = current ? resolveLinkpath(target, current, files.map((f) => f.path)) : undefined;
             return path && /\.(png|jpe?g|gif|svg|webp|bmp|avif)$/i.test(path) ? imageUrl(path) : undefined;
         },
-        render: (markdown: string) => renderPreview(markdown, (target) => (current ? resolveLinkpath(target, current, files.map((f) => f.path)) : undefined)),
+        render: (markdown: string) => renderPreview(markdown, (target) => (current ? resolveLinkpath(target, current, files.map((f) => f.path)) : undefined), { keepMarks: true }),
     };
     /** The split view's preview follows the draft a moment after typing stops. */
     function drawSplit() {

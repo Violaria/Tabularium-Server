@@ -18,7 +18,7 @@ const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const name = (path: string) => path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, "");
 
 function rewriteObsidian(markdown: string) {
-    return outsideCode(stripMarks(markdown), (part) =>
+    return outsideCode(markdown, (part) =>
         part
             .replace(/%%[\s\S]*?%%/g, "")
             .replace(/!\[\[([^\]|]+?)\\?(?:\|([^\]]*))?\]\]/g, (_, target: string, alias: string = "") =>
@@ -39,7 +39,7 @@ function target(href: string) {
     }
 }
 
-export function renderPreview(markdown: string, resolve: Resolver, options: { sortingNotes?: boolean } = {}) {
+export function renderPreview(markdown: string, resolve: Resolver, options: { sortingNotes?: boolean; keepMarks?: boolean } = {}) {
     const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
     enhance(md, { copy: t("notes.copyCode") });
     if (options.sortingNotes) foldSortingNotes(md, tip);
@@ -75,5 +75,6 @@ export function renderPreview(markdown: string, resolve: Resolver, options: { so
         while (open > 0 && tokens[open].type !== "link_open") open--;
         return internal.get(tokens[open]) === null ? "</span>" : self.renderToken(tokens, index, options);
     };
-    return md.render(rewriteObsidian(stripFrontMatter(markdown)));
+    const text = stripFrontMatter(markdown);
+    return md.render(rewriteObsidian(options.keepMarks ? text : stripMarks(text)));
 }
