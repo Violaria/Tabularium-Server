@@ -58,7 +58,7 @@ export async function inspect(couch: Couch, database: string, passphrase: string
 export interface Hosted { vaultId: string; deviceId: string; secret: string; passphrase: string; tweaks: Record<string, unknown> }
 export interface ClientState { running: boolean; replicated: boolean; restarts: number; log: string[] }
 
-/** The upstream CLI daemons, one per vault: a plaintext working copy at `<root>/<vault>/vault`. */
+/** The Tabularium CLI daemons, one per vault: a plaintext working copy at `<root>/<vault>/vault`. */
 export function createClients(root: string, cli: string, syncUrl: () => string) {
   const processes = new Map<string, { child?: ChildProcess; stopped: boolean; state: ClientState; timer?: NodeJS.Timeout }>();
   const dir = (vaultId: string) => join(root, vaultId);

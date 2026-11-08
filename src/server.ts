@@ -286,7 +286,7 @@ export async function createGateway(config: Config) {
       method: req.method, headers: { ...headers(req.headers), authorization: basic(config.couch.syncUser, config.couch.syncPassword),
         ...(write ? { 'content-length': String(write.data.length) } : {}) },
     }, response => {
-      // The rebuilding device has written the new milestone, so upstream locking now protects the other devices.
+      // The rebuilding device has written the new milestone, so the sync core's locking now protects the other devices.
       if (completesRebuild && response.statusCode! < 300) { clearRebuild(device.vault_id); audit(device.user_id, 'vault.rebuild-complete', device.vault_id); }
       response.on('error', () => res.destroy());
       if (!write?.rejected.length) { res.writeHead(response.statusCode!, headers(response.headers)); response.pipe(res); return; }

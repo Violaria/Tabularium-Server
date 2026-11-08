@@ -1,5 +1,5 @@
 /**
- * Read-only Tabularium runtime for the web notes page: the upstream core with an OPFS directory as its vault.
+ * Read-only Tabularium runtime for the web notes page: the sync core with an OPFS directory as its vault.
  * Settings live in memory only, so the passphrase never reaches browser storage.
  */
 import { moveLocalDatabase } from "@tabularium/sync-core/compat/pouchdb/moveLocalDatabase";

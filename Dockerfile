@@ -20,7 +20,7 @@ FROM node:24.10.0-bookworm-slim@sha256:b8d2197aff9129d16c801a3e3e1b2a873c4946480
 WORKDIR /app
 COPY --from=build /app/apps/server/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
-# Tabularius's hosted clients: the upstream CLI bundle with its packages, collected on the host (npm run build:cli).
+# Tabularius's hosted clients: the Tabularium CLI bundle with its packages, collected on the host (npm run build:cli).
 COPY apps/server/cli-dist ./cli
 COPY apps/server/package.json ./package.json
 ENV HOST=0.0.0.0 PORT=3000 TABULARIUM_DATABASE=/data/tabularium.sqlite
