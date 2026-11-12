@@ -6,12 +6,12 @@ Ministrator [Tabularii](https://github.com/Violaria/Tabularium): porta Node.js a
 
 ## Quid facit
 
-- Rationes usorum, tabularia et testimonia instrumentorum. Inscriptio libera non est; administratores rationes creant. Quodque tabularium suum repositorium CouchDB est. Instrumenta testimonia sua accipiunt, triginta dies valida, quae clientes dum adhibentur renovant.
+- Rationes usorum, armaria et testimonia instrumentorum. Inscriptio libera non est; administratores rationes creant. Quodque armarium suum repositorium CouchDB est. Instrumenta testimonia sua accipiunt, triginta dies valida, quae clientes dum adhibentur renovant.
 - Porta synchronizationis. Additamentum Obsidian et cliens lineae mandatorum per `/sync` replicant, fluxu mutationum diuturno incluso. Porta documenta reicit quae cryptographia ab extremo ad extremum cum viis obscuratis carent, ita ut ministrator nihil nisi textum cryptatum servet. CouchDB tantum in rete interno Compose attingi potest.
-- Applicatio interretialis sub `/`: consola administrationis, commentarii interretiales, cliens tabulariorum in navigatro (in navigatro decrypti tessera arcana tabularii, quae ad ministratorem numquam pervenit), optiones rationis, paginae commentariorum communicatorum sub `/s/<inscriptio>`.
+- Applicatio interretialis sub `/`: consola administrationis, commentarii interretiales, cliens armariorum in navigatro (in navigatro decrypti tessera arcana armarii, quae ad ministratorem numquam pervenit), optiones rationis, paginae commentariorum communicatorum sub `/s/<inscriptio>`.
 - Missio ad Kindle: additamentum et commentarii interretiales EPUB faciunt, quod ministrator per rationem SMTP constitutam mittit.
-- Exempla tutelaria statuta repositorii applicationis et omnium tabulariorum, plena et incrementalia, in capsam insertam scripta, quae per `deploy/backup/cli.ts restore-scheduled` restitui possunt.
-- Tabularius, curator artificialis optionalis, a domino singulis tabulariis accensus. Tum demum ministrator tesseram arcanam illius tabularii servat (per `TABULARIUS_SECRET_KEY` cryptatam) et copiam operis apertam tenet, ut curator commentarios quaerat, cum citationibus respondeat et emendationes proponat quas dominus recenset antequam rescribuntur.
+- Exempla tutelaria statuta repositorii applicationis et omnium armariorum, plena et incrementalia, in capsam insertam scripta, quae per `deploy/backup/cli.ts restore-scheduled` restitui possunt.
+- Tabularius, curator artificialis optionalis, a domino singulis armariis accensus. Tum demum ministrator tesseram arcanam illius armarii servat (per `TABULARIUS_SECRET_KEY` cryptatam) et copiam operis apertam tenet, ut curator commentarios quaerat, cum citationibus respondeat et emendationes proponat quas dominus recenset antequam rescribuntur.
   - Praebitores: Anthropic, OpenAI, Gemini, DeepSeek, vLLM, Ollama et TensorRT-LLM; rationes omnia mandata quae cuiusque praebitoris API accipit statuunt.
   - Instrumenta optionalia: repositorium scientiae locale RAGFlow, quaestio in interrete, SSH ad hospites inscriptos, arenarium ad codicem exsequendum.
   - Textus ad praebitorem missus per colum exeuntem transit qui testimonia celat.
